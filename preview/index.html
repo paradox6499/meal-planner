@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<title>Meal planner — preview</title>
+<script type="importmap">
+{
+  "imports": {
+    "react": "https://esm.sh/react@18.3.1",
+    "react/jsx-runtime": "https://esm.sh/react@18.3.1/jsx-runtime",
+    "react/jsx-dev-runtime": "https://esm.sh/react@18.3.1/jsx-dev-runtime",
+    "react-dom": "https://esm.sh/react-dom@18.3.1",
+    "react-dom/client": "https://esm.sh/react-dom@18.3.1/client",
+    "lucide-react": "https://esm.sh/lucide-react@0.474.0?deps=react@18.3.1,react-dom@18.3.1"
+  }
+}
+</script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>html,body,#root{height:100%;margin:0}</style>
+</head>
+<body>
+<!-- Мок window.Telegram — ТОЛЬКО для локального просмотра вне настоящего
+     Telegram (там его подставляет сам клиент). В App.jsx использования этого
+     объекта не мокаются, это просто проверка, что реальный код (getTelegramFirstName)
+     корректно реагирует на его наличие. -->
+<script>
+  window.Telegram = { WebApp: { initDataUnsafe: { user: { first_name: "Ангелина" } } } };
+</script>
+<div id="root">Загрузка…</div>
+<script type="module">
+  // Локальный просмотрщик src/App.jsx без node/npm: JSX -> JS через Babel в
+  // браузере, React/react-dom/lucide-react — как настоящие ES-модули с CDN
+  // (esm.sh), связанные через import map с исходным кодом. Единственный
+  // источник правды — файлы в src/, этот файл их не копирует, только грузит.
+  //
+  // Относительные импорты между локальными файлами (например App.jsx -> ./data/recipes.js)
+  // не резолвятся сами из blob: URL (он не иерархический), поэтому здесь —
+  // самодельный мини-резолвер: рекурсивно грузим каждый локальный модуль,
+  // прогоняем через Babel и подменяем текст относительного импорта на blob-URL
+  // уже собранного модуля, ДО того как сами оборачиваем текущий файл в blob.
+  const root = document.getElementById('root');
+  const moduleCache = new Map();
+
+  async function loadLocalModule(path) {
+    if (moduleCache.has(path)) return moduleCache.get(path);
+
+    const res = await fetch(path, { cache: 'no-store' });
+    if (!res.ok) throw new Error(`Не удалось загрузить ${path}: ${res.status}`);
+    let src = await res.text();
+
+    if (path.endsWith('.json')) {
+      // Babel не умеет "модуль = JSON" — оборачиваем сами. В реальной сборке
+      // (Vite и т.п.) `import x from "./file.json"` работает из коробки,
+      // это только особенность самодельного браузерного загрузчика.
+      const blobUrl = URL.createObjectURL(
+        new Blob([`export default ${src};`], { type: 'text/javascript' })
+      );
+      moduleCache.set(path, blobUrl);
+      return blobUrl;
+    }
+
+    const relImportRe = /from\s+["'](\.[^"']+)["']/g;
+    const relPaths = new Set();
+    for (const m of src.matchAll(relImportRe)) relPaths.add(m[1]);
+
+    for (const relPath of relPaths) {
+      const resolvedPath = new URL(relPath, 'http://local' + path).pathname;
+      const childBlobUrl = await loadLocalModule(resolvedPath);
+      src = src.split(`"${relPath}"`).join(`"${childBlobUrl}"`).split(`'${relPath}'`).join(`'${childBlobUrl}'`);
+    }
+
+    const { code } = Babel.transform(src, {
+      presets: [['react', { runtime: 'automatic' }]],
+      filename: path,
+    });
+    const blobUrl = URL.createObjectURL(new Blob([code], { type: 'text/javascript' }));
+    moduleCache.set(path, blobUrl);
+    return blobUrl;
+  }
+
+  try {
+    const appBlobUrl = await loadLocalModule('/src/App.jsx');
+    const mod = await import(appBlobUrl);
+
+    const React = await import('react');
+    const { createRoot } = await import('react-dom/client');
+    createRoot(root).render(React.createElement(mod.default));
+  } catch (err) {
+    root.innerHTML = `<pre style="color:#B4472B;white-space:pre-wrap;padding:16px;font:13px monospace">${String(err && err.stack || err)}</pre>`;
+    console.error(err);
+  }
+</script>
+</body>
+</html>
