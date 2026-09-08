@@ -10,6 +10,7 @@ import {
   recipeHasAllergen,
   effectiveRecipeCost,
 } from "./data/recipes.js";
+import { buildCartFromShoppingList } from "./lib/vkusvillMcp.js";
 
 // ---------- UI-конфигурация (не контент рецептов — та живёт в data/recipes.js) ----------
 
@@ -475,6 +476,7 @@ export default function MealPlanner() {
         {done && planView && (
           <ResultView
             plan={planView}
+            storeId={store}
             storeName={STORES.find((s) => s.id === store)?.name}
             budget={budget}
             family={family}
@@ -523,8 +525,33 @@ function SkeletonView() {
   );
 }
 
-function ResultView({ plan, storeName, budget, family, mealsCount, onSwap, onOpenRecipe }) {
+function ResultView({ plan, storeId, storeName, budget, family, mealsCount, onSwap, onOpenRecipe }) {
   const over = plan.total > budget;
+  const [orderState, setOrderState] = useState({ status: "idle" }); // idle | loading | error
+
+  // Реальный заказ пока подключён только для ВкусВилл — у них единственных
+  // есть официальный MCP с генерацией ссылки на корзину (см.
+  // src/lib/vkusvillMcp.js). У остальных сетей такого нет, кнопка для них
+  // остаётся неактивной — не потому что забыли, а потому что нечем её
+  // подкрепить по-настоящему.
+  const canOrderForReal = storeId === "vv";
+
+  const handleOrder = async () => {
+    setOrderState({ status: "loading" });
+    try {
+      const items = plan.grouped.flatMap((g) => g.items);
+      const { link, matchedCount, totalCount, unmatched } = await buildCartFromShoppingList(items);
+      window.open(link, "_blank", "noopener,noreferrer");
+      setOrderState({ status: "idle" });
+      if (matchedCount < totalCount) {
+        // мягкое уведомление, а не блокирующий alert — корзина всё равно открылась
+        console.warn("Не нашли в каталоге ВкусВилл:", unmatched);
+      }
+    } catch (err) {
+      setOrderState({ status: "error", message: err.message });
+    }
+  };
+
   return (
     <div style={styles.stepBody} className="fade-in-up">
       <div style={styles.resultHeader}>
@@ -607,7 +634,20 @@ function ResultView({ plan, storeName, budget, family, mealsCount, onSwap, onOpe
       <button onClick={() => shareViaTelegram(buildShareText(plan, storeName, family), BOT_SHARE_URL)} style={styles.shareBtn}>
         <Share2 size={16} /> Поделиться
       </button>
-      <button style={styles.orderBtn}>Заказать в {storeName}</button>
+      {canOrderForReal ? (
+        <>
+          <button onClick={handleOrder} disabled={orderState.status === "loading"} style={{ ...styles.orderBtn, opacity: orderState.status === "loading" ? 0.6 : 1 }}>
+            {orderState.status === "loading" ? "Собираем корзину…" : `Заказать в ${storeName}`}
+          </button>
+          {orderState.status === "error" && (
+            <p style={styles.orderError}>Не получилось собрать корзину: {orderState.message}. Попробуйте ещё раз.</p>
+          )}
+        </>
+      ) : (
+        <button disabled style={{ ...styles.orderBtn, opacity: 0.4, cursor: "default" }} title="Реальный заказ пока подключён только для ВкусВилл">
+          Заказать в {storeName} (скоро)
+        </button>
+      )}
     </div>
   );
 }
@@ -766,6 +806,7 @@ const styles = {
   listBox: { display: "flex", flexDirection: "column" },
   listRow: { display: "flex", justifyContent: "space-between", padding: "7px 0", borderBottom: "1px solid var(--hairline-2)", fontSize: 13.5 },
   orderBtn: { width: "100%", padding: "14px 0", background: `linear-gradient(180deg, ${ACCENT}, #0066DB)`, border: "none", borderRadius: 18, color: "#fff", fontSize: 14.5, fontWeight: 600, cursor: "pointer", marginTop: 8, boxShadow: "0 8px 20px rgba(10,132,255,0.35)" },
+  orderError: { fontSize: 12, color: "var(--danger)", textAlign: "center", marginTop: 8 },
   shareBtn: { width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 8, padding: "13px 0", ...glass(0.6, 10), border: "1px solid var(--hairline)", borderRadius: 18, color: "var(--text-primary)", fontSize: 14, fontWeight: 600, cursor: "pointer", marginTop: 8 },
 
   recipeRowBtn: { flex: 1, display: "flex", alignItems: "center", gap: 8, background: "none", border: "none", padding: "4px 2px", borderRadius: 10, textAlign: "left", cursor: "pointer", color: "var(--text-primary)", font: "inherit", minWidth: 0 },
