@@ -4,6 +4,18 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Список на неделю</title>
+    <style>
+      /* html/body/#root не имели явной высоты — из-за этого .page (minHeight:100%)
+         не дотягивался до низа окна на некоторых размерах экрана, снизу
+         оставался белый просвет от фона body по умолчанию. Плюс фон здесь —
+         подстраховка на самый первый рендер, до того как смонтируется React
+         и применится настоящий градиент из App.jsx. */
+      html, body, #root { height: 100%; margin: 0; }
+      body { background: #eef1f5; }
+      @media (prefers-color-scheme: dark) {
+        body { background: #0b0b0d; }
+      }
+    </style>
   </head>
   <body>
     <div id="root"></div>

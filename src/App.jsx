@@ -605,7 +605,7 @@ function ResultView({ plan, storeName, budget, family, mealsCount, onSwap, onOpe
       ))}
 
       <button onClick={() => shareViaTelegram(buildShareText(plan, storeName, family), BOT_SHARE_URL)} style={styles.shareBtn}>
-        <Share2 size={16} /> Поделиться с семьёй
+        <Share2 size={16} /> Поделиться
       </button>
       <button style={styles.orderBtn}>Заказать в {storeName}</button>
     </div>
@@ -708,7 +708,7 @@ const glass = (opacity = 0.55, blur = 20) => ({
 
 const styles = {
   page: {
-    minHeight: "100%", width: "100%", display: "flex", justifyContent: "center", alignItems: "flex-start",
+    minHeight: "100vh", width: "100%", display: "flex", justifyContent: "center", alignItems: "flex-start",
     background: "var(--page-bg)",
     padding: "40px 16px", fontFamily: FONT, color: "var(--text-primary)",
   },
