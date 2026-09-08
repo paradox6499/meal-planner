@@ -378,6 +378,15 @@ export default function MealPlanner() {
             display: flex !important; flex-direction: column !important;
           }
           .mp-step-body { flex: 1; justify-content: center !important; }
+          /* navRow держит marginTop:auto для "плавающей" карточки на десктопе
+             (там это нужно, чтобы кнопка не отрывалась от контента при
+             разной длине шагов) — но на mobile это же auto съедало ВСЁ
+             свободное место сам по себе, из-за чего justify-content:center
+             выше не давал никакого видимого эффекта: контент оставался
+             прижат к верху, а кнопка просто уезжала в самый низ. Обычный
+             отступ вместо auto — и вся группа (контент + кнопка) центрируется
+             родителем как единое целое. */
+          .mp-nav-row { margin-top: 22px !important; }
           .mp-result-body, .mp-skeleton-body { flex: 1; }
         }
         input[type="range"] { -webkit-appearance: none; height: 4px; border-radius: 2px; background: var(--track-bg); }
@@ -522,7 +531,7 @@ export default function MealPlanner() {
               </StepShell>
             )}
 
-            <div style={styles.navRow}>
+            <div style={styles.navRow} className="mp-nav-row">
               <button onClick={() => setStep((s) => Math.max(0, s - 1))} disabled={step === 0} style={{ ...styles.navBtn, visibility: step === 0 ? "hidden" : "visible" }}>
                 <ChevronLeft size={16} /> назад
               </button>
