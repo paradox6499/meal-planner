@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { ShoppingBasket, Check, ChevronLeft, ChevronRight, Store, Users, Wallet, Salad, ChefHat, Flame, RotateCcw, UtensilsCrossed, Clock, Repeat, Ban, TriangleAlert, X, Loader2, Share2 } from "lucide-react";
 import {
   RECIPES,
@@ -184,6 +184,18 @@ function getTelegramFirstName() {
 
 export default function MealPlanner() {
   const [tgFirstName] = useState(getTelegramFirstName);
+
+  // ready()/expand() — просим Telegram сразу развернуть Mini App на всю
+  // доступную высоту, а не в свёрнутом состоянии по умолчанию. Без этого
+  // сам Telegram может показывать приложение в неполный экран независимо
+  // от нашего CSS — это его собственное поведение, не наш layout.
+  useEffect(() => {
+    const tg = window.Telegram?.WebApp;
+    if (!tg) return;
+    tg.ready?.();
+    tg.expand?.();
+  }, []);
+
   const [step, setStep] = useState(0);
   const [store, setStore] = useState(null);
   const [family, setFamily] = useState(2);
@@ -286,7 +298,7 @@ export default function MealPlanner() {
   };
 
   return (
-    <div style={styles.page}>
+    <div style={styles.page} className="mp-page">
       <style>{`
         :root {
           --page-bg: radial-gradient(circle at 12% 15%, #dcebff 0%, transparent 42%), radial-gradient(circle at 88% 12%, #ffe1f0 0%, transparent 40%), radial-gradient(circle at 50% 95%, #dcfce4 0%, transparent 45%), #eef1f5;
@@ -335,6 +347,8 @@ export default function MealPlanner() {
         .recipe-row-btn:hover .recipe-name-text { text-decoration: underline; text-decoration-color: rgba(10,132,255,0.4); }
         .fade-in-up { animation: fadeInUp .32s cubic-bezier(0.22, 1, 0.36, 1) both; }
         @keyframes fadeInUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        .greeting-fade { animation: greetingFade 3s ease forwards; }
+        @keyframes greetingFade { 0%, 80% { opacity: 1; } 100% { opacity: 0; } }
         .modal-overlay-in { animation: overlayIn .2s ease both; }
         @keyframes overlayIn { from { opacity: 0; } to { opacity: 1; } }
         .modal-card-in { animation: modalIn .28s cubic-bezier(0.22, 1, 0.36, 1) both; }
@@ -343,18 +357,28 @@ export default function MealPlanner() {
         @keyframes shimmer { 0% { background-position: 100% 50%; } 100% { background-position: 0 50%; } }
         .spin { animation: spin 1s linear infinite; }
         @keyframes spin { to { transform: rotate(360deg); } }
+        /* На узких экранах (телефон, в т.ч. внутри Telegram Mini App) — не
+           плавающая карточка на фоне с большими полями, а карточка во весь
+           экран, как у нативных приложений. 100dvh, а не 100vh — динамическая
+           высота viewport'а, корректно учитывает шторки/безопасные зоны
+           мобильных браузеров и WebView Telegram (обычный 100vh там часто
+           врёт, оставляя пустое место снизу — это была жалоба). */
+        @media (max-width: 600px) {
+          .mp-page { padding: 0 !important; align-items: stretch !important; }
+          .mp-card { max-width: 100% !important; min-height: 100dvh !important; border-radius: 0 !important; border-left: none !important; border-right: none !important; }
+        }
         input[type="range"] { -webkit-appearance: none; height: 4px; border-radius: 2px; background: var(--track-bg); }
         input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; width: 22px; height: 22px; border-radius: 50%; background: #fff; box-shadow: 0 2px 8px rgba(0,0,0,0.25), 0 0 0 1px rgba(0,0,0,0.04); cursor: pointer; }
       `}</style>
 
-      <div style={styles.card}>
+      <div style={styles.card} className="mp-card">
         <div style={styles.header}>
           <div>
             <div style={styles.brandRow}>
               <ShoppingBasket size={22} color={ACCENT} strokeWidth={1.75} />
               <span style={styles.brand}>Список на неделю</span>
             </div>
-            {tgFirstName && <div style={styles.greeting}>Привет, {tgFirstName} 👋</div>}
+            {tgFirstName && <div style={styles.greeting} className="greeting-fade">Привет, {tgFirstName} 👋</div>}
           </div>
           {done && (
             <button onClick={reset} style={styles.resetBtn}>
@@ -384,7 +408,10 @@ export default function MealPlanner() {
                   {STORES.map((s) => (
                     <button key={s.id} className="chip" onClick={() => setStore(s.id)} style={styles.storeChip(store === s.id)}>
                       <div style={{ fontWeight: 600 }}>{s.name}</div>
-                      <div style={styles.chipHint}>{s.note}</div>
+                      <div style={styles.chipHint}>
+                        {s.note}
+                        {s.id !== "vv" && " · скоро"}
+                      </div>
                     </button>
                   ))}
                 </div>
@@ -776,7 +803,7 @@ const glass = (opacity = 0.55, blur = 20) => ({
 
 const styles = {
   page: {
-    minHeight: "100vh", width: "100%", display: "flex", justifyContent: "center", alignItems: "flex-start",
+    minHeight: "100dvh", width: "100%", display: "flex", justifyContent: "center", alignItems: "flex-start",
     background: "var(--page-bg)",
     padding: "40px 16px", fontFamily: FONT, color: "var(--text-primary)",
   },
