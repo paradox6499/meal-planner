@@ -95,8 +95,50 @@ function buildPools(diet, cuisines, devices, allergies) {
 
 // начальный план — только id рецептов, без сумм и списка покупок (их считаем отдельно,
 // чтобы «Заменить блюдо» не пересобирало всю неделю заново)
-function buildInitialPlan(pools, selectedMeals) {
-  const idx = { breakfast: 0, main: 0, snack: 0 };
+//
+// Раньше выбор блюда был просто round-robin по пулу (отсортированному по
+// цене), без учёта budget вообще — за 7 дней цикл проходил и по самым
+// дешёвым, и по самым дорогим рецептам поровну, поэтому итог почти не
+// зависел от того, что выбрал пользователь на шаге "Бюджет". Теперь —
+// жадный алгоритм: на каждый приём пищи считаем допустимую среднюю цену на
+// оставшиеся приёмы (remainingBudget / remainingSlots) и берём САМЫЙ ДОРОГОЙ
+// рецепт из пула, который в неё укладывается — так бюджет тратится
+// осмысленно (не всегда самое дешёвое), но итог целится в заданную сумму, а
+// не в среднюю по больнице. Если бюджет физически ниже, чем даже самые
+// дешёвые рецепты в пуле, алгоритм просто берёт минимально возможное и даёт
+// уйти в минус — дальше это видно пользователю по индикатору "превышен
+// бюджет" в ResultView, а не скрывается.
+function buildInitialPlan(pools, selectedMeals, budget, family) {
+  const totalSlots = 7 * selectedMeals.length;
+  let remainingBudget = family > 0 ? budget / family : budget; // считаем в цене на человека, family умножается позже в buildPlanView
+  let remainingSlots = totalSlots;
+  const recentByCategory = {}; // последние выбранные id на категорию — чтобы не повторять одно и то же блюдо подряд без нужды
+
+  const pickRecipe = (category) => {
+    const pool = pools[category];
+    if (!pool || pool.length === 0) return null;
+    const allowedAvg = remainingSlots > 0 ? remainingBudget / remainingSlots : Infinity;
+    // pool отсортирован по возрастанию цены (buildPools/fetchVkusvillPools) —
+    // ищем самый дорогой вариант, который всё ещё укладывается в допустимое
+    // среднее на оставшиеся приёмы пищи
+    let candidateIdx = 0;
+    for (let i = 0; i < pool.length; i++) {
+      if (pool[i].cost <= allowedAvg) candidateIdx = i;
+      else break;
+    }
+    const recent = recentByCategory[category] || [];
+    let chosen = pool[candidateIdx];
+    if (candidateIdx > 0) {
+      // из вариантов в рамках бюджета — предпочитаем не повторять последние 2 блюда подряд
+      const notRecent = pool.slice(0, candidateIdx + 1).filter((r) => !recent.includes(r.id));
+      if (notRecent.length > 0) chosen = notRecent[notRecent.length - 1];
+    }
+    recentByCategory[category] = [...recent, chosen.id].slice(-2);
+    remainingBudget -= chosen.cost;
+    remainingSlots -= 1;
+    return chosen;
+  };
+
   const days = [];
   const emptyMealLabels = new Set();
   for (let day = 1; day <= 7; day++) {
@@ -107,8 +149,7 @@ function buildInitialPlan(pools, selectedMeals) {
         emptyMealLabels.add(m.label);
         return;
       }
-      const r = pool[idx[m.category] % pool.length];
-      idx[m.category]++;
+      const r = pickRecipe(m.category);
       dayMeals.push({ mealId: m.id, mealLabel: m.label, category: m.category, recipeId: r.id });
     });
     days.push({ day, dayMeals });
@@ -267,7 +308,7 @@ export default function MealPlanner() {
     }
 
     setPools(resolvedPools);
-    setPlanState(buildInitialPlan(resolvedPools, selectedMeals));
+    setPlanState(buildInitialPlan(resolvedPools, selectedMeals, budget, family));
     setDone(true);
     setAssembling(false);
   };
@@ -377,15 +418,22 @@ export default function MealPlanner() {
                центрирует контент по вертикали, как в нативных онбордингах. */
             display: flex !important; flex-direction: column !important;
           }
-          .mp-step-body { flex: 1; justify-content: center !important; }
+          /* Раньше здесь стоял justify-content:center — контент шага и кнопка
+             центрировались как единая группа, но из-за этого между строкой
+             "Шаг X из Y" и самим шагом появлялся заметный пустой отступ
+             сверху (жалоба). Контенту лучше идти сразу за прогресс-баром —
+             flex-start (по умолчанию), а не искать симметрию. Оставшееся
+             свободное место (flex:1 на body) само уходит вниз, ПОСЛЕ кнопки —
+             это просто безопасный отступ у нижнего края экрана, а не дыра
+             посреди интерфейса. */
+          .mp-step-body { flex: 1; }
           /* navRow держит marginTop:auto для "плавающей" карточки на десктопе
              (там это нужно, чтобы кнопка не отрывалась от контента при
              разной длине шагов) — но на mobile это же auto съедало ВСЁ
-             свободное место сам по себе, из-за чего justify-content:center
-             выше не давал никакого видимого эффекта: контент оставался
-             прижат к верху, а кнопка просто уезжала в самый низ. Обычный
-             отступ вместо auto — и вся группа (контент + кнопка) центрируется
-             родителем как единое целое. */
+             свободное место сам по себе, из-за чего кнопка уезжала в самый
+             низ, а контент оставался прижат к верху с разрывом посередине.
+             Обычный фиксированный отступ вместо auto — кнопка идёт сразу за
+             контентом шага. */
           .mp-nav-row { margin-top: 22px !important; }
           .mp-result-body, .mp-skeleton-body { flex: 1; }
         }

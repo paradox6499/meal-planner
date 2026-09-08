@@ -209,5 +209,11 @@ export async function fetchVkusvillPools({ diet, cuisines, devices, allergies, c
   );
 
   await attachRealCosts(pools);
+  // buildInitialPlan (App.jsx) жадно ищет самый дорогой рецепт, который ещё
+  // укладывается в допустимый бюджет — для этого пул должен быть
+  // отсортирован по возрастанию цены, как и статические RECIPES в
+  // buildPools(). Тут цены появляются только что (после attachRealCosts),
+  // поэтому сортируем здесь, а не раньше.
+  Object.values(pools).forEach((recipes) => recipes.sort((a, b) => a.cost - b.cost));
   return pools;
 }
