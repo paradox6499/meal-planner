@@ -125,17 +125,13 @@ function toVkusvillQuantity(amount, ourUnit, productUnit) {
   return 1; // незнакомая единица товара — берём одну упаковку как разумный дефолт
 }
 
-/** Берёт плоский список покупок ([{name, amount, unit}], как в App.jsx
- * plan.grouped[].items) и превращает в ссылку на реальную корзину ВкусВилл:
- * ищет каждый ингредиент, конвертирует количество в единицу товара,
- * собирает найденное в vkusvill_cart_link_create. Часть ингредиентов может
- * не найтись (пряности, самодельные заготовки) — это ожидаемо, не ошибка;
- * такие просто не попадают в корзину, а не роняют весь заказ.
- *
- * Ограничение самого VkusVill: максимум 20 позиций в ссылке — если список
- * покупок больше, берутся первые 20 найденных (без приоритизации по важности,
- * это первое приближение, не решение продуктового вопроса "что важнее").*/
-export async function buildCartFromShoppingList(items) {
+/** Ищет каждый пункт списка ([{name, amount, unit}]) в каталоге ВкусВилл
+ * параллельно, возвращает лучшее совпадение с реальной ценой и количеством
+ * в единице товара. Общая часть для сборки корзины (buildCartFromShoppingList)
+ * и для подсчёта настоящей стоимости рецептов (vkusvillRecipes.js) — обе
+ * задачи по сути "сколько это будет стоить и что из этого реально есть в
+ * каталоге", разница только в том, что происходит с результатом дальше. */
+export async function resolvePrices(items) {
   const settled = await Promise.allSettled(
     items.map(async (item) => {
       const data = await searchProducts({ q: item.name, mode: "short", vvonly: 0 });
@@ -145,12 +141,26 @@ export async function buildCartFromShoppingList(items) {
         matched: true,
         name: item.name,
         xml_id: match.xml_id,
+        price: match.price?.current ?? null,
+        productUnit: match.unit,
         q: toVkusvillQuantity(item.amount, item.unit, match.unit),
       };
     })
   );
+  return settled.map((r) => (r.status === "fulfilled" ? r.value : { matched: false, name: "?" }));
+}
 
-  const resolved = settled.map((r) => (r.status === "fulfilled" ? r.value : { matched: false, name: "?" }));
+/** Берёт плоский список покупок ([{name, amount, unit}], как в App.jsx
+ * plan.grouped[].items) и превращает в ссылку на реальную корзину ВкусВилл.
+ * Часть ингредиентов может не найтись (пряности, самодельные заготовки) —
+ * это ожидаемо, не ошибка; такие просто не попадают в корзину, а не роняют
+ * весь заказ.
+ *
+ * Ограничение самого VkusVill: максимум 20 позиций в ссылке — если список
+ * покупок больше, берутся первые 20 найденных (без приоритизации по важности,
+ * это первое приближение, не решение продуктового вопроса "что важнее").*/
+export async function buildCartFromShoppingList(items) {
+  const resolved = await resolvePrices(items);
   const matched = resolved.filter((r) => r.matched);
   const unmatched = resolved.filter((r) => !r.matched).map((r) => r.name);
 

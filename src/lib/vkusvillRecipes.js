@@ -1,0 +1,213 @@
+// Подбор рецептов из официального MCP ВкусВилл вместо статических 41 из
+// data/recipes.js — вторая (и основная) часть интеграции, см.
+// docs/telegram-bot-architecture.md и обсуждение оценки в чате.
+//
+// Стратегия сопоставления наших вопросов визарда с фильтрами ВкусВилл:
+//   - тип приёма пищи -> id_category_filter (у них СВОЯ таксономия, не 1:1
+//     с нашей breakfast/main/snack — берём ближайшее: "На завтрак"/"Горячее"/"Закуски")
+//   - техника готовки -> id_cooking_method_filter (у них ОДНО значение за раз,
+//     не список — берём первое совпадение из выбранных пользователем)
+//   - аллергии (+ "без глютена" из рациона) -> id_exclude_allergens_filter,
+//     ПЛЮС свой пост-фильтр по тексту состава как подстраховка (у ВкусВилл
+//     нет фасета для сои/рыбы, а для остального их разметка могла не
+//     покрыть редкий случай — лучше пропустить рецепт, чем показать его)
+//   - кухня -> у них нет такого фасета вообще; мягкая подсказка через
+//     текст поиска q, не жёсткий фильтр
+//   - вег/веган -> тоже нет отдельного фасета для ЭТОГО запроса (только
+//     категория "Вегетарианцам"/"Веганам", а категория у нас уже занята
+//     типом приёма пищи) — пост-фильтр по составу
+//
+// ID таксономии зафиксированы вручную по факту живого ответа сервера на
+// 08.09.2026 (searchRecipes({page:1}) -> meta.filters). Если результаты
+// вдруг перестанут иметь смысл — стоит перепроверить эти ID тем же вызовом,
+// они не гарантированно вечны.
+
+import { searchRecipes, resolvePrices } from "./vkusvillMcp.js";
+
+const CATEGORY_BY_MEAL = { breakfast: 339, main: 332, snack: 335 };
+
+// "В духовке или на гриле" — одна категория на oven И grill в их таксономии,
+// отдельного "аэрогриль" тоже нет, ближайшее — то же самое.
+const COOKING_METHOD_BY_DEVICE = {
+  multi: 305757,
+  stove: 305758,
+  oven: 305759,
+  grill: 305759,
+  air: 305759,
+  blender: 305762, // "Без термообработки" — ближайшее для смузи и т.п.
+};
+
+const ALLERGEN_EXCLUDE_ID = {
+  nuts: 305746,
+  gluten: 305747,
+  dairy: 305748, // у них "Лактоза", не точно то же самое, что "молочное" — ближайшее
+  eggs: 305751,
+  // soy, fish — прямого фасета нет, полагаемся только на текстовый пост-фильтр
+};
+
+const CUISINE_HINT = { it: "итальянская", asia: "азиатская", cauc: "кавказская", med: "средиземноморская" };
+
+const ALLERGEN_KEYWORDS = {
+  nuts: ["орех", "миндал", "фундук", "кешью", "фисташ", "арахис"],
+  dairy: ["молок", "сыр", "сливк", "сметан", "творог", "йогурт", "масло сливочн"],
+  gluten: ["мук", "хлеб", "макарон", "паст", "тесто", "лапш"],
+  eggs: ["яйц", "яич"],
+  soy: ["соев", "тофу", "мисо"],
+  fish: ["рыб", "лосос", "треск", "форел", "тунец", "креветк", "морепродукт"],
+};
+
+const MEAT_FISH_KEYWORDS = ["куриц", "куриног", "говядин", "свинин", "бекон", "баранин", "индейк", "рыб", "лосос", "треск", "креветк", "морепродукт", "фарш"];
+const VEGAN_FORBIDDEN_KEYWORDS = [...MEAT_FISH_KEYWORDS, "молок", "сыр", "сливк", "сметан", "творог", "йогурт", "яйц", "мёд", "масло сливочн"];
+
+function parseCookingTimeMinutes(name) {
+  if (!name) return 30;
+  if (name.includes("до 20")) return 20;
+  if (name.includes("до 40")) return 35;
+  if (name.includes("до 1 часа")) return 55;
+  if (name.includes("1-2 часа")) return 90;
+  if (name.includes("более 2")) return 130;
+  return 30;
+}
+
+// "450 г" -> ["Тесто слоёное дрож.", 450, "г"]; "по вкусу" -> null (не
+// включаем в список покупок то, что нельзя осмысленно докупить в граммах).
+function vkusvillIngredientToTriple(ingredient) {
+  // \b здесь бы не сработал: в JS \b/\w по умолчанию понимают только ASCII,
+  // граница после кириллической буквы не определяется как ожидается — ловил
+  // false negative даже на "400 г". Вместо этого — negative lookahead на
+  // кириллицу. И [\d.,]+ был слишком жадным: "1 ст. л." матчил одну точку
+  // перед "л" без единственной цифры (amount становился NaN) — теперь
+  // паттерн требует хотя бы одну цифру в начале.
+  const match = String(ingredient.quantity || "").match(/(\d+(?:[.,]\d+)?)\s*(кг|мл|г|л|шт)(?![а-яёА-ЯЁ])/i);
+  if (!match) return null;
+  let amount = parseFloat(match[1].replace(",", "."));
+  let unit = match[2].toLowerCase();
+  if (unit === "кг") { amount *= 1000; unit = "г"; }
+  if (unit === "л") { amount *= 1000; unit = "мл"; }
+  return [ingredient.name, amount, unit];
+}
+
+function normalizeVkusvillRecipe(raw, category) {
+  const ingr = (raw.ingredients || []).map(vkusvillIngredientToTriple).filter(Boolean);
+  return {
+    id: `vv-${raw.id}`,
+    name: raw.name,
+    cuisine: "any", // фильтруется мягко через q при запросе, не через это поле
+    diets: ["any"], // фактическая проверка — в recipeViolatesDiet ниже, по составу
+    devices: [],
+    category,
+    cost: 0,
+    isRealPrice: false, // проставит attachRealCosts, если получится посчитать
+    time: parseCookingTimeMinutes(raw.cooking_time?.name),
+    emoji: "🍽️",
+    photoUrl: raw.image || null,
+    sourceUrl: raw.url,
+    ingr,
+    steps: (raw.steps || []).map((s) => s.text).filter(Boolean),
+  };
+}
+
+function recipeHasKeyword(recipe, keywords) {
+  if (keywords.length === 0) return false;
+  return recipe.ingr.some(([name]) => {
+    const lower = name.toLowerCase();
+    return keywords.some((kw) => lower.includes(kw));
+  });
+}
+
+function recipeViolatesAllergies(recipe, allergyIds) {
+  return recipeHasKeyword(recipe, allergyIds.flatMap((id) => ALLERGEN_KEYWORDS[id] || []));
+}
+
+function recipeViolatesDiet(recipe, diet) {
+  if (diet === "veg") return recipeHasKeyword(recipe, MEAT_FISH_KEYWORDS);
+  if (diet === "vegan") return recipeHasKeyword(recipe, VEGAN_FORBIDDEN_KEYWORDS);
+  return false;
+}
+
+function isWeightOrVolumeUnit(unit) {
+  return unit === "г" || unit === "мл" || unit === "кг" || unit === "л";
+}
+
+function pricePerBaseUnit(price, productUnit) {
+  // цена товара за кг/л -> цена за грамм/мл (наши recipe.ingr всегда в г/мл/шт)
+  if (productUnit === "кг" || productUnit === "л") return price / 1000;
+  return price; // уже за г/мл/шт — как есть
+}
+
+// Один параллельный проход по ВСЕМ уникальным ингредиентам сразу по всем
+// пулам (не по каждому рецепту отдельно) — иначе "яйцо"/"соль" искались бы
+// в каталоге по многу раз впустую. Мутирует recipe.cost/isRealPrice на месте.
+async function attachRealCosts(pools) {
+  const allNames = new Set();
+  Object.values(pools).forEach((recipes) => recipes.forEach((r) => r.ingr.forEach(([name]) => allNames.add(name))));
+  if (allNames.size === 0) return;
+
+  const resolved = await resolvePrices([...allNames].map((name) => ({ name, amount: 1, unit: "шт" })));
+  const priceByName = new Map();
+  resolved.forEach((r) => {
+    if (r.matched && r.price != null) priceByName.set(r.name, { price: r.price, productUnit: r.productUnit });
+  });
+
+  Object.values(pools).forEach((recipes) => {
+    recipes.forEach((recipe) => {
+      if (recipe.ingr.length === 0) return;
+      let total = 0;
+      let allMatched = true;
+      for (const [name, amount, unit] of recipe.ingr) {
+        const info = priceByName.get(name);
+        // единица нашего ингредиента и товара должны быть одного "рода"
+        // (вес/объём vs штучно) — иначе почти наверняка посчитаем неверно,
+        // лучше отказаться от точной цены для этого рецепта, чем соврать
+        if (!info || isWeightOrVolumeUnit(unit) !== isWeightOrVolumeUnit(info.productUnit)) {
+          allMatched = false;
+          continue;
+        }
+        total += pricePerBaseUnit(info.price, info.productUnit) * amount;
+      }
+      if (total > 0) {
+        recipe.cost = Math.round(total);
+        recipe.isRealPrice = allMatched;
+      }
+    });
+  });
+}
+
+/** Тянет пулы рецептов из VkusVill под текущие фильтры визарда — по форме
+ * результата совместимо с buildPools() из App.jsx ({breakfast, main, snack}),
+ * так что дальше по коду (buildInitialPlan, buildPlanView, swap) ничего
+ * менять не нужно, они не знают, откуда взялись рецепты.
+ *
+ * `categories` — только те категории, что реально нужны (из выбранных
+ * приёмов пищи) — не тратим вызовы на то, что пользователь не спрашивал. */
+export async function fetchVkusvillPools({ diet, cuisines, devices, allergies, categories }) {
+  const effectiveAllergies = diet === "gf" && !allergies.includes("gluten") ? [...allergies, "gluten"] : allergies;
+  const excludeAllergens = [...new Set(effectiveAllergies.map((a) => ALLERGEN_EXCLUDE_ID[a]).filter(Boolean))];
+  const cookingMethod = devices.map((d) => COOKING_METHOD_BY_DEVICE[d]).find(Boolean) || 0;
+  const specificCuisines = cuisines.filter((c) => c !== "any");
+  const q = specificCuisines.length === 1 ? CUISINE_HINT[specificCuisines[0]] || "" : "";
+
+  const pools = {};
+  await Promise.all(
+    categories.map(async (category) => {
+      try {
+        const data = await searchRecipes({
+          q,
+          page: 1,
+          sort: "popularity",
+          id_category_filter: CATEGORY_BY_MEAL[category] || 0,
+          id_cooking_method_filter: cookingMethod,
+          id_exclude_allergens_filter: excludeAllergens,
+        });
+        pools[category] = (data.items || [])
+          .map((raw) => normalizeVkusvillRecipe(raw, category))
+          .filter((r) => r.ingr.length > 0 && !recipeViolatesDiet(r, diet) && !recipeViolatesAllergies(r, effectiveAllergies));
+      } catch {
+        pools[category] = [];
+      }
+    })
+  );
+
+  await attachRealCosts(pools);
+  return pools;
+}

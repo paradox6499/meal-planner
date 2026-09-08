@@ -11,6 +11,7 @@ import {
   effectiveRecipeCost,
 } from "./data/recipes.js";
 import { buildCartFromShoppingList } from "./lib/vkusvillMcp.js";
+import { fetchVkusvillPools } from "./lib/vkusvillRecipes.js";
 
 // ---------- UI-конфигурация (не контент рецептов — та живёт в data/recipes.js) ----------
 
@@ -120,6 +121,13 @@ function buildInitialPlan(pools, selectedMeals) {
 function buildPlanView(planState, pools, family) {
   if (!planState) return null;
 
+  // Рецепт мог прийти либо из статического RECIPES_BY_ID, либо из живых
+  // pools (VkusVill, id вида "vv-12345" — в статической карте их нет). Сам
+  // buildInitialPlan берёт recipeId ИЗ pools, так что pools гарантированно
+  // содержит нужный рецепт на момент вызова — просто ищем в правильном месте.
+  const recipesById = new Map(RECIPES_BY_ID);
+  Object.values(pools || {}).forEach((list) => list.forEach((r) => recipesById.set(r.id, r)));
+
   const ingredMap = {};
   let total = 0;
 
@@ -127,7 +135,7 @@ function buildPlanView(planState, pools, family) {
 
   const days = planState.days.map((d) => {
     const dayMeals = d.dayMeals.map((slot) => {
-      const recipe = RECIPES_BY_ID.get(slot.recipeId);
+      const recipe = recipesById.get(slot.recipeId);
       const pool = pools[slot.category] || [];
       const [cost, isRealPrice] = effectiveRecipeCost(recipe);
       if (!isRealPrice) anyEstimated = true;
@@ -212,28 +220,44 @@ export default function MealPlanner() {
     devices.length > 0,
   ];
 
-  // пулы рецептов зависят от рациона/кухни/техники/аллергий — пересчитываются по ходу
-  // визарда, а не только один раз при завершении, поэтому «Заменить блюдо» всегда
-  // предлагает актуальный и безопасный набор вариантов
-  const pools = useMemo(() => buildPools(diet, cuisines, devices, allergies), [diet, cuisines, devices, allergies]);
+  // Раньше пересчитывалось на каждое изменение фильтра (useMemo) — теперь
+  // пулы для ВкусВилл тянутся живьём из MCP, это асинхронно, поэтому
+  // считаются один раз, в момент "Собрать список" (handleFinish), а не
+  // реактивно по ходу визарда. До первого нажатия — null, и это ок:
+  // planView ниже явно проверяет planState на null раньше, чем тронуть pools.
+  const [pools, setPools] = useState(null);
 
   // planState хранит только id рецептов по дням — так swapMeal меняет один слот,
   // не трогая остальную неделю и не требуя пересборки с нуля
   const planView = useMemo(() => buildPlanView(planState, pools, family), [planState, pools, family]);
 
-  const handleFinish = () => {
+  const handleFinish = async () => {
     const selectedMeals = MEALS.filter((m) => meals.includes(m.id));
-    const plan = buildInitialPlan(pools, selectedMeals);
-    // Небольшая искусственная задержка + skeleton вместо мгновенного скачка —
-    // сейчас подбор чисто локальный (мгновенный), но в реальном приложении
-    // здесь будет поход за актуальными ценами в магазине, так что честнее
-    // сразу приучать интерфейс к "идёт сборка", а не подменять его позже.
+    const neededCategories = [...new Set(selectedMeals.map((m) => m.category))];
     setAssembling(true);
-    window.setTimeout(() => {
-      setPlanState(plan);
-      setDone(true);
-      setAssembling(false);
-    }, 650);
+
+    let resolvedPools;
+    if (store === "vv") {
+      // Реальные рецепты ВкусВилл — с реальными фото, шагами и (по
+      // возможности) реальной ценой. Если MCP недоступен/упал — тихо
+      // откатываемся на прежний статический список, а не роняем экран:
+      // пользователь всё равно должен получить план, просто оценочный.
+      try {
+        resolvedPools = await fetchVkusvillPools({ diet, cuisines, devices, allergies, categories: neededCategories });
+        const gotAnything = neededCategories.some((c) => (resolvedPools[c] || []).length > 0);
+        if (!gotAnything) throw new Error("VkusVill не вернул рецептов под эти фильтры");
+      } catch (err) {
+        console.warn("VkusVill MCP недоступен, откат на статические рецепты:", err.message);
+        resolvedPools = buildPools(diet, cuisines, devices, allergies);
+      }
+    } else {
+      resolvedPools = buildPools(diet, cuisines, devices, allergies);
+    }
+
+    setPools(resolvedPools);
+    setPlanState(buildInitialPlan(resolvedPools, selectedMeals));
+    setDone(true);
+    setAssembling(false);
   };
 
   const swapMeal = (dayIndex, slotIndex) => {
@@ -258,7 +282,7 @@ export default function MealPlanner() {
   const reset = () => {
     setStep(0); setStore(null); setFamily(2); setMeals(["lunch", "dinner"]); setBudget(4000);
     setDiet(null); setAllergies([]); setCuisines([]); setDevices([]); setDone(false); setPlanState(null);
-    setOpenRecipe(null); setAssembling(false);
+    setOpenRecipe(null); setAssembling(false); setPools(null);
   };
 
   return (
@@ -696,7 +720,11 @@ function RecipeModal({ dm, family, onClose }) {
           <X size={16} />
         </button>
 
-        <div style={styles.modalHero}>{recipe.emoji}</div>
+        {recipe.photoUrl ? (
+          <img src={recipe.photoUrl} alt={recipe.name} style={styles.modalHeroPhoto} />
+        ) : (
+          <div style={styles.modalHero}>{recipe.emoji}</div>
+        )}
 
         <h2 style={{ ...styles.stepTitle, marginBottom: 8 }}>{recipe.name}</h2>
         <div style={styles.modalMeta}>
@@ -816,6 +844,7 @@ const styles = {
   modalCard: { width: "100%", maxWidth: 420, maxHeight: "85vh", overflowY: "auto", ...glass(0.9, 30), borderRadius: 28, border: "1px solid var(--hairline)", padding: 26, boxShadow: "var(--modal-shadow)", position: "relative" },
   modalClose: { position: "absolute", top: 16, right: 16, width: 32, height: 32, borderRadius: "50%", border: "1px solid var(--hairline)", background: "rgba(120,120,128,0.16)", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: "var(--text-primary)" },
   modalHero: { width: "100%", height: 120, borderRadius: 20, background: "linear-gradient(135deg, rgba(10,132,255,0.14), rgba(100,210,255,0.14))", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 56, marginBottom: 16 },
+  modalHeroPhoto: { width: "100%", height: 180, borderRadius: 20, objectFit: "cover", marginBottom: 16, display: "block" },
   modalMeta: { display: "flex", gap: 14, fontSize: 13, color: "var(--text-tertiary)", marginBottom: 18, flexWrap: "wrap" },
   stepsList: { margin: 0, padding: "0 0 0 18px", display: "flex", flexDirection: "column", gap: 8, fontSize: 13.5, lineHeight: 1.5, color: "var(--text-primary)" },
   stepItem: { paddingLeft: 4 },

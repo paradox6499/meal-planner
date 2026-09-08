@@ -387,8 +387,14 @@ export function recipeCostFromPrices(recipe, prices = PRICES) {
 
 /** cost рецепта с учётом реальных цен, если они есть для ВСЕХ его
  * ингредиентов; иначе — прежний оценочный `recipe.cost`. Второй элемент
- * пары — флаг "это реальная цена или оценка", для честного отображения в UI. */
+ * пары — флаг "это реальная цена или оценка", для честного отображения в UI.
+ *
+ * Рецепты из VkusVill MCP (см. src/lib/vkusvillRecipes.js) уже приходят с
+ * посчитанной по-настоящему ценой и явным recipe.isRealPrice — им не нужен
+ * повторный поиск по prices.json (который заточен под другие имена
+ * ингредиентов, из grocery-budget) — просто уважаем их собственный флаг. */
 export function effectiveRecipeCost(recipe, prices = PRICES) {
+  if (recipe.isRealPrice !== undefined) return [recipe.cost, recipe.isRealPrice];
   const real = recipeCostFromPrices(recipe, prices);
   return real === null ? [recipe.cost, false] : [real, true];
 }
