@@ -365,7 +365,20 @@ export default function MealPlanner() {
            врёт, оставляя пустое место снизу — это была жалоба). */
         @media (max-width: 600px) {
           .mp-page { padding: 0 !important; align-items: stretch !important; }
-          .mp-card { max-width: 100% !important; min-height: 100dvh !important; border-radius: 0 !important; border-left: none !important; border-right: none !important; }
+          .mp-card {
+            max-width: 100% !important; min-height: 100dvh !important; border-radius: 0 !important;
+            border-left: none !important; border-right: none !important;
+            /* Раньше карточка была растянута на 100dvh, но её содержимое —
+               обычный блочный поток, поэтому короткие шаги (например выбор
+               магазина) оставляли пустую область снизу до конца экрана —
+               визуально выглядело как "не заполнено", хотя карточка технически
+               была на всю высоту. Теперь сама карточка — flex-колонка, а
+               тело шага (.mp-step-body) занимает всё оставшееся место и
+               центрирует контент по вертикали, как в нативных онбордингах. */
+            display: flex !important; flex-direction: column !important;
+          }
+          .mp-step-body { flex: 1; justify-content: center !important; }
+          .mp-result-body, .mp-skeleton-body { flex: 1; }
         }
         input[type="range"] { -webkit-appearance: none; height: 4px; border-radius: 2px; background: var(--track-bg); }
         input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; width: 22px; height: 22px; border-radius: 50%; background: #fff; box-shadow: 0 2px 8px rgba(0,0,0,0.25), 0 0 0 1px rgba(0,0,0,0.04); cursor: pointer; }
@@ -401,7 +414,7 @@ export default function MealPlanner() {
         {assembling && <SkeletonView />}
 
         {!done && !assembling && (
-          <div style={styles.stepBody}>
+          <div style={styles.stepBody} className="mp-step-body">
             {step === 0 && (
               <StepShell icon={<Store size={20} />} title="Где вам удобно заказывать?" sub="Выберите магазин с доставкой в вашем районе">
                 <div style={styles.grid2}>
@@ -558,7 +571,7 @@ function StepShell({ icon, title, sub, children }) {
 
 function SkeletonView() {
   return (
-    <div style={styles.stepBody} className="fade-in-up">
+    <div style={styles.stepBody} className="fade-in-up mp-skeleton-body">
       <div style={styles.assemblingCaption}>
         <Loader2 size={15} className="spin" />
         Собираем план и список покупок…
@@ -604,7 +617,7 @@ function ResultView({ plan, storeId, storeName, budget, family, mealsCount, onSw
   };
 
   return (
-    <div style={styles.stepBody} className="fade-in-up">
+    <div style={styles.stepBody} className="fade-in-up mp-result-body">
       <div style={styles.resultHeader}>
         <h2 style={styles.stepTitle}>Ваш план на неделю</h2>
         <p style={styles.stepSub}>{mealsCount} приёма/приёмов пищи в день · {storeName} · на {family} {family === 1 ? "человека" : "человек"}</p>
