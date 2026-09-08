@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect } from "react";
-import { ShoppingBasket, Check, ChevronLeft, ChevronRight, Store, Users, Wallet, Salad, ChefHat, Flame, RotateCcw, UtensilsCrossed, Clock, Repeat, Ban, TriangleAlert, X, Loader2, Share2 } from "lucide-react";
+import { ShoppingBasket, Check, ChevronLeft, ChevronRight, Store, Users, Wallet, Salad, ChefHat, Flame, RotateCcw, UtensilsCrossed, Clock, Repeat, Ban, TriangleAlert, X, Loader2, Share2, Settings, Sun, Moon, MonitorSmartphone, Sparkles } from "lucide-react";
 import {
   RECIPES,
   RECIPES_BY_ID,
@@ -12,6 +12,7 @@ import {
 } from "./data/recipes.js";
 import { buildCartFromShoppingList } from "./lib/vkusvillMcp.js";
 import { fetchVkusvillPools } from "./lib/vkusvillRecipes.js";
+import { loadProfile, saveProfile, clearProfile, loadTheme, saveTheme } from "./lib/profile.js";
 
 // ---------- UI-конфигурация (не контент рецептов — та живёт в data/recipes.js) ----------
 
@@ -58,7 +59,24 @@ const MEALS = [
   { id: "snack", label: "Перекус", category: "snack" },
 ];
 
-const STEP_LABELS = ["Магазин", "Семья", "Приёмы пищи", "Бюджет", "Рацион", "Аллергии", "Кухня", "Техника"];
+// Раньше шаги визарда были просто индексами 0..7 и STEP_LABELS — но теперь
+// у вернувшегося пользователя с сохранённым профилем (см. lib/profile.js)
+// часть шагов не нужна: семья/приёмы пищи/рацион/аллергии/кухня/техника
+// меняются раз в несколько месяцев, спрашивать их заново при каждой сборке
+// плана — лишнее трение. "store" и "budget" — единственное, что имеет смысл
+// спрашивать каждую неделю. Ключи вместо голых индексов нужны, чтобы JSX
+// шагов ниже не пересчитывать вручную при пропуске части шагов.
+const STEP_META = [
+  { key: "store", label: "Магазин" },
+  { key: "family", label: "Семья" },
+  { key: "meals", label: "Приёмы пищи" },
+  { key: "budget", label: "Бюджет" },
+  { key: "diet", label: "Рацион" },
+  { key: "allergies", label: "Аллергии" },
+  { key: "cuisine", label: "Кухня" },
+  { key: "devices", label: "Техника" },
+];
+const QUICK_STEP_KEYS = ["store", "budget"];
 
 // ---------- Plan building (чистые функции, без React-состояния) ----------
 
@@ -237,19 +255,38 @@ export default function MealPlanner() {
     tg.expand?.();
   }, []);
 
+  // Сохранённый профиль читаем один раз при монтировании (не подписываемся
+  // на изменения localStorage из других вкладок — это редкий кейс, не стоит
+  // усложнять). Наличие профиля решает, показывать ли полный визард из 8
+  // шагов или короткий (магазин + бюджет) — см. STEP_META/QUICK_STEP_KEYS.
+  const [savedProfile] = useState(loadProfile);
+  const hasProfile = !!savedProfile;
+
   const [step, setStep] = useState(0);
   const [store, setStore] = useState(null);
-  const [family, setFamily] = useState(2);
-  const [meals, setMeals] = useState(["lunch", "dinner"]);
+  const [family, setFamily] = useState(savedProfile?.family ?? 2);
+  const [meals, setMeals] = useState(savedProfile?.meals ?? ["lunch", "dinner"]);
   const [budget, setBudget] = useState(4000);
-  const [diet, setDiet] = useState(null);
-  const [allergies, setAllergies] = useState([]);
-  const [cuisines, setCuisines] = useState([]);
-  const [devices, setDevices] = useState([]);
+  const [diet, setDiet] = useState(savedProfile?.diet ?? null);
+  const [allergies, setAllergies] = useState(savedProfile?.allergies ?? []);
+  const [cuisines, setCuisines] = useState(savedProfile?.cuisines ?? []);
+  const [devices, setDevices] = useState(savedProfile?.devices ?? []);
   const [done, setDone] = useState(false);
   const [assembling, setAssembling] = useState(false);
   const [planState, setPlanState] = useState(null);
   const [openRecipe, setOpenRecipe] = useState(null);
+  const [showAccount, setShowAccount] = useState(false);
+  const [displayName, setDisplayName] = useState(savedProfile?.displayName ?? "");
+
+  // "system" | "light" | "dark" — управляется вручную из Аккаунта, поверх
+  // системной темы по умолчанию (см. data-theme в <style> ниже и useEffect,
+  // который проставляет атрибут на <html>).
+  const [theme, setTheme] = useState(loadTheme);
+  useEffect(() => {
+    saveTheme(theme);
+    if (theme === "system") document.documentElement.removeAttribute("data-theme");
+    else document.documentElement.setAttribute("data-theme", theme);
+  }, [theme]);
 
   const toggleSimple = (arr, setArr, id) => {
     setArr((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
@@ -262,16 +299,25 @@ export default function MealPlanner() {
     });
   };
 
-  const canNext = [
-    !!store,
-    family > 0,
-    meals.length > 0,
-    budget >= 500,
-    !!diet,
-    true, // аллергии необязательны — их отсутствие тоже осознанный ответ
-    true, // кухня необязательна
-    devices.length > 0,
-  ];
+  // У вернувшегося пользователя (есть сохранённый профиль) визард
+  // схлопывается до "Магазин" + "Бюджет" — остальное уже известно и
+  // редактируется через Аккаунт, а не проходится заново на каждую неделю.
+  const activeSteps = useMemo(
+    () => (hasProfile ? STEP_META.filter((s) => QUICK_STEP_KEYS.includes(s.key)) : STEP_META),
+    [hasProfile]
+  );
+  const currentStepKey = activeSteps[step]?.key;
+
+  const canNextByKey = {
+    store: !!store,
+    family: family > 0,
+    meals: meals.length > 0,
+    budget: budget >= 500,
+    diet: !!diet,
+    allergies: true, // необязательны — их отсутствие тоже осознанный ответ
+    cuisine: true, // необязательна
+    devices: devices.length > 0,
+  };
 
   // Раньше пересчитывалось на каждое изменение фильтра (useMemo) — теперь
   // пулы для ВкусВилл тянутся живьём из MCP, это асинхронно, поэтому
@@ -332,10 +378,28 @@ export default function MealPlanner() {
     });
   };
 
+  // "Заново" — начать новый план. Если есть сохранённый профиль, семья/приёмы
+  // пищи/рацион/аллергии/кухня/техника НЕ сбрасываются на дефолт — они и
+  // так уже верные (в этом весь смысл профиля), сбрасывается только то, что
+  // специфично для конкретной прошлой сборки: магазин, бюджет и сам план.
   const reset = () => {
-    setStep(0); setStore(null); setFamily(2); setMeals(["lunch", "dinner"]); setBudget(4000);
-    setDiet(null); setAllergies([]); setCuisines([]); setDevices([]); setDone(false); setPlanState(null);
+    setStep(0); setStore(null); setBudget(4000); setDone(false); setPlanState(null);
     setOpenRecipe(null); setAssembling(false); setPools(null);
+    if (!hasProfile) {
+      setFamily(2); setMeals(["lunch", "dinner"]); setDiet(null);
+      setAllergies([]); setCuisines([]); setDevices([]);
+    }
+  };
+
+  const handleSaveProfile = () => {
+    saveProfile({ family, meals, diet, allergies, cuisines, devices, displayName });
+  };
+  const handleClearProfile = () => {
+    clearProfile();
+    // после сброса про профиль приложение узнает заново только при перезагрузке
+    // (hasProfile вычислен один раз при монтировании) — это ок, простое и
+    // предсказуемое поведение, не тянет за собой сложную ре-синхронизацию стейта
+    window.location.reload();
   };
 
   return (
@@ -363,8 +427,14 @@ export default function MealPlanner() {
           --skeleton-shine: rgba(120,120,128,0.24);
           --track-bg: rgba(60,60,67,0.15);
         }
+        /* Раньше тема была только автоматической (prefers-color-scheme), без
+           ручного переключателя. Теперь в Аккаунте можно явно выбрать
+           светлую/тёмную — :not([data-theme="light"]) в media-блоке не даёт
+           системной тёмной теме перебить явный выбор "светлая", а отдельный
+           :root[data-theme="dark"] ниже включает тёмную тему явно даже если
+           система светлая. */
         @media (prefers-color-scheme: dark) {
-          :root {
+          :root:not([data-theme="light"]) {
             --page-bg: radial-gradient(circle at 12% 15%, rgba(10,70,130,0.4) 0%, transparent 42%), radial-gradient(circle at 88% 12%, rgba(140,20,80,0.32) 0%, transparent 40%), radial-gradient(circle at 50% 95%, rgba(20,100,55,0.32) 0%, transparent 45%), #0b0b0d;
             --glass-rgb: 42,42,46;
             --text-primary: #f2f2f7;
@@ -379,6 +449,21 @@ export default function MealPlanner() {
             --skeleton-shine: rgba(255,255,255,0.16);
             --track-bg: rgba(255,255,255,0.14);
           }
+        }
+        :root[data-theme="dark"] {
+          --page-bg: radial-gradient(circle at 12% 15%, rgba(10,70,130,0.4) 0%, transparent 42%), radial-gradient(circle at 88% 12%, rgba(140,20,80,0.32) 0%, transparent 40%), radial-gradient(circle at 50% 95%, rgba(20,100,55,0.32) 0%, transparent 45%), #0b0b0d;
+          --glass-rgb: 42,42,46;
+          --text-primary: #f2f2f7;
+          --text-secondary: #b6b6bb;
+          --text-tertiary: #8e8e93;
+          --hairline: rgba(255,255,255,0.1);
+          --hairline-2: rgba(255,255,255,0.08);
+          --card-shadow: 0 24px 60px rgba(0,0,0,0.55), inset 0 1px 0 rgba(255,255,255,0.06);
+          --modal-backdrop: rgba(0,0,0,0.6);
+          --modal-shadow: 0 30px 80px rgba(0,0,0,0.6);
+          --skeleton-base: rgba(255,255,255,0.08);
+          --skeleton-shine: rgba(255,255,255,0.16);
+          --track-bg: rgba(255,255,255,0.14);
         }
         * { box-sizing: border-box; }
         .chip { transition: background-color .15s ease, border-color .15s ease, transform .18s cubic-bezier(0.34, 1.56, 0.64, 1); -webkit-tap-highlight-color: transparent; }
@@ -435,7 +520,7 @@ export default function MealPlanner() {
              Обычный фиксированный отступ вместо auto — кнопка идёт сразу за
              контентом шага. */
           .mp-nav-row { margin-top: 22px !important; }
-          .mp-result-body, .mp-skeleton-body { flex: 1; }
+          .mp-result-body, .mp-skeleton-body, .mp-account-body { flex: 1; }
         }
         input[type="range"] { -webkit-appearance: none; height: 4px; border-radius: 2px; background: var(--track-bg); }
         input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; width: 22px; height: 22px; border-radius: 50%; background: #fff; box-shadow: 0 2px 8px rgba(0,0,0,0.25), 0 0 0 1px rgba(0,0,0,0.04); cursor: pointer; }
@@ -448,31 +533,60 @@ export default function MealPlanner() {
               <ShoppingBasket size={22} color={ACCENT} strokeWidth={1.75} />
               <span style={styles.brand}>Список на неделю</span>
             </div>
-            {tgFirstName && <div style={styles.greeting} className="greeting-fade">Привет, {tgFirstName} 👋</div>}
+            {(displayName || tgFirstName) && (
+              <div style={styles.greeting} className="greeting-fade">Привет, {displayName || tgFirstName} 👋</div>
+            )}
           </div>
-          {done && (
-            <button onClick={reset} style={styles.resetBtn}>
-              <RotateCcw size={14} /> заново
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            {done && !showAccount && (
+              <button onClick={reset} style={styles.resetBtn}>
+                <RotateCcw size={14} /> заново
+              </button>
+            )}
+            <button
+              onClick={() => setShowAccount((v) => !v)}
+              style={styles.accountBtn}
+              title={showAccount ? "Закрыть аккаунт" : "Аккаунт"}
+            >
+              <Settings size={16} />
             </button>
-          )}
+          </div>
         </div>
 
-        {!done && !assembling && (
+        {showAccount && (
+          <AccountView
+            displayName={displayName} setDisplayName={setDisplayName}
+            theme={theme} setTheme={setTheme}
+            family={family} setFamily={setFamily}
+            meals={meals} setMeals={setMeals}
+            diet={diet} setDiet={setDiet}
+            allergies={allergies} setAllergies={setAllergies}
+            cuisines={cuisines} setCuisines={setCuisines}
+            devices={devices} setDevices={setDevices}
+            toggleSimple={toggleSimple} toggleCuisine={toggleCuisine}
+            hasProfile={hasProfile}
+            onSave={handleSaveProfile}
+            onClear={handleClearProfile}
+            onClose={() => setShowAccount(false)}
+          />
+        )}
+
+        {!showAccount && !done && !assembling && (
           <div style={styles.progressWrap}>
             <div style={styles.progressTrack}>
-              <div style={{ ...styles.progressFill, width: `${((step + 1) / STEP_LABELS.length) * 100}%` }} />
+              <div style={{ ...styles.progressFill, width: `${((step + 1) / activeSteps.length) * 100}%` }} />
             </div>
             <div style={styles.progressLabel}>
-              Шаг {step + 1} из {STEP_LABELS.length} · {STEP_LABELS[step]}
+              Шаг {step + 1} из {activeSteps.length} · {activeSteps[step]?.label}
             </div>
           </div>
         )}
 
-        {assembling && <SkeletonView />}
+        {!showAccount && assembling && <SkeletonView />}
 
-        {!done && !assembling && (
+        {!showAccount && !done && !assembling && (
           <div style={styles.stepBody} className="mp-step-body">
-            {step === 0 && (
+            {currentStepKey === "store" && (
               <StepShell icon={<Store size={20} />} title="Где вам удобно заказывать?" sub="Выберите магазин с доставкой в вашем районе">
                 <div style={styles.grid2}>
                   {STORES.map((s) => (
@@ -488,7 +602,7 @@ export default function MealPlanner() {
               </StepShell>
             )}
 
-            {step === 1 && (
+            {currentStepKey === "family" && (
               <StepShell icon={<Users size={20} />} title="Сколько человек в семье?" sub="Это определит объём продуктов и порции">
                 <div style={styles.counterRow}>
                   <button style={styles.counterBtn} onClick={() => setFamily((f) => Math.max(1, f - 1))}>−</button>
@@ -499,7 +613,7 @@ export default function MealPlanner() {
               </StepShell>
             )}
 
-            {step === 2 && (
+            {currentStepKey === "meals" && (
               <StepShell icon={<UtensilsCrossed size={20} />} title="Какие приёмы пищи планируем?" sub="Например, если вы обедаете на работе — уберите обед, и список будет только с завтраками и ужинами">
                 <div style={styles.stack}>
                   {MEALS.map((m) => (
@@ -512,7 +626,7 @@ export default function MealPlanner() {
               </StepShell>
             )}
 
-            {step === 3 && (
+            {currentStepKey === "budget" && (
               <StepShell icon={<Wallet size={20} />} title="Бюджет на неделю" sub={`Сколько готовы потратить на продукты на ${meals.length || 0} ${meals.length === 1 ? "приём пищи в день" : "приёма/приёмов пищи в день"}`}>
                 <div style={styles.budgetVal}>{budget.toLocaleString("ru-RU")} ₽</div>
                 <input type="range" min={1500} max={15000} step={250} value={budget} onChange={(e) => setBudget(Number(e.target.value))} style={styles.slider} />
@@ -520,7 +634,7 @@ export default function MealPlanner() {
               </StepShell>
             )}
 
-            {step === 4 && (
+            {currentStepKey === "diet" && (
               <StepShell icon={<Salad size={20} />} title="Какой рацион вам нужен?" sub="Мы подберём рецепты под ваши предпочтения">
                 <div style={styles.stack}>
                   {DIETS.map((d) => (
@@ -536,7 +650,7 @@ export default function MealPlanner() {
               </StepShell>
             )}
 
-            {step === 5 && (
+            {currentStepKey === "allergies" && (
               <StepShell icon={<Ban size={20} />} title="Есть аллергии или непереносимости?" sub="Это не предпочтение, а жёсткое ограничение — такие рецепты исключаются полностью, без компромиссов.">
                 <div style={styles.grid2}>
                   <button
@@ -555,7 +669,7 @@ export default function MealPlanner() {
               </StepShell>
             )}
 
-            {step === 6 && (
+            {currentStepKey === "cuisine" && (
               <StepShell icon={<ChefHat size={20} />} title="Кухня" sub="Необязательно — можно выбрать несколько или пропустить">
                 <div style={styles.grid2}>
                   {CUISINES.map((c) => (
@@ -567,7 +681,7 @@ export default function MealPlanner() {
               </StepShell>
             )}
 
-            {step === 7 && (
+            {currentStepKey === "devices" && (
               <StepShell icon={<Flame size={20} />} title="На чём будете готовить?" sub="Выберите доступную технику — рецепты подстроятся под неё">
                 <div style={styles.grid2}>
                   {DEVICES.map((d) => (
@@ -584,17 +698,23 @@ export default function MealPlanner() {
                 <ChevronLeft size={16} /> назад
               </button>
               <button
-                onClick={() => (step === 7 ? handleFinish() : setStep((s) => s + 1))}
-                disabled={!canNext[step]}
-                style={{ ...styles.navBtnPrimary, opacity: canNext[step] ? 1 : 0.4 }}
+                onClick={() => (step === activeSteps.length - 1 ? handleFinish() : setStep((s) => s + 1))}
+                disabled={!canNextByKey[currentStepKey]}
+                style={{ ...styles.navBtnPrimary, opacity: canNextByKey[currentStepKey] ? 1 : 0.4 }}
               >
-                {step === 7 ? "Собрать список" : "Далее"} <ChevronRight size={16} />
+                {step === activeSteps.length - 1 ? "Собрать список" : "Далее"} <ChevronRight size={16} />
               </button>
             </div>
+            {hasProfile && (
+              <p style={styles.quickHint}>
+                Семья, приёмы пищи, рацион и остальное — из вашего профиля. Изменить — в{" "}
+                <button onClick={() => setShowAccount(true)} style={styles.inlineLinkBtn}>Аккаунте</button>.
+              </p>
+            )}
           </div>
         )}
 
-        {done && planView && (
+        {!showAccount && done && planView && (
           <ResultView
             plan={planView}
             storeId={store}
@@ -646,6 +766,170 @@ function SkeletonView() {
   );
 }
 
+const THEME_OPTIONS = [
+  { id: "system", label: "Системная", icon: MonitorSmartphone },
+  { id: "light", label: "Светлая", icon: Sun },
+  { id: "dark", label: "Тёмная", icon: Moon },
+];
+
+// Вкладка "Аккаунт" — открывается поверх визарда/результата (не отдельный
+// роут, это одностраничное приложение без роутера). Тут живёт всё, что
+// пользователь настраивает один раз и не хочет проходить заново на каждую
+// сборку плана: профиль (семья/приёмы пищи/рацион/аллергии/кухня/техника),
+// имя для приветствия и тема. Плюс место под подписку — см. комментарий
+// у AccountSubscriptionCard ниже про то, почему кнопка пока не платит.
+function AccountView({
+  displayName, setDisplayName, theme, setTheme,
+  family, setFamily, meals, setMeals, diet, setDiet,
+  allergies, setAllergies, cuisines, setCuisines, devices, setDevices,
+  toggleSimple, toggleCuisine, hasProfile, onSave, onClear, onClose,
+}) {
+  const [saved, setSaved] = useState(false);
+  const handleSave = () => {
+    onSave();
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2000);
+  };
+
+  return (
+    <div className="fade-in-up mp-account-body" style={styles.stepBody}>
+      <div style={styles.accountHeaderRow}>
+        <button onClick={onClose} style={styles.navBtn}>
+          <ChevronLeft size={16} /> назад
+        </button>
+      </div>
+      <h2 style={{ ...styles.stepTitle, marginTop: 4 }}>Аккаунт</h2>
+
+      <div style={styles.acctSection}>
+        <div style={styles.acctLabel}>Как к вам обращаться</div>
+        <input
+          type="text"
+          value={displayName}
+          onChange={(e) => setDisplayName(e.target.value)}
+          placeholder="Имя для приветствия"
+          style={styles.textInput}
+        />
+      </div>
+
+      <div style={styles.acctSection}>
+        <div style={styles.acctLabel}>Тема</div>
+        <div style={{ display: "flex", gap: 8 }}>
+          {THEME_OPTIONS.map(({ id, label, icon: Icon }) => (
+            <button key={id} className="chip" onClick={() => setTheme(id)} style={styles.themeChip(theme === id)}>
+              <Icon size={16} />
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div style={styles.acctDivider} />
+
+      <div style={styles.acctSection}>
+        <div style={styles.acctSectionTitle}>Профиль для плана</div>
+        <p style={styles.acctSectionHint}>
+          Эти настройки редко меняются, поэтому сохраняются один раз — при следующей сборке плана визард спросит только магазин и бюджет.
+        </p>
+
+        <div style={styles.acctLabel}>Семья</div>
+        <div style={styles.counterRow}>
+          <button style={styles.counterBtn} onClick={() => setFamily((f) => Math.max(1, f - 1))}>−</button>
+          <div style={styles.counterVal}>{family}</div>
+          <button style={styles.counterBtn} onClick={() => setFamily((f) => Math.min(8, f + 1))}>+</button>
+        </div>
+
+        <div style={{ ...styles.acctLabel, marginTop: 16 }}>Приёмы пищи</div>
+        <div style={styles.stack}>
+          {MEALS.map((m) => (
+            <button key={m.id} className="chip" onClick={() => toggleSimple(meals, setMeals, m.id)} style={styles.rowChip(meals.includes(m.id))}>
+              <div style={{ fontWeight: 600 }}>{m.label}</div>
+              {meals.includes(m.id) && <Check size={16} color={ACCENT} />}
+            </button>
+          ))}
+        </div>
+
+        <div style={{ ...styles.acctLabel, marginTop: 16 }}>Рацион</div>
+        <div style={styles.stack}>
+          {DIETS.map((d) => (
+            <button key={d.id} className="chip" onClick={() => setDiet(d.id)} style={styles.rowChip(diet === d.id)}>
+              <div style={{ fontWeight: 600 }}>{d.label}</div>
+              {diet === d.id && <Check size={16} color={ACCENT} />}
+            </button>
+          ))}
+        </div>
+
+        <div style={{ ...styles.acctLabel, marginTop: 16 }}>Аллергии</div>
+        <div style={styles.grid2}>
+          <button className="chip" onClick={() => setAllergies([])} style={styles.storeChip(allergies.length === 0)}>
+            <div style={{ fontWeight: 600 }}>Нет</div>
+          </button>
+          {ALLERGENS.map((a) => (
+            <button key={a.id} className="chip" onClick={() => toggleSimple(allergies, setAllergies, a.id)} style={styles.storeChip(allergies.includes(a.id))}>
+              <div style={{ fontWeight: 600 }}>{a.label}</div>
+            </button>
+          ))}
+        </div>
+
+        <div style={{ ...styles.acctLabel, marginTop: 16 }}>Кухня</div>
+        <div style={styles.grid2}>
+          {CUISINES.map((c) => (
+            <button key={c.id} className="chip" onClick={() => toggleCuisine(cuisines, setCuisines, c.id)} style={styles.storeChip(cuisines.includes(c.id) || (c.id === "any" && cuisines.length === 0))}>
+              <div style={{ fontWeight: 600 }}>{c.label}</div>
+            </button>
+          ))}
+        </div>
+
+        <div style={{ ...styles.acctLabel, marginTop: 16 }}>Техника</div>
+        <div style={styles.grid2}>
+          {DEVICES.map((d) => (
+            <button key={d.id} className="chip" onClick={() => toggleSimple(devices, setDevices, d.id)} style={styles.storeChip(devices.includes(d.id))}>
+              <div style={{ fontWeight: 600 }}>{d.label}</div>
+            </button>
+          ))}
+        </div>
+
+        <button onClick={handleSave} style={{ ...styles.navBtnPrimary, width: "100%", justifyContent: "center", marginTop: 18 }}>
+          {saved ? <><Check size={16} /> Сохранено</> : "Сохранить как профиль"}
+        </button>
+        {hasProfile && (
+          <button onClick={onClear} style={styles.acctClearBtn}>
+            Сбросить сохранённый профиль
+          </button>
+        )}
+      </div>
+
+      <div style={styles.acctDivider} />
+      <AccountSubscriptionCard />
+    </div>
+  );
+}
+
+// Реальной оплаты тут пока нет — ни один платёжный провайдер (Stars,
+// ЮKassa) не подключён, кнопка ничего не списывает. Это осознанно: платить
+// за то, чего нет, — обман пользователя. Как только появится бэкенд с
+// вебхуком от платёжного провайдера (см. docs/telegram-bot-architecture.md),
+// кнопка ниже превратится в реальный openLink на страницу оплаты.
+function AccountSubscriptionCard() {
+  return (
+    <div style={styles.acctSection}>
+      <div style={styles.subCard}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+          <Sparkles size={16} color={ACCENT} />
+          <span style={{ fontWeight: 700, fontSize: 15 }}>Подписка</span>
+          <span style={styles.freeBadge}>Free</span>
+        </div>
+        <p style={styles.acctSectionHint}>
+          Сейчас доступно всё, включая реальный заказ в ВкусВилл. Позже премиум откроет: безлимитную пересборку плана,
+          несколько планов одновременно, напоминания от бота и общий список на семью.
+        </p>
+        <button disabled style={{ ...styles.orderBtn, opacity: 0.4, cursor: "default", marginTop: 4 }}>
+          Скоро
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function ResultView({ plan, storeId, storeName, budget, family, mealsCount, onSwap, onOpenRecipe }) {
   const over = plan.total > budget;
   const [orderState, setOrderState] = useState({ status: "idle" }); // idle | loading | error
@@ -663,11 +947,18 @@ function ResultView({ plan, storeId, storeName, budget, family, mealsCount, onSw
       const items = plan.grouped.flatMap((g) => g.items);
       const { link, matchedCount, totalCount, unmatched } = await buildCartFromShoppingList(items);
       window.open(link, "_blank", "noopener,noreferrer");
-      setOrderState({ status: "idle" });
-      if (matchedCount < totalCount) {
-        // мягкое уведомление, а не блокирующий alert — корзина всё равно открылась
-        console.warn("Не нашли в каталоге ВкусВилл:", unmatched);
-      }
+      // Раньше при неполном совпадении это уходило только в console.warn —
+      // пользователь открывал корзину и молча недосчитывался части товаров,
+      // не понимая почему. ВкусВилл вдобавок принимает максимум 20 позиций
+      // за раз (см. vkusvillMcp.js) — при длинном списке это тоже причина
+      // расхождения, а не только "не нашли в каталоге". Показываем сразу обе.
+      const note =
+        matchedCount < totalCount
+          ? `В корзину добавлено ${matchedCount} из ${totalCount} товаров.` +
+            (totalCount > 20 ? " ВкусВилл принимает максимум 20 позиций за раз — часть пришлось докупить отдельно." : " Часть не нашлась в каталоге — докупите её отдельно.")
+          : null;
+      setOrderState({ status: "idle", note });
+      if (unmatched.length > 0) console.warn("Не нашли в каталоге ВкусВилл:", unmatched);
     } catch (err) {
       setOrderState({ status: "error", message: err.message });
     }
@@ -762,6 +1053,9 @@ function ResultView({ plan, storeId, storeName, budget, family, mealsCount, onSw
           </button>
           {orderState.status === "error" && (
             <p style={styles.orderError}>Не получилось собрать корзину: {orderState.message}. Попробуйте ещё раз.</p>
+          )}
+          {orderState.status === "idle" && orderState.note && (
+            <p style={styles.orderNote}>{orderState.note}</p>
           )}
         </>
       ) : (
@@ -883,6 +1177,29 @@ const styles = {
   brand: { fontSize: 17, fontWeight: 700, letterSpacing: "-0.01em" },
   greeting: { fontSize: 12, color: "var(--text-tertiary)", marginTop: 2 },
   resetBtn: { display: "flex", alignItems: "center", gap: 5, ...glass(0.5, 8), border: "1px solid var(--hairline)", borderRadius: 999, padding: "6px 12px", fontSize: 12, fontWeight: 500, color: "var(--text-secondary)", cursor: "pointer" },
+  accountBtn: { display: "flex", alignItems: "center", justifyContent: "center", width: 32, height: 32, ...glass(0.5, 8), border: "1px solid var(--hairline)", borderRadius: "50%", color: "var(--text-secondary)", cursor: "pointer" },
+  quickHint: { fontSize: 12, color: "var(--text-tertiary)", textAlign: "center", marginTop: 10, lineHeight: 1.4 },
+  inlineLinkBtn: { background: "none", border: "none", padding: 0, color: ACCENT, fontWeight: 600, fontSize: 12, cursor: "pointer", textDecoration: "underline" },
+  accountHeaderRow: { display: "flex", alignItems: "center", marginBottom: 2 },
+  acctSection: { marginTop: 18 },
+  acctSectionTitle: { fontSize: 15, fontWeight: 700, marginBottom: 4 },
+  acctSectionHint: { fontSize: 12.5, color: "var(--text-tertiary)", lineHeight: 1.45, margin: "0 0 12px 0" },
+  acctLabel: { fontSize: 12, fontWeight: 600, color: "var(--text-tertiary)", textTransform: "uppercase", letterSpacing: "0.02em", marginBottom: 8 },
+  acctDivider: { height: 1, background: "var(--hairline)", margin: "22px 0" },
+  acctClearBtn: { width: "100%", background: "none", border: "none", color: "var(--danger)", fontSize: 12.5, fontWeight: 500, cursor: "pointer", padding: "10px 0 0 0" },
+  textInput: {
+    width: "100%", padding: "12px 14px", borderRadius: 14, border: "1px solid var(--hairline)",
+    ...glass(0.45, 10), color: "var(--text-primary)", fontSize: 14, fontFamily: "inherit",
+  },
+  themeChip: (active) => ({
+    flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 4, padding: "12px 6px", borderRadius: 16, cursor: "pointer",
+    border: active ? "1.5px solid rgba(10,132,255,0.55)" : "1px solid var(--hairline)",
+    ...glass(active ? 0.7 : 0.45, 12),
+    boxShadow: active ? "0 4px 14px rgba(10,132,255,0.18)" : "none",
+    color: active ? ACCENT : "var(--text-secondary)", fontSize: 11.5, fontWeight: 600,
+  }),
+  subCard: { border: "1px solid var(--hairline)", borderRadius: 20, padding: "16px 16px 18px", ...glass(0.5, 12) },
+  freeBadge: { fontSize: 10.5, fontWeight: 700, color: "var(--text-tertiary)", background: "var(--track-bg)", padding: "2px 8px", borderRadius: 999, marginLeft: "auto" },
   progressWrap: { marginBottom: 22 },
   progressTrack: { height: 5, borderRadius: 999, background: "var(--track-bg)", overflow: "hidden" },
   progressFill: { height: "100%", borderRadius: 999, background: `linear-gradient(90deg, ${ACCENT}, var(--accent-2))`, transition: "width .25s ease" },
@@ -932,6 +1249,7 @@ const styles = {
   listRow: { display: "flex", justifyContent: "space-between", padding: "7px 0", borderBottom: "1px solid var(--hairline-2)", fontSize: 13.5 },
   orderBtn: { width: "100%", padding: "14px 0", background: `linear-gradient(180deg, ${ACCENT}, #0066DB)`, border: "none", borderRadius: 18, color: "#fff", fontSize: 14.5, fontWeight: 600, cursor: "pointer", marginTop: 8, boxShadow: "0 8px 20px rgba(10,132,255,0.35)" },
   orderError: { fontSize: 12, color: "var(--danger)", textAlign: "center", marginTop: 8 },
+  orderNote: { fontSize: 12, color: "var(--text-tertiary)", textAlign: "center", marginTop: 8, lineHeight: 1.4 },
   shareBtn: { width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 8, padding: "13px 0", ...glass(0.6, 10), border: "1px solid var(--hairline)", borderRadius: 18, color: "var(--text-primary)", fontSize: 14, fontWeight: 600, cursor: "pointer", marginTop: 8 },
 
   recipeRowBtn: { flex: 1, display: "flex", alignItems: "center", gap: 8, background: "none", border: "none", padding: "4px 2px", borderRadius: 10, textAlign: "left", cursor: "pointer", color: "var(--text-primary)", font: "inherit", minWidth: 0 },
