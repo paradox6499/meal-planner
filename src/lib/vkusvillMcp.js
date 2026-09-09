@@ -95,7 +95,16 @@ async function callTool(name, args, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
 
   const inner = JSON.parse(textPart);
   if (!inner.ok) {
-    throw new Error(`VkusVill MCP: ${name} вернул ошибку (${inner.error || "без описания"})`);
+    // inner.error — ВСЕГДА объект {code, message, http_status, retryable},
+    // не строка (проверено вживую) — `${inner.error}` тут коерсил бы его в
+    // "[object Object]" вместо текста, это и был баг "vernul oshibku
+    // ([object Object])" из чата. message — то, что реально стоит показать
+    // человеку (например "Превышен лимит запросов, попробуйте позже").
+    const msg = inner.error?.message || inner.error?.code || (typeof inner.error === "string" ? inner.error : "без описания");
+    const err = new Error(`VkusVill MCP: ${name} вернул ошибку (${msg})`);
+    err.code = inner.error?.code;
+    err.retryable = inner.error?.retryable ?? inner.retryable;
+    throw err;
   }
 
   // Кэшируем только УСПЕШНЫЙ ответ — ошибка/таймаут выбрасывается выше и до

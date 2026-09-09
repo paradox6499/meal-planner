@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect } from "react";
-import { ShoppingBasket, Check, ChevronLeft, ChevronRight, Store, Users, Wallet, Salad, ChefHat, Flame, RotateCcw, UtensilsCrossed, Clock, Repeat, Ban, TriangleAlert, X, Loader2, Share2, Settings, Sun, Moon, MonitorSmartphone, Sparkles, PackageSearch } from "lucide-react";
+import { Check, ChevronLeft, ChevronRight, Store, Users, Wallet, Salad, ChefHat, Flame, RotateCcw, UtensilsCrossed, Clock, Repeat, Ban, TriangleAlert, X, Loader2, Share2, Settings, Sun, Moon, MonitorSmartphone, Sparkles, PackageSearch } from "lucide-react";
 import { ALLERGENS } from "./data/recipes.js";
 import { buildCartFromShoppingList, toVkusvillQuantity } from "./lib/vkusvillMcp.js";
 import { fetchVkusvillPools, getSubstituteOptions } from "./lib/vkusvillRecipes.js";
@@ -396,8 +396,14 @@ export default function MealPlanner() {
         <div style={styles.header}>
           <div>
             <div style={styles.brandRow}>
-              <ShoppingBasket size={22} color={ACCENT} strokeWidth={1.75} />
-              <span style={styles.brand}>Список на неделю</span>
+              {/* Раньше тут была generic-иконка корзины + функциональная подпись
+                  "Список на неделю" — узнаваемого бренда в этом не было, приложение
+                  выглядело как безымянный виджет. Теперь — тот же образ (дымящаяся
+                  миска), что уже на аватарке @s_edim_bot в Telegram, плюс само
+                  название приложения — так шапка сразу говорит "это Съедим", а не
+                  описывает функцию, которую и так видно по контенту ниже. */}
+              <div style={styles.logoMark}>🍲</div>
+              <span style={styles.brand}>Съедим</span>
             </div>
             {(displayName || tgFirstName) && (
               <div style={styles.greeting} className="greeting-fade">Привет, {displayName || tgFirstName} 👋</div>
@@ -952,6 +958,17 @@ function ResultView({ plan, storeId, storeName, budget, family, mealsCount, diet
         </div>
       )}
 
+      {plan.mostlyUnpriced && (
+        <div style={styles.warningBox}>
+          <TriangleAlert size={15} style={{ flexShrink: 0, marginTop: 1 }} />
+          <span>
+            Не удалось получить цены почти ни на один товар — похоже, у ВкусВилл сейчас перегружен сервис или
+            временно превышен лимит запросов на нашей стороне. Сумма ниже недостоверна. Попробуйте собрать план
+            заново через несколько минут.
+          </span>
+        </div>
+      )}
+
       <div style={{ ...styles.totalBox, borderColor: over ? "rgba(255,59,48,0.35)" : "rgba(10,132,255,0.3)" }}>
         <span style={{ fontSize: 13, color: "var(--text-tertiary)" }}>Итого за продукты</span>
         <span style={{ fontSize: 28, fontWeight: 700, letterSpacing: "-0.01em", color: over ? DANGER : ACCENT }}>
@@ -963,7 +980,7 @@ function ResultView({ plan, storeId, storeName, budget, family, mealsCount, diet
             С учётом {Object.keys(subs).length} {Object.keys(subs).length === 1 ? "замены" : "замен"}
           </span>
         )}
-        {plan.itemized && plan.anyUnpriced && (
+        {plan.itemized && plan.anyUnpriced && !plan.mostlyUnpriced && (
           <span style={{ fontSize: 11, color: "var(--text-tertiary)", marginTop: 4 }}>
             Цена не найдена для части товаров — не учтена в сумме
           </span>
@@ -1139,10 +1156,20 @@ function buildShareText(plan, storeName, family) {
 // обычная веб-ссылка: открывает штатный диалог Telegram "переслать в чат".
 // `url` (если задан через BOT_SHARE_URL) даёт кликабельную карточку-превью
 // поверх текста — это и есть тот самый "рост узнаваемости через шеринг".
+// Раньше собирали ссылку через URLSearchParams — он кодирует пробел как "+"
+// (стандарт application/x-www-form-urlencoded), а страница t.me/share/url
+// его обратно в пробел не разворачивает: в переданном тексте (там много
+// пробелов — переносы строк, отступы у каждого блюда) плюсики вместо
+// пробелов буквально появлялись в сообщении (баг из чата). encodeURIComponent
+// кодирует пробел как %20 — это понимает любой корректный URL-декодер.
+export function buildShareUrl(text, url) {
+  let href = `https://t.me/share/url?text=${encodeURIComponent(text)}`;
+  if (url) href += `&url=${encodeURIComponent(url)}`;
+  return href;
+}
+
 function shareViaTelegram(text, url) {
-  const params = new URLSearchParams({ text });
-  if (url) params.set("url", url);
-  window.open(`https://t.me/share/url?${params}`, "_blank", "noopener,noreferrer");
+  window.open(buildShareUrl(text, url), "_blank", "noopener,noreferrer");
 }
 
 function RecipeModal({ dm, family, onClose }) {
@@ -1216,8 +1243,13 @@ const styles = {
   },
   card: { width: "100%", maxWidth: 440, ...glass(0.55, 24), borderRadius: 28, border: "1px solid var(--hairline)", padding: 26, boxShadow: "var(--card-shadow)" },
   header: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20 },
-  brandRow: { display: "flex", alignItems: "center", gap: 8 },
-  brand: { fontSize: 17, fontWeight: 700, letterSpacing: "-0.01em" },
+  brandRow: { display: "flex", alignItems: "center", gap: 9 },
+  logoMark: {
+    width: 30, height: 30, borderRadius: 9, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center",
+    fontSize: 16, lineHeight: 1, background: `linear-gradient(135deg, ${ACCENT}, var(--accent-2))`,
+    boxShadow: "0 3px 10px rgba(10,132,255,0.35)",
+  },
+  brand: { fontSize: 19, fontWeight: 700, letterSpacing: "-0.015em" },
   greeting: { fontSize: 12, color: "var(--text-tertiary)", marginTop: 2 },
   resetBtn: { display: "flex", alignItems: "center", gap: 5, ...glass(0.5, 8), border: "1px solid var(--hairline)", borderRadius: 999, padding: "6px 12px", fontSize: 12, fontWeight: 500, color: "var(--text-secondary)", cursor: "pointer" },
   accountBtn: { display: "flex", alignItems: "center", justifyContent: "center", width: 32, height: 32, ...glass(0.5, 8), border: "1px solid var(--hairline)", borderRadius: "50%", color: "var(--text-secondary)", cursor: "pointer" },

@@ -165,7 +165,7 @@ export function buildPlanView(planState, pools, family, priceByName) {
     return { day: d.day, dayMeals };
   });
 
-  let anyUnpriced = false;
+  let unpricedCount = 0;
   const shoppingList = Object.entries(ingredMap).map(([key, amount]) => {
     const [name, unit] = key.split("|");
     const roundedAmount = Math.round(amount);
@@ -177,7 +177,7 @@ export function buildPlanView(planState, pools, family, priceByName) {
       if (info && isWeightOrVolumeUnit(unit) === isWeightOrVolumeUnit(info.productUnit)) {
         cost = Math.round(pricePerBaseUnit(info.price, info.productUnit) * roundedAmount);
       } else {
-        anyUnpriced = true;
+        unpricedCount++;
       }
     }
     return { name, amount: roundedAmount, unit, dept: departmentOf(name), cost };
@@ -195,12 +195,20 @@ export function buildPlanView(planState, pools, family, priceByName) {
   // оставить прежнюю сумму по рецептам, чем изобретать несуществующую точность.
   const itemized = priceByName != null;
   const itemizedTotal = itemized ? shoppingList.reduce((sum, it) => sum + (it.cost || 0), 0) : null;
+  // Раньше был только булев anyUnpriced — "не нашли цену для яблочного
+  // уксуса" и "ВкусВилл сейчас лимитирует запросы, не нашли цену ВООБЩЕ
+  // ни для чего" показывали ОДНУ И ТУ ЖЕ мелкую подпись, хотя это разные по
+  // серьёзности ситуации (нашли живьём при жалобе в чате на "корзину на
+  // 3000 ₽, которая стала 0 ₽"). mostlyUnpriced — явный сигнал ResultView
+  // показать не мелкую подпись, а полноценное предупреждение "похоже,
+  // ВкусВилл сейчас недоступен".
+  const mostlyUnpriced = itemized && shoppingList.length > 0 && unpricedCount / shoppingList.length > 0.5;
 
   return {
     days, grouped,
     total: Math.round(itemized ? itemizedTotal : total),
     itemized,
     warnings: planState.warnings || [],
-    anyEstimated, anyUnpriced: itemized && anyUnpriced,
+    anyEstimated, anyUnpriced: itemized && unpricedCount > 0, mostlyUnpriced,
   };
 }

@@ -185,4 +185,26 @@ describe("buildPlanView", () => {
     const carrotItem = view.grouped.flatMap((g) => g.items).find((it) => it.name === "морковь");
     expect(carrotItem.cost).toBeNull();
   });
+
+  it("mostlyUnpriced=true, когда цену не нашли для большинства позиций (регрессия: жалоба 'корзина на 3000₽ стала 0₽' — на деле это был rate-limit ВкусВилл, но само сообщение об этом не говорило)", () => {
+    // priceByName пуст целиком — как при системном сбое/rate-limit: ничего не резолвится
+    const view = buildPlanView(planState, pools, 2, new Map());
+    expect(view.mostlyUnpriced).toBe(true);
+    expect(view.total).toBe(0);
+  });
+
+  it("mostlyUnpriced=false, когда не нашлась цена только для меньшинства позиций", () => {
+    const priceByName = new Map([
+      ["морковь", { price: 55, productUnit: "кг" }],
+      // "яйцо" отсутствует в карте — 1 из 2 позиций без цены, это МЕНЬШИНСТВО
+    ]);
+    const view = buildPlanView(planState, pools, 2, priceByName);
+    expect(view.anyUnpriced).toBe(true);
+    expect(view.mostlyUnpriced).toBe(false);
+  });
+
+  it("mostlyUnpriced=false вне итемизированного режима (не-ВкусВилл — там своя, старая логика)", () => {
+    const view = buildPlanView(planState, pools, 2, null);
+    expect(view.mostlyUnpriced).toBe(false);
+  });
 });
