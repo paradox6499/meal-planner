@@ -151,11 +151,14 @@ function decodeHtmlEntities(str) {
   return new DOMParser().parseFromString(str, "text/html").documentElement.textContent;
 }
 
-function isWeightOrVolumeUnit(unit) {
+// export — App.jsx (buildPlanView) считает по ним итемизированную стоимость
+// каждой позиции списка покупок отдельно, тем же способом, каким здесь
+// считается стоимость рецепта — единая логика, не два разных пути расчёта.
+export function isWeightOrVolumeUnit(unit) {
   return unit === "г" || unit === "мл" || unit === "кг" || unit === "л";
 }
 
-function pricePerBaseUnit(price, productUnit) {
+export function pricePerBaseUnit(price, productUnit) {
   // цена товара за кг/л -> цена за грамм/мл (наши recipe.ingr всегда в г/мл/шт)
   if (productUnit === "кг" || productUnit === "л") return price / 1000;
   return price; // уже за г/мл/шт — как есть
@@ -163,14 +166,18 @@ function pricePerBaseUnit(price, productUnit) {
 
 // Один параллельный проход по ВСЕМ уникальным ингредиентам сразу по всем
 // пулам (не по каждому рецепту отдельно) — иначе "яйцо"/"соль" искались бы
-// в каталоге по многу раз впустую. Мутирует recipe.cost/isRealPrice на месте.
+// в каталоге по многу раз впустую. Мутирует recipe.cost/isRealPrice на месте
+// (нужно для цены рядом с каждым блюдом) И возвращает саму карту name->цена
+// товара — она же нужна снаружи (App.jsx/buildPlanView), чтобы посчитать
+// итемизированную стоимость списка покупок ТЕМИ ЖЕ цифрами, а не запрашивать
+// каталог второй раз ради того, что уже знаем.
 async function attachRealCosts(pools) {
   const allNames = new Set();
   Object.values(pools).forEach((recipes) => recipes.forEach((r) => r.ingr.forEach(([name]) => allNames.add(name))));
-  if (allNames.size === 0) return;
+  const priceByName = new Map();
+  if (allNames.size === 0) return priceByName;
 
   const resolved = await resolvePrices([...allNames].map((name) => ({ name, amount: 1, unit: "шт" })));
-  const priceByName = new Map();
   resolved.forEach((r) => {
     if (r.matched && r.price != null) priceByName.set(r.name, { price: r.price, productUnit: r.productUnit });
   });
@@ -197,6 +204,8 @@ async function attachRealCosts(pools) {
       }
     });
   });
+
+  return priceByName;
 }
 
 /** Тянет пулы рецептов из VkusVill под текущие фильтры визарда — по форме
@@ -234,14 +243,18 @@ export async function fetchVkusvillPools({ diet, cuisines, devices, allergies, c
     })
   );
 
-  await attachRealCosts(pools);
+  const priceByName = await attachRealCosts(pools);
   // buildInitialPlan (App.jsx) жадно ищет самый дорогой рецепт, который ещё
   // укладывается в допустимый бюджет — для этого пул должен быть
   // отсортирован по возрастанию цены, как и статические RECIPES в
   // buildPools(). Тут цены появляются только что (после attachRealCosts),
   // поэтому сортируем здесь, а не раньше.
   Object.values(pools).forEach((recipes) => recipes.sort((a, b) => a.cost - b.cost));
-  return pools;
+  // priceByName наружу — App.jsx/buildPlanView считает по ней итемизированную
+  // стоимость КАЖДОЙ позиции списка покупок (не только суммарную стоимость
+  // рецепта), это и даёт "Итого за продукты", которое честно меняется при
+  // замене товара через "Нет в наличии".
+  return { pools, priceByName };
 }
 
 /** "Нет в наличии" в списке покупок (ResultView) — предлагает замену

@@ -10,8 +10,8 @@ import {
   recipeHasAllergen,
   effectiveRecipeCost,
 } from "./data/recipes.js";
-import { buildCartFromShoppingList } from "./lib/vkusvillMcp.js";
-import { fetchVkusvillPools, getSubstituteOptions } from "./lib/vkusvillRecipes.js";
+import { buildCartFromShoppingList, toVkusvillQuantity } from "./lib/vkusvillMcp.js";
+import { fetchVkusvillPools, getSubstituteOptions, pricePerBaseUnit, isWeightOrVolumeUnit } from "./lib/vkusvillRecipes.js";
 import { loadProfile, saveProfile, clearProfile, loadTheme, saveTheme } from "./lib/profile.js";
 
 // ---------- UI-конфигурация (не контент рецептов — та живёт в data/recipes.js) ----------
@@ -189,7 +189,17 @@ function buildInitialPlan(pools, selectedMeals, budget, family) {
 
 // разворачивает planState (id-шники) в полные объекты для отображения + считает
 // итоговую сумму и сгруппированный список покупок
-function buildPlanView(planState, pools, family) {
+// priceByName — карта ингредиент->цена товара из fetchVkusvillPools
+// (см. vkusvillRecipes.js), null для не-ВкусВилл или если реальные рецепты
+// не подтянулись. Раньше "Итого за продукты" считалось ТОЛЬКО как сумма
+// cost по рецептам — при замене товара через "Нет в наличии" (ResultView)
+// эта сумма не знала о замене и оставалась замороженной на старой цифре.
+// Теперь, когда есть priceByName, каждая строка списка покупок получает
+// СВОЮ цену (той же арифметикой, что и cost рецепта — pricePerBaseUnit,
+// см. vkusvillRecipes.js), а "Итого" — их сумма; ResultView может честно
+// пересчитать её при замене, просто заменив цену одной строки, а не
+// пересобирая весь план.
+function buildPlanView(planState, pools, family, priceByName) {
   if (!planState) return null;
 
   // Рецепт мог прийти либо из статического RECIPES_BY_ID, либо из живых
@@ -228,9 +238,22 @@ function buildPlanView(planState, pools, family) {
     return { day: d.day, dayMeals };
   });
 
+  let anyUnpriced = false;
   const shoppingList = Object.entries(ingredMap).map(([key, amount]) => {
     const [name, unit] = key.split("|");
-    return { name, amount: Math.round(amount), unit, dept: departmentOf(name) };
+    const roundedAmount = Math.round(amount);
+    let cost = null;
+    if (priceByName) {
+      const info = priceByName.get(name);
+      // тот же "род единиц" (вес/объём vs штучно), что и в attachRealCosts —
+      // иначе можно случайно посчитать цену по совсем другому товару
+      if (info && isWeightOrVolumeUnit(unit) === isWeightOrVolumeUnit(info.productUnit)) {
+        cost = Math.round(pricePerBaseUnit(info.price, info.productUnit) * roundedAmount);
+      } else {
+        anyUnpriced = true;
+      }
+    }
+    return { name, amount: roundedAmount, unit, dept: departmentOf(name), cost };
   });
   const grouped = DEPARTMENTS.map((d) => ({
     name: d.name,
@@ -239,7 +262,20 @@ function buildPlanView(planState, pools, family) {
   const other = shoppingList.filter((it) => it.dept === "Разное");
   if (other.length > 0) grouped.push({ name: "Разное", items: other });
 
-  return { days, total: Math.round(total), grouped, warnings: planState.warnings || [], anyEstimated };
+  // Итемизированный тотал доступен только когда есть priceByName (сейчас —
+  // только ВкусВилл: реальные цены по ингредиентам известны). Для остальных
+  // сетей другого источника цен нет вообще (prices.json пуст) — там честнее
+  // оставить прежнюю сумму по рецептам, чем изобретать несуществующую точность.
+  const itemized = priceByName != null;
+  const itemizedTotal = itemized ? shoppingList.reduce((sum, it) => sum + (it.cost || 0), 0) : null;
+
+  return {
+    days, grouped,
+    total: Math.round(itemized ? itemizedTotal : total),
+    itemized,
+    warnings: planState.warnings || [],
+    anyEstimated, anyUnpriced: itemized && anyUnpriced,
+  };
 }
 
 // Telegram сам присылает имя пользователя при открытии Mini App — это
@@ -337,10 +373,13 @@ export default function MealPlanner() {
   // реактивно по ходу визарда. До первого нажатия — null, и это ок:
   // planView ниже явно проверяет planState на null раньше, чем тронуть pools.
   const [pools, setPools] = useState(null);
+  // Карта ингредиент->цена товара (ВкусВилл) — null для остальных сетей или
+  // если реальные рецепты не подтянулись (см. комментарий у buildPlanView).
+  const [priceByName, setPriceByName] = useState(null);
 
   // planState хранит только id рецептов по дням — так swapMeal меняет один слот,
   // не трогая остальную неделю и не требуя пересборки с нуля
-  const planView = useMemo(() => buildPlanView(planState, pools, family), [planState, pools, family]);
+  const planView = useMemo(() => buildPlanView(planState, pools, family, priceByName), [planState, pools, family, priceByName]);
 
   const handleFinish = async () => {
     const selectedMeals = MEALS.filter((m) => meals.includes(m.id));
@@ -348,13 +387,16 @@ export default function MealPlanner() {
     setAssembling(true);
 
     let resolvedPools;
+    let resolvedPriceByName = null;
     if (store === "vv") {
       // Реальные рецепты ВкусВилл — с реальными фото, шагами и (по
       // возможности) реальной ценой. Если MCP недоступен/упал — тихо
       // откатываемся на прежний статический список, а не роняем экран:
       // пользователь всё равно должен получить план, просто оценочный.
       try {
-        resolvedPools = await fetchVkusvillPools({ diet, cuisines, devices, allergies, categories: neededCategories });
+        const result = await fetchVkusvillPools({ diet, cuisines, devices, allergies, categories: neededCategories });
+        resolvedPools = result.pools;
+        resolvedPriceByName = result.priceByName;
         const gotAnything = neededCategories.some((c) => (resolvedPools[c] || []).length > 0);
         if (!gotAnything) throw new Error("VkusVill не вернул рецептов под эти фильтры");
       } catch (err) {
@@ -366,6 +408,7 @@ export default function MealPlanner() {
     }
 
     setPools(resolvedPools);
+    setPriceByName(resolvedPriceByName);
     setPlanState(buildInitialPlan(resolvedPools, selectedMeals, budget, family));
     setDone(true);
     setAssembling(false);
@@ -396,7 +439,7 @@ export default function MealPlanner() {
   // специфично для конкретной прошлой сборки: магазин, бюджет и сам план.
   const reset = () => {
     setStep(0); setStore(null); setBudget(4000); setDone(false); setPlanState(null);
-    setOpenRecipe(null); setAssembling(false); setPools(null);
+    setOpenRecipe(null); setAssembling(false); setPools(null); setPriceByName(null);
     if (!hasProfile) {
       setFamily(2); setMeals(["lunch", "dinner"]); setDiet(null);
       setAllergies([]); setCuisines([]); setDevices([]);
@@ -954,7 +997,6 @@ function AccountSubscriptionCard() {
 }
 
 function ResultView({ plan, storeId, storeName, budget, family, mealsCount, diet, allergies, onSwap, onOpenRecipe }) {
-  const over = plan.total > budget;
   const [orderState, setOrderState] = useState({ status: "idle" }); // idle | loading | error
 
   // Реальный заказ пока подключён только для ВкусВилл — у них единственных
@@ -995,6 +1037,38 @@ function ResultView({ plan, storeId, storeName, budget, family, mealsCount, diet
       return next;
     });
   };
+
+  // name -> исходная позиция списка покупок (amount/unit/cost) — нужна и
+  // для пересчёта итого при замене, и для сборки корзины выше.
+  const itemsByName = useMemo(
+    () => new Map(plan.grouped.flatMap((g) => g.items).map((it) => [it.name, it])),
+    [plan]
+  );
+
+  // Сколько единиц товара-замены реально уйдёт в корзину — та же формула,
+  // что использует buildCartFromShoppingList при заказе (toVkusvillQuantity),
+  // поэтому строка "стоимость замены" здесь и сумма в корзине не расходятся.
+  const substituteLineCost = (item, sub) => {
+    const qty = toVkusvillQuantity(item.amount, item.unit, sub.productUnit);
+    return Math.round(sub.price * qty);
+  };
+
+  // "Итого за продукты" из buildPlanView посчитано ДО всех замен — честно
+  // пересчитываем здесь: вычитаем цену оригинальной позиции и добавляем
+  // цену замены, только для тех строк, где замена реально выбрана. Без
+  // итемизированных цен (plan.itemized===false — не-ВкусВилл или сбой
+  // ВкусВилл) корректно посчитать дельту нечем, оставляем сумму как есть.
+  const adjustedTotal = useMemo(() => {
+    if (!plan.itemized) return plan.total;
+    let delta = 0;
+    for (const [name, sub] of Object.entries(subs)) {
+      const item = itemsByName.get(name);
+      if (!item) continue;
+      delta += substituteLineCost(item, sub) - (item.cost || 0);
+    }
+    return plan.total + delta;
+  }, [plan, subs, itemsByName]);
+  const over = adjustedTotal > budget;
 
   const handleOrder = async () => {
     setOrderState({ status: "loading" });
@@ -1047,10 +1121,20 @@ function ResultView({ plan, storeId, storeName, budget, family, mealsCount, diet
       <div style={{ ...styles.totalBox, borderColor: over ? "rgba(255,59,48,0.35)" : "rgba(10,132,255,0.3)" }}>
         <span style={{ fontSize: 13, color: "var(--text-tertiary)" }}>Итого за продукты</span>
         <span style={{ fontSize: 28, fontWeight: 700, letterSpacing: "-0.01em", color: over ? DANGER : ACCENT }}>
-          {plan.total.toLocaleString("ru-RU")} ₽
+          {adjustedTotal.toLocaleString("ru-RU")} ₽
         </span>
         <span style={{ fontSize: 13, color: "var(--text-tertiary)" }}>из {budget.toLocaleString("ru-RU")} ₽ бюджета</span>
-        {plan.anyEstimated && (
+        {plan.itemized && Object.keys(subs).length > 0 && (
+          <span style={{ fontSize: 11, color: "var(--text-tertiary)", marginTop: 4 }}>
+            С учётом {Object.keys(subs).length} {Object.keys(subs).length === 1 ? "замены" : "замен"}
+          </span>
+        )}
+        {plan.itemized && plan.anyUnpriced && (
+          <span style={{ fontSize: 11, color: "var(--text-tertiary)", marginTop: 4 }}>
+            Цена не найдена для части товаров — не учтена в сумме
+          </span>
+        )}
+        {!plan.itemized && plan.anyEstimated && (
           <span style={{ fontSize: 11, color: "var(--text-tertiary)", marginTop: 4 }}>
             Часть цен — оценочные, без данных из магазина
           </span>
@@ -1119,14 +1203,17 @@ function ResultView({ plan, storeId, storeName, budget, family, mealsCount, diet
                     <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
                       {sub ? (
                         <>
-                          <span style={{ color: "var(--text-tertiary)" }}>{sub.price} ₽</span>
+                          <span style={{ color: "var(--text-tertiary)" }}>{substituteLineCost(it, sub).toLocaleString("ru-RU")} ₽</span>
                           <button onClick={() => revertSubstitute(it.name)} title="Отменить замену" style={styles.subRevertBtn}>
                             <X size={13} />
                           </button>
                         </>
                       ) : (
                         <>
-                          <span style={{ color: "var(--text-tertiary)" }}>{it.amount} {it.unit}</span>
+                          <span style={{ color: "var(--text-tertiary)" }}>
+                            {it.amount} {it.unit}
+                            {plan.itemized && it.cost != null && ` · ${it.cost.toLocaleString("ru-RU")} ₽`}
+                          </span>
                           {canOrderForReal && (
                             <button onClick={() => handleFindSubstitute(it.name)} title="Нет в наличии — подобрать замену" style={styles.subFindBtn}>
                               <PackageSearch size={13} />

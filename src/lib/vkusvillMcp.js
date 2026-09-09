@@ -117,7 +117,11 @@ export function createCartLink(products) {
 // приближение пересчёта, не точная торговая логика (округления в бОльшую
 // сторону, чем нужно математически, — это осознанно: докупить лишнее не
 // страшно, купить меньше нужного для рецепта — страшнее).
-function toVkusvillQuantity(amount, ourUnit, productUnit) {
+// export — нужна снаружи (ResultView в App.jsx) для честного пересчёта
+// "Итого за продукты" при замене товара: сколько единиц товара-замены реально
+// уйдёт в корзину, столько и должно учитываться в сумме, а не голая цена за
+// одну штуку/кг замены без учёта нужного количества.
+export function toVkusvillQuantity(amount, ourUnit, productUnit) {
   const clamp = (n) => Math.min(40, Math.max(0.01, n));
   if (ourUnit === "шт") return clamp(Math.round(amount));
   if (productUnit === "кг" || productUnit === "л") return clamp(Math.round((amount / 1000) * 100) / 100);
