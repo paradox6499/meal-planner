@@ -5,6 +5,14 @@ import { buildCartFromShoppingList, toVkusvillQuantity } from "./lib/vkusvillMcp
 import { fetchVkusvillPools, getSubstituteOptions } from "./lib/vkusvillRecipes.js";
 import { loadProfile, saveProfile, clearProfile, loadTheme, saveTheme } from "./lib/profile.js";
 import { buildPools, buildInitialPlan, buildPlanView } from "./lib/planLogic.js";
+import { submitPlanToBackend } from "./lib/backend.js";
+
+// Разумные дефолты "во сколько вы обычно едите" — единственное, чего не
+// хватало для напоминаний от бота (см. server/README.md и обсуждение в
+// чате): раньше визард спрашивал КАКИЕ приёмы пищи, но не КОГДА. Отдельного
+// шага под это нет — правится в Аккаунте, вместе с остальными "настроил
+// один раз" полями.
+const DEFAULT_MEAL_TIMES = { breakfast: "08:00", lunch: "13:00", dinner: "19:00", snack: "16:00" };
 
 // ---------- UI-конфигурация (не контент рецептов — та живёт в data/recipes.js) ----------
 
@@ -117,6 +125,7 @@ export default function MealPlanner() {
   const [openRecipe, setOpenRecipe] = useState(null);
   const [showAccount, setShowAccount] = useState(false);
   const [displayName, setDisplayName] = useState(savedProfile?.displayName ?? "");
+  const [mealTimes, setMealTimes] = useState(savedProfile?.mealTimes ?? DEFAULT_MEAL_TIMES);
 
   // "system" | "light" | "dark" — управляется вручную из Аккаунта, поверх
   // системной темы по умолчанию (см. data-theme в <style> ниже и useEffect,
@@ -172,6 +181,16 @@ export default function MealPlanner() {
   // planState хранит только id рецептов по дням — так swapMeal меняет один слот,
   // не трогая остальную неделю и не требуя пересборки с нуля
   const planView = useMemo(() => buildPlanView(planState, pools, family, priceByName), [planState, pools, family, priceByName]);
+
+  // Best-effort отправка плана на сервер напоминаний — см. lib/backend.js,
+  // там же и все причины, по которым это может тихо ничего не сделать
+  // (бэкенд не задеплоен, приложение открыто не в Telegram). Срабатывает
+  // и повторно при "Заменить блюдо" (planView меняется) — это правильно:
+  // сервер должен напоминать про АКТУАЛЬНОЕ блюдо, а не про то, что было
+  // до замены.
+  useEffect(() => {
+    if (done && planView) submitPlanToBackend(planView, mealTimes);
+  }, [done, planView, mealTimes]);
 
   const handleFinish = async () => {
     const selectedMeals = MEALS.filter((m) => meals.includes(m.id));
@@ -239,7 +258,7 @@ export default function MealPlanner() {
   };
 
   const handleSaveProfile = () => {
-    saveProfile({ family, meals, diet, allergies, cuisines, devices, displayName });
+    saveProfile({ family, meals, diet, allergies, cuisines, devices, displayName, mealTimes });
   };
   const handleClearProfile = () => {
     clearProfile();
@@ -411,6 +430,7 @@ export default function MealPlanner() {
             allergies={allergies} setAllergies={setAllergies}
             cuisines={cuisines} setCuisines={setCuisines}
             devices={devices} setDevices={setDevices}
+            mealTimes={mealTimes} setMealTimes={setMealTimes}
             toggleSimple={toggleSimple} toggleCuisine={toggleCuisine}
             hasProfile={hasProfile}
             onSave={handleSaveProfile}
@@ -632,6 +652,7 @@ function AccountView({
   displayName, setDisplayName, theme, setTheme,
   family, setFamily, meals, setMeals, diet, setDiet,
   allergies, setAllergies, cuisines, setCuisines, devices, setDevices,
+  mealTimes, setMealTimes,
   toggleSimple, toggleCuisine, hasProfile, onSave, onClear, onClose,
 }) {
   const [saved, setSaved] = useState(false);
@@ -699,6 +720,26 @@ function AccountView({
             </button>
           ))}
         </div>
+
+        {meals.length > 0 && (
+          <>
+            <div style={{ ...styles.acctLabel, marginTop: 16 }}>Во сколько обычно едите</div>
+            <p style={styles.acctSectionHint}>Нужно только для напоминаний от бота — без этого мы не знаем, за сколько до еды написать.</p>
+            <div style={styles.stack}>
+              {MEALS.filter((m) => meals.includes(m.id)).map((m) => (
+                <div key={m.id} style={styles.mealTimeRow}>
+                  <span>{m.label}</span>
+                  <input
+                    type="time"
+                    value={mealTimes[m.id] || DEFAULT_MEAL_TIMES[m.id]}
+                    onChange={(e) => setMealTimes((prev) => ({ ...prev, [m.id]: e.target.value }))}
+                    style={styles.timeInput}
+                  />
+                </div>
+              ))}
+            </div>
+          </>
+        )}
 
         <div style={{ ...styles.acctLabel, marginTop: 16 }}>Рацион</div>
         <div style={styles.stack}>
@@ -1201,6 +1242,14 @@ const styles = {
     // font-size < 16px, это его собственное поведение, не баг вёрстки; ниже
     // 16 здесь быть не должно, даже если по дизайну хочется мельче.
     fontSize: 16, fontFamily: "inherit",
+  },
+  mealTimeRow: {
+    display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 15px",
+    borderRadius: 18, border: "1px solid var(--hairline)", ...glass(0.45, 12), fontSize: 14, fontWeight: 500,
+  },
+  timeInput: {
+    border: "1px solid var(--hairline)", borderRadius: 10, padding: "6px 8px", color: "var(--text-primary)",
+    background: "transparent", fontSize: 16, fontFamily: "inherit", // 16px — та же причина, что у textInput выше
   },
   themeChip: (active) => ({
     flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 4, padding: "12px 6px", borderRadius: 16, cursor: "pointer",

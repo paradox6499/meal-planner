@@ -1,0 +1,17 @@
+{
+  "name": "meal-planner-server",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Бэкенд для напоминаний от @s_edim_bot — первая (и пока единственная) причина, по которой у приложения вообще появился сервер. См. server/README.md.",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "vitest": "^5.0.0"
+  }
+}

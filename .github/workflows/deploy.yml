@@ -7,6 +7,13 @@ name: Deploy to GitHub Pages
 #
 # Разово перед первым запуском: Settings -> Pages -> Source ->
 # "GitHub Actions" (не "Deploy from a branch") в самом репозитории.
+#
+# VITE_BACKEND_URL (Settings -> Secrets and variables -> Actions -> Variables,
+# НЕ Secrets — это публичный адрес API, не секрет) — адрес сервера
+# напоминаний (server/, деплоится отдельно на Render, см. server/README.md).
+# Пока переменная не задана — просто не задана в сборке, фронтенд тихо не
+# пытается ничего отправлять на бэкенд (см. src/lib/backend.js), остальное
+# приложение работает как обычная статика.
 
 on:
   push:
@@ -34,6 +41,8 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run build
+        env:
+          VITE_BACKEND_URL: ${{ vars.VITE_BACKEND_URL }}
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
