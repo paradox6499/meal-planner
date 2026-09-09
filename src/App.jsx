@@ -6,6 +6,8 @@ import { fetchVkusvillPools, getSubstituteOptions } from "./lib/vkusvillRecipes.
 import { loadProfile, saveProfile, clearProfile, loadTheme, saveTheme } from "./lib/profile.js";
 import { buildPools, buildInitialPlan, buildPlanView } from "./lib/planLogic.js";
 import { submitPlanToBackend } from "./lib/backend.js";
+import logoUrl from "./assets/logo.svg";
+import { hapticSelect, hapticImpact, hapticNotify } from "./lib/haptics.js";
 
 // Разумные дефолты "во сколько вы обычно едите" — единственное, чего не
 // хватало для напоминаний от бота (см. server/README.md и обсуждение в
@@ -138,9 +140,11 @@ export default function MealPlanner() {
   }, [theme]);
 
   const toggleSimple = (arr, setArr, id) => {
+    hapticSelect();
     setArr((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
   };
   const toggleCuisine = (arr, setArr, id) => {
+    hapticSelect();
     if (id === "any") return setArr(["any"]);
     setArr((prev) => {
       const withoutAny = prev.filter((x) => x !== "any");
@@ -223,9 +227,11 @@ export default function MealPlanner() {
     setPlanState(buildInitialPlan(resolvedPools, selectedMeals, budget, family));
     setDone(true);
     setAssembling(false);
+    hapticNotify("success");
   };
 
   const swapMeal = (dayIndex, slotIndex) => {
+    hapticImpact("light");
     setPlanState((prev) => {
       if (!prev) return prev;
       const days = prev.days.map((d, i) => {
@@ -249,6 +255,7 @@ export default function MealPlanner() {
   // так уже верные (в этом весь смысл профиля), сбрасывается только то, что
   // специфично для конкретной прошлой сборки: магазин, бюджет и сам план.
   const reset = () => {
+    hapticImpact("light");
     setStep(0); setStore(null); setBudget(4000); setDone(false); setPlanState(null);
     setOpenRecipe(null); setAssembling(false); setPools(null); setPriceByName(null);
     if (!hasProfile) {
@@ -258,6 +265,7 @@ export default function MealPlanner() {
   };
 
   const handleSaveProfile = () => {
+    hapticNotify("success");
     saveProfile({ family, meals, diet, allergies, cuisines, devices, displayName, mealTimes });
   };
   const handleClearProfile = () => {
@@ -398,11 +406,11 @@ export default function MealPlanner() {
             <div style={styles.brandRow}>
               {/* Раньше тут была generic-иконка корзины + функциональная подпись
                   "Список на неделю" — узнаваемого бренда в этом не было, приложение
-                  выглядело как безымянный виджет. Теперь — тот же образ (дымящаяся
-                  миска), что уже на аватарке @s_edim_bot в Telegram, плюс само
-                  название приложения — так шапка сразу говорит "это Съедим", а не
-                  описывает функцию, которую и так видно по контенту ниже. */}
-              <div style={styles.logoMark}>🍲</div>
+                  выглядело как безымянный виджет. Теперь — настоящий логотип (тот
+                  же образ дымящейся миски, что уже на аватарке @s_edim_bot) плюс
+                  название — шапка сразу говорит "это Съедим", а не описывает
+                  функцию, которую и так видно по контенту ниже. */}
+              <img src={logoUrl} alt="" style={styles.logoMark} />
               <span style={styles.brand}>Съедим</span>
             </div>
             {(displayName || tgFirstName) && (
@@ -447,8 +455,15 @@ export default function MealPlanner() {
 
         {!showAccount && !done && !assembling && (
           <div style={styles.progressWrap}>
-            <div style={styles.progressTrack}>
-              <div style={{ ...styles.progressFill, width: `${((step + 1) / activeSteps.length) * 100}%` }} />
+            {/* Раньше — одна сплошная полоска-заливка. Отдельный сегмент на
+                каждый шаг читается яснее ("вот сколько шагов всего, вот сколько
+                пройдено") и выглядит менее как generic progress bar с любого
+                сайта — мелкая деталь, но из тех, что складываются в ощущение
+                "сделано осмысленно", а не типовым компонентом из коробки. */}
+            <div style={styles.progressSegments}>
+              {activeSteps.map((s, i) => (
+                <div key={s.key} style={styles.progressSegment(i <= step)} />
+              ))}
             </div>
             <div style={styles.progressLabel}>
               Шаг {step + 1} из {activeSteps.length} · {activeSteps[step]?.label}
@@ -464,7 +479,7 @@ export default function MealPlanner() {
               <StepShell icon={<Store size={20} />} title="Где вам удобно заказывать?" sub="Выберите магазин с доставкой в вашем районе">
                 <div style={styles.grid2}>
                   {STORES.map((s) => (
-                    <button key={s.id} className="chip" onClick={() => setStore(s.id)} style={styles.storeChip(store === s.id)}>
+                    <button key={s.id} className="chip" onClick={() => { hapticSelect(); setStore(s.id); }} style={styles.storeChip(store === s.id)}>
                       <div style={{ fontWeight: 600 }}>{s.name}</div>
                       <div style={styles.chipHint}>
                         {s.note}
@@ -512,7 +527,7 @@ export default function MealPlanner() {
               <StepShell icon={<Salad size={20} />} title="Какой рацион вам нужен?" sub="Мы подберём рецепты под ваши предпочтения">
                 <div style={styles.stack}>
                   {DIETS.map((d) => (
-                    <button key={d.id} className="chip" onClick={() => setDiet(d.id)} style={styles.rowChip(diet === d.id)}>
+                    <button key={d.id} className="chip" onClick={() => { hapticSelect(); setDiet(d.id); }} style={styles.rowChip(diet === d.id)}>
                       <div>
                         <div style={{ fontWeight: 600 }}>{d.label}</div>
                         <div style={styles.chipHint}>{d.hint}</div>
@@ -529,7 +544,7 @@ export default function MealPlanner() {
                 <div style={styles.grid2}>
                   <button
                     className="chip"
-                    onClick={() => setAllergies([])}
+                    onClick={() => { hapticSelect(); setAllergies([]); }}
                     style={styles.storeChip(allergies.length === 0)}
                   >
                     <div style={{ fontWeight: 600 }}>Нет, ем всё подряд</div>
@@ -568,11 +583,11 @@ export default function MealPlanner() {
             )}
 
             <div style={styles.navRow} className="mp-nav-row">
-              <button onClick={() => setStep((s) => Math.max(0, s - 1))} disabled={step === 0} style={{ ...styles.navBtn, visibility: step === 0 ? "hidden" : "visible" }}>
+              <button onClick={() => { hapticImpact("light"); setStep((s) => Math.max(0, s - 1)); }} disabled={step === 0} style={{ ...styles.navBtn, visibility: step === 0 ? "hidden" : "visible" }}>
                 <ChevronLeft size={16} /> назад
               </button>
               <button
-                onClick={() => (step === activeSteps.length - 1 ? handleFinish() : setStep((s) => s + 1))}
+                onClick={() => { hapticImpact("medium"); step === activeSteps.length - 1 ? handleFinish() : setStep((s) => s + 1); }}
                 disabled={!canNextByKey[currentStepKey]}
                 style={{ ...styles.navBtnPrimary, opacity: canNextByKey[currentStepKey] ? 1 : 0.4 }}
               >
@@ -750,7 +765,7 @@ function AccountView({
         <div style={{ ...styles.acctLabel, marginTop: 16 }}>Рацион</div>
         <div style={styles.stack}>
           {DIETS.map((d) => (
-            <button key={d.id} className="chip" onClick={() => setDiet(d.id)} style={styles.rowChip(diet === d.id)}>
+            <button key={d.id} className="chip" onClick={() => { hapticSelect(); setDiet(d.id); }} style={styles.rowChip(diet === d.id)}>
               <div style={{ fontWeight: 600 }}>{d.label}</div>
               {diet === d.id && <Check size={16} color={ACCENT} />}
             </button>
@@ -759,7 +774,7 @@ function AccountView({
 
         <div style={{ ...styles.acctLabel, marginTop: 16 }}>Аллергии</div>
         <div style={styles.grid2}>
-          <button className="chip" onClick={() => setAllergies([])} style={styles.storeChip(allergies.length === 0)}>
+          <button className="chip" onClick={() => { hapticSelect(); setAllergies([]); }} style={styles.storeChip(allergies.length === 0)}>
             <div style={{ fontWeight: 600 }}>Нет</div>
           </button>
           {ALLERGENS.map((a) => (
@@ -815,20 +830,60 @@ function AccountView({
 // за то, чего нет, — обман пользователя. Как только появится бэкенд с
 // вебхуком от платёжного провайдера (см. docs/telegram-bot-architecture.md),
 // кнопка ниже превратится в реальный openLink на страницу оплаты.
+// Раньше был один абзац текста — сухое перечисление без объяснения "зачем
+// мне это". Пользователь в чате прямо попросил: разворачивающиеся пункты,
+// чтобы понять пользу подробнее, а не просто прочитать список слов.
+const SUBSCRIPTION_BENEFITS = [
+  {
+    title: "Безлимитная пересборка плана",
+    short: "Меняйте магазин, бюджет или просто пересобирайте заново — без ограничений",
+    detail: "Сейчас пересборка ничем не ограничена для всех. Когда появится бесплатный тариф с лимитом (например, раз в неделю) — с подпиской ограничения не будет вообще.",
+  },
+  {
+    title: "Несколько планов одновременно",
+    short: "Свой план, план для родителей, план на праздник — раздельно",
+    detail: "Сейчас активен только один план — «заново» стирает предыдущий. С подпиской можно будет держать несколько планов и переключаться между ними, не теряя ни один.",
+  },
+  {
+    title: "Напоминания от бота",
+    short: "Бот сам напишет, когда пора готовить — не нужно открывать приложение",
+    detail: "За 30 минут до ужина (или другого приёма пищи) бот пришлёт сообщение с названием блюда прямо в чат — уже в разработке, скоро можно будет проверить на деле.",
+  },
+  {
+    title: "Общий список на семью",
+    short: "Все видят один и тот же план и список покупок в реальном времени",
+    detail: "Отметил купленное один член семьи — увидят все. Меньше дублирующихся покупок и созвонов «а ты купил...».",
+  },
+];
+
 function AccountSubscriptionCard() {
+  const [openIdx, setOpenIdx] = useState(null);
   return (
     <div style={styles.acctSection}>
       <div style={styles.subCard}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
           <Sparkles size={16} color={ACCENT} />
           <span style={{ fontWeight: 700, fontSize: 15 }}>Подписка</span>
           <span style={styles.freeBadge}>Free</span>
         </div>
-        <p style={styles.acctSectionHint}>
-          Сейчас доступно всё, включая реальный заказ в ВкусВилл. Позже премиум откроет: безлимитную пересборку плана,
-          несколько планов одновременно, напоминания от бота и общий список на семью.
-        </p>
-        <button disabled style={{ ...styles.orderBtn, opacity: 0.4, cursor: "default", marginTop: 4 }}>
+        <div style={styles.stack}>
+          {SUBSCRIPTION_BENEFITS.map((b, i) => (
+            <div key={b.title}>
+              <button onClick={() => { hapticSelect(); setOpenIdx((prev) => (prev === i ? null : i)); }} style={styles.benefitRowBtn}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontWeight: 600, fontSize: 13 }}>{b.title}</div>
+                  <div style={{ fontSize: 11.5, color: "var(--text-tertiary)", marginTop: 2 }}>{b.short}</div>
+                </div>
+                <ChevronRight
+                  size={14}
+                  style={{ color: "var(--text-tertiary)", flexShrink: 0, marginTop: 2, transform: openIdx === i ? "rotate(90deg)" : "none", transition: "transform .15s ease" }}
+                />
+              </button>
+              {openIdx === i && <p style={styles.benefitDetail}>{b.detail}</p>}
+            </div>
+          ))}
+        </div>
+        <button disabled style={{ ...styles.orderBtn, opacity: 0.4, cursor: "default", marginTop: 14 }}>
           Скоро
         </button>
       </div>
@@ -838,6 +893,19 @@ function AccountSubscriptionCard() {
 
 function ResultView({ plan, storeId, storeName, budget, family, mealsCount, diet, allergies, onSwap, onOpenRecipe }) {
   const [orderState, setOrderState] = useState({ status: "idle" }); // idle | loading | error
+  // Отделы списка покупок сворачиваемые — по умолчанию все раскрыты (старое
+  // поведение не меняется для короткого списка), но для семьи с 3+ приёмами
+  // пищи список может стать длинным, и без возможности свернуть "уже
+  // понятный" отдел — просто длинная простыня без ориентиров.
+  const [collapsedDepts, setCollapsedDepts] = useState(new Set());
+  const toggleDept = (name) => {
+    hapticSelect();
+    setCollapsedDepts((prev) => {
+      const next = new Set(prev);
+      next.has(name) ? next.delete(name) : next.add(name);
+      return next;
+    });
+  };
 
   // Реальный заказ пока подключён только для ВкусВилл — у них единственных
   // есть официальный MCP с генерацией ссылки на корзину (см.
@@ -867,10 +935,12 @@ function ResultView({ plan, storeId, storeName, budget, family, mealsCount, diet
     }
   };
   const chooseSubstitute = (itemName, option) => {
+    hapticImpact("medium");
     setSubs((prev) => ({ ...prev, [itemName]: option }));
     setActiveItem(null);
   };
   const revertSubstitute = (itemName) => {
+    hapticSelect();
     setSubs((prev) => {
       const next = { ...prev };
       delete next[itemName];
@@ -935,9 +1005,11 @@ function ResultView({ plan, storeId, storeName, budget, family, mealsCount, diet
             (totalCount > 20 ? " ВкусВилл принимает максимум 20 позиций за раз — часть пришлось докупить отдельно." : " Часть не нашлась в каталоге — докупите её отдельно.")
           : null;
       setOrderState({ status: "idle", note });
+      hapticNotify("success");
       if (unmatched.length > 0) console.warn("Не нашли в каталоге ВкусВилл:", unmatched);
     } catch (err) {
       setOrderState({ status: "error", message: err.message });
+      hapticNotify("error");
     }
   };
 
@@ -1037,9 +1109,15 @@ function ResultView({ plan, storeId, storeName, budget, family, mealsCount, diet
           Если товара не окажется в наличии на сайте ВкусВилл — нажмите <PackageSearch size={11} style={{ verticalAlign: -1 }} /> рядом с ним, подберём замену
         </p>
       )}
-      {plan.grouped.map((g) => (
+      {plan.grouped.map((g) => {
+        const collapsed = collapsedDepts.has(g.name);
+        return (
         <div key={g.name} style={{ marginBottom: 14 }}>
-          <div style={styles.deptLabel}>{g.name}</div>
+          <button onClick={() => toggleDept(g.name)} style={styles.deptLabelBtn}>
+            <span style={styles.deptLabel}>{g.name} · {g.items.length}</span>
+            <ChevronRight size={13} style={{ color: "var(--text-tertiary)", transform: collapsed ? "rotate(0deg)" : "rotate(90deg)", transition: "transform .15s ease" }} />
+          </button>
+          {!collapsed && (
           <div style={styles.listBox}>
             {g.items.map((it) => {
               const sub = subs[it.name];
@@ -1100,8 +1178,10 @@ function ResultView({ plan, storeId, storeName, budget, family, mealsCount, diet
               );
             })}
           </div>
+          )}
         </div>
-      ))}
+        );
+      })}
 
       <button onClick={() => shareViaTelegram(buildShareText(plan, storeName, family), BOT_SHARE_URL)} style={styles.shareBtn}>
         <Share2 size={16} /> Поделиться
@@ -1245,9 +1325,8 @@ const styles = {
   header: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20 },
   brandRow: { display: "flex", alignItems: "center", gap: 9 },
   logoMark: {
-    width: 30, height: 30, borderRadius: 9, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center",
-    fontSize: 16, lineHeight: 1, background: `linear-gradient(135deg, ${ACCENT}, var(--accent-2))`,
-    boxShadow: "0 3px 10px rgba(10,132,255,0.35)",
+    width: 32, height: 32, borderRadius: 9, flexShrink: 0, objectFit: "cover",
+    boxShadow: "0 3px 10px rgba(0,0,0,0.25)",
   },
   brand: { fontSize: 19, fontWeight: 700, letterSpacing: "-0.015em" },
   greeting: { fontSize: 12, color: "var(--text-tertiary)", marginTop: 2 },
@@ -1292,9 +1371,18 @@ const styles = {
   }),
   subCard: { border: "1px solid var(--hairline)", borderRadius: 20, padding: "16px 16px 18px", ...glass(0.5, 12) },
   freeBadge: { fontSize: 10.5, fontWeight: 700, color: "var(--text-tertiary)", background: "var(--track-bg)", padding: "2px 8px", borderRadius: 999, marginLeft: "auto" },
+  benefitRowBtn: {
+    display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 8, width: "100%", textAlign: "left",
+    background: "none", border: "1px solid var(--hairline)", borderRadius: 14, padding: "10px 12px", cursor: "pointer", color: "var(--text-primary)",
+  },
+  benefitDetail: { fontSize: 12, color: "var(--text-secondary)", lineHeight: 1.45, margin: "6px 4px 0 4px" },
   progressWrap: { marginBottom: 22 },
-  progressTrack: { height: 5, borderRadius: 999, background: "var(--track-bg)", overflow: "hidden" },
-  progressFill: { height: "100%", borderRadius: 999, background: `linear-gradient(90deg, ${ACCENT}, var(--accent-2))`, transition: "width .25s ease" },
+  progressSegments: { display: "flex", gap: 4 },
+  progressSegment: (filled) => ({
+    flex: 1, height: 5, borderRadius: 999,
+    background: filled ? `linear-gradient(90deg, ${ACCENT}, var(--accent-2))` : "var(--track-bg)",
+    transition: "background .25s ease",
+  }),
   progressLabel: { fontSize: 12, fontWeight: 500, color: "var(--text-tertiary)", marginTop: 8 },
   stepBody: { minHeight: 260, display: "flex", flexDirection: "column" },
   stepIcon: { width: 40, height: 40, borderRadius: 14, background: "rgba(10,132,255,0.12)", color: ACCENT, display: "flex", alignItems: "center", justifyContent: "center", marginBottom: 14 },
@@ -1336,7 +1424,8 @@ const styles = {
   recipeRow: { display: "flex", alignItems: "center", gap: 8, padding: "5px 0", fontSize: 14 },
   timeBadge: { display: "flex", alignItems: "center", gap: 3, color: "var(--text-tertiary)", fontSize: 11, flexShrink: 0 },
   swapBtn: (canSwap) => ({ display: "flex", alignItems: "center", justifyContent: "center", background: "none", border: "none", padding: 2, flexShrink: 0, color: ACCENT, cursor: canSwap ? "pointer" : "default", opacity: canSwap ? 0.8 : 0.25 }),
-  deptLabel: { fontSize: 12, fontWeight: 600, color: "var(--text-tertiary)", marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.02em" },
+  deptLabelBtn: { display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%", background: "none", border: "none", padding: "4px 0", cursor: "pointer" },
+  deptLabel: { fontSize: 12, fontWeight: 600, color: "var(--text-tertiary)", textTransform: "uppercase", letterSpacing: "0.02em" },
   listBox: { display: "flex", flexDirection: "column" },
   listRow: { display: "flex", justifyContent: "space-between", gap: 8, padding: "7px 0", borderBottom: "1px solid var(--hairline-2)", fontSize: 13.5 },
   subFindBtn: { display: "flex", alignItems: "center", justifyContent: "center", background: "none", border: "none", padding: 2, color: "var(--text-tertiary)", cursor: "pointer" },

@@ -6,14 +6,18 @@
     <title>Съедим</title>
     <!-- Раньше не было ни иконки вкладки, ни og:-тегов — при пересылке ссылки
          в Telegram (см. кнопка "Поделиться") показывался бы пустой блок без
-         превью, и вкладка браузера — с иконкой-заглушкой. SVG-favicon как
-         data URI — тот же образ (миска), что и в шапке приложения и на
-         аватарке бота, без отдельного файла-ассета. -->
-    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%8D%B2%3C/text%3E%3C/svg%3E" />
+         превью, и вкладка браузера — с иконкой-заглушкой. Теперь настоящий
+         логотип (public/logo.svg — та же дымящаяся миска, что и в шапке
+         приложения и на аватарке бота). og:image — PNG, не SVG: Telegram и
+         большинство соцсетей не рендерят SVG в превью ссылок, растровую
+         версию сгенерировал из того же исходника (public/logo-512.png). -->
+    <link rel="icon" href="./logo.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="./apple-touch-icon.png" />
     <meta name="description" content="Съедим — соберём меню на неделю под ваш бюджет и список покупок за пару минут" />
     <meta name="theme-color" content="#0A84FF" />
     <meta property="og:title" content="Съедим" />
     <meta property="og:description" content="Меню на неделю под ваш бюджет и список покупок за пару минут" />
+    <meta property="og:image" content="./logo-512.png" />
     <meta property="og:type" content="website" />
     <style>
       /* html/body/#root не имели явной высоты — из-за этого .page (minHeight:100%)

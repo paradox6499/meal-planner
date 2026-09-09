@@ -1,0 +1,21 @@
+<svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <rect width="512" height="512" fill="#EFE6D3"/>
+
+  <!-- steam -->
+  <path d="M 208 208 C 190 182 222 170 206 144 C 196 126 218 114 212 96"
+        fill="none" stroke="#C98A2B" stroke-width="16" stroke-linecap="round"/>
+  <path d="M 272 204 C 290 178 258 166 274 140 C 284 122 262 110 268 92"
+        fill="none" stroke="#C98A2B" stroke-width="16" stroke-linecap="round"/>
+
+  <!-- bowl base -->
+  <rect x="226" y="366" width="60" height="16" rx="8" fill="#2F4B3C"/>
+
+  <!-- bowl body -->
+  <path d="M138,245 C138,340 168,368 256,368 C344,368 374,340 374,245 L138,245 Z" fill="#2F4B3C"/>
+
+  <!-- rim -->
+  <ellipse cx="256" cy="245" rx="118" ry="24" fill="#2F4B3C"/>
+
+  <!-- hollow -->
+  <ellipse cx="256" cy="241" rx="100" ry="17" fill="#EFE6D3"/>
+</svg>
