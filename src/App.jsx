@@ -85,12 +85,24 @@ const QUICK_STEP_KEYS = ["store", "budget"];
 function buildPools(diet, cuisines, devices, allergies) {
   const cuisineFilter = cuisines.length === 0 || cuisines.includes("any");
   const forbidden = forbiddenIngredientsFor(allergies);
+  // Найдено при разборе жалобы "не нашлось рецептов для Перекрёстка": если
+  // diet === null/undefined (профиль сохранён из Аккаунта БЕЗ выбора
+  // рациона — там, в отличие от визарда, это раньше не было обязательным),
+  // ни один рецепт не проходит diets.includes(diet) НИ В основном фильтре,
+  // НИ в смягчённом фолбэке ниже (оба условия идентичны для рациона) — пулы
+  // всех трёх категорий стабильно пустые. Проверено на всех 2240 комбинациях
+  // диета×аллергии×техника: пусто ТОЛЬКО когда diet ложный. ВкусВилл этой
+  // проблемы не имел — там своя проверка (recipeViolatesDiet в
+  // vkusvillRecipes.js), которая просто игнорирует незнакомое значение
+  // рациона, а не требует точного совпадения. Нормализуем null/undefined в
+  // "any" здесь же — так же, как теперь обязательно в Аккаунте (см. AccountView).
+  const safeDiet = diet || "any";
 
   const buildPool = (category) => {
     let pool = RECIPES.filter((r) => {
       if (r.category !== category) return false;
       if (recipeHasAllergen(r, forbidden)) return false;
-      const dietOk = diet === "any" || r.diets.includes(diet);
+      const dietOk = safeDiet === "any" || r.diets.includes(safeDiet);
       const cuisineOk = category !== "main" || cuisineFilter || r.cuisine === "any" || cuisines.includes(r.cuisine);
       const deviceOk = r.devices.length === 0 || r.devices.some((d) => devices.includes(d));
       return dietOk && cuisineOk && deviceOk;
@@ -102,7 +114,7 @@ function buildPools(diet, cuisines, devices, allergies) {
         (r) =>
           r.category === category &&
           !recipeHasAllergen(r, forbidden) &&
-          (diet === "any" || r.diets.includes(diet))
+          (safeDiet === "any" || r.diets.includes(safeDiet))
       );
     }
     return [...pool].sort((a, b) => a.cost - b.cost);
@@ -806,7 +818,9 @@ function AccountView({
           type="text"
           value={displayName}
           onChange={(e) => setDisplayName(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && e.currentTarget.blur()}
           placeholder="Имя для приветствия"
+          enterKeyHint="done"
           style={styles.textInput}
         />
       </div>
@@ -888,9 +902,16 @@ function AccountView({
           ))}
         </div>
 
-        <button onClick={handleSave} style={{ ...styles.navBtnPrimary, width: "100%", justifyContent: "center", marginTop: 18 }}>
+        <button
+          onClick={handleSave}
+          disabled={!diet}
+          style={{ ...styles.navBtnPrimary, width: "100%", justifyContent: "center", marginTop: 18, opacity: diet ? 1 : 0.4 }}
+        >
           {saved ? <><Check size={16} /> Сохранено</> : "Сохранить как профиль"}
         </button>
+        {!diet && (
+          <p style={styles.acctWarnHint}>Сначала выберите рацион выше — без него план собрать не получится.</p>
+        )}
         {hasProfile && (
           <button onClick={onClear} style={styles.acctClearBtn}>
             Сбросить сохранённый профиль
@@ -1178,7 +1199,11 @@ const styles = {
   greeting: { fontSize: 12, color: "var(--text-tertiary)", marginTop: 2 },
   resetBtn: { display: "flex", alignItems: "center", gap: 5, ...glass(0.5, 8), border: "1px solid var(--hairline)", borderRadius: 999, padding: "6px 12px", fontSize: 12, fontWeight: 500, color: "var(--text-secondary)", cursor: "pointer" },
   accountBtn: { display: "flex", alignItems: "center", justifyContent: "center", width: 32, height: 32, ...glass(0.5, 8), border: "1px solid var(--hairline)", borderRadius: "50%", color: "var(--text-secondary)", cursor: "pointer" },
-  quickHint: { fontSize: 12, color: "var(--text-tertiary)", textAlign: "center", marginTop: 10, lineHeight: 1.4 },
+  // Раньше marginTop:10 — визуально впритык к кнопкам "назад"/"Далее" сразу
+  // над ним (у них свой отступ всего 22px сверху, но снизу ничего не было).
+  // Увеличил и добавил чуть паддинга — рифмуется с остальными вертикальными
+  // интервалами в карточке (18-22px), а не выбивается мелким зазором.
+  quickHint: { fontSize: 12, color: "var(--text-tertiary)", textAlign: "center", marginTop: 24, paddingTop: 4, lineHeight: 1.4 },
   inlineLinkBtn: { background: "none", border: "none", padding: 0, color: ACCENT, fontWeight: 600, fontSize: 12, cursor: "pointer", textDecoration: "underline" },
   accountHeaderRow: { display: "flex", alignItems: "center", marginBottom: 2 },
   acctSection: { marginTop: 18 },
@@ -1187,9 +1212,14 @@ const styles = {
   acctLabel: { fontSize: 12, fontWeight: 600, color: "var(--text-tertiary)", textTransform: "uppercase", letterSpacing: "0.02em", marginBottom: 8 },
   acctDivider: { height: 1, background: "var(--hairline)", margin: "22px 0" },
   acctClearBtn: { width: "100%", background: "none", border: "none", color: "var(--danger)", fontSize: 12.5, fontWeight: 500, cursor: "pointer", padding: "10px 0 0 0" },
+  acctWarnHint: { fontSize: 12, color: "var(--warning-text)", textAlign: "center", marginTop: 8 },
   textInput: {
     width: "100%", padding: "12px 14px", borderRadius: 14, border: "1px solid var(--hairline)",
-    ...glass(0.45, 10), color: "var(--text-primary)", fontSize: 14, fontFamily: "inherit",
+    ...glass(0.45, 10), color: "var(--text-primary)",
+    // 16px, не 14 — Safari на iOS зумит страницу при фокусе на инпуте с
+    // font-size < 16px, это его собственное поведение, не баг вёрстки; ниже
+    // 16 здесь быть не должно, даже если по дизайну хочется мельче.
+    fontSize: 16, fontFamily: "inherit",
   },
   themeChip: (active) => ({
     flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 4, padding: "12px 6px", borderRadius: 16, cursor: "pointer",
