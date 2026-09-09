@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect } from "react";
-import { ShoppingBasket, Check, ChevronLeft, ChevronRight, Store, Users, Wallet, Salad, ChefHat, Flame, RotateCcw, UtensilsCrossed, Clock, Repeat, Ban, TriangleAlert, X, Loader2, Share2, Settings, Sun, Moon, MonitorSmartphone, Sparkles } from "lucide-react";
+import { ShoppingBasket, Check, ChevronLeft, ChevronRight, Store, Users, Wallet, Salad, ChefHat, Flame, RotateCcw, UtensilsCrossed, Clock, Repeat, Ban, TriangleAlert, X, Loader2, Share2, Settings, Sun, Moon, MonitorSmartphone, Sparkles, PackageSearch } from "lucide-react";
 import {
   RECIPES,
   RECIPES_BY_ID,
@@ -11,7 +11,7 @@ import {
   effectiveRecipeCost,
 } from "./data/recipes.js";
 import { buildCartFromShoppingList } from "./lib/vkusvillMcp.js";
-import { fetchVkusvillPools } from "./lib/vkusvillRecipes.js";
+import { fetchVkusvillPools, getSubstituteOptions } from "./lib/vkusvillRecipes.js";
 import { loadProfile, saveProfile, clearProfile, loadTheme, saveTheme } from "./lib/profile.js";
 
 // ---------- UI-конфигурация (не контент рецептов — та живёт в data/recipes.js) ----------
@@ -734,6 +734,8 @@ export default function MealPlanner() {
             budget={budget}
             family={family}
             mealsCount={meals.length}
+            diet={diet}
+            allergies={allergies}
             onSwap={swapMeal}
             onOpenRecipe={setOpenRecipe}
           />
@@ -951,7 +953,7 @@ function AccountSubscriptionCard() {
   );
 }
 
-function ResultView({ plan, storeId, storeName, budget, family, mealsCount, onSwap, onOpenRecipe }) {
+function ResultView({ plan, storeId, storeName, budget, family, mealsCount, diet, allergies, onSwap, onOpenRecipe }) {
   const over = plan.total > budget;
   const [orderState, setOrderState] = useState({ status: "idle" }); // idle | loading | error
 
@@ -962,10 +964,50 @@ function ResultView({ plan, storeId, storeName, budget, family, mealsCount, onSw
   // подкрепить по-настоящему.
   const canOrderForReal = storeId === "vv";
 
+  // "Нет в наличии" — предложить замену конкретному товару из списка
+  // покупок. subs: name -> выбранная замена (переживает несколько открытий
+  // панели, копится по мере того, как отмечают несколько товаров).
+  // activeItem/panelState — какая ИМЕННО панель сейчас раскрыта и что в ней
+  // показывать, отдельно от subs, потому что открыта единовременно только
+  // одна, а выбранных замен может быть много одновременно.
+  const [subs, setSubs] = useState({});
+  const [activeItem, setActiveItem] = useState(null);
+  const [panelState, setPanelState] = useState({ status: "idle" }); // idle | loading | loaded | error
+
+  const handleFindSubstitute = async (itemName) => {
+    setActiveItem(itemName);
+    setPanelState({ status: "loading" });
+    try {
+      const options = await getSubstituteOptions({ name: itemName, allergies, diet });
+      setPanelState(options.length > 0 ? { status: "loaded", options } : { status: "error", message: "Не нашли подходящую замену под ваш рацион/аллергии" });
+    } catch (err) {
+      setPanelState({ status: "error", message: err.message });
+    }
+  };
+  const chooseSubstitute = (itemName, option) => {
+    setSubs((prev) => ({ ...prev, [itemName]: option }));
+    setActiveItem(null);
+  };
+  const revertSubstitute = (itemName) => {
+    setSubs((prev) => {
+      const next = { ...prev };
+      delete next[itemName];
+      return next;
+    });
+  };
+
   const handleOrder = async () => {
     setOrderState({ status: "loading" });
     try {
-      const items = plan.grouped.flatMap((g) => g.items);
+      // Товары с выбранной заменой идут в корзину СВОИМ xml_id/ценой
+      // (уже знаем их из getSubstituteOptions) — без повторного поиска по
+      // названию исходного ингредиента, см. комментарий в resolvePrices.
+      const items = plan.grouped.flatMap((g) => g.items).map((it) => {
+        const sub = subs[it.name];
+        return sub
+          ? { name: sub.name, amount: it.amount, unit: it.unit, xmlId: sub.xmlId, knownPrice: sub.price, knownUnit: sub.productUnit }
+          : { name: it.name, amount: it.amount, unit: it.unit };
+      });
       const { link, matchedCount, totalCount, unmatched } = await buildCartFromShoppingList(items);
       window.open(link, "_blank", "noopener,noreferrer");
       // Раньше при неполном совпадении это уходило только в console.warn —
@@ -1050,16 +1092,69 @@ function ResultView({ plan, storeId, storeName, budget, family, mealsCount, onSw
       </div>
 
       <h3 style={styles.sectionTitle}>Список покупок</h3>
+      {canOrderForReal && (
+        <p style={{ fontSize: 12, color: "var(--text-tertiary)", margin: "-4px 0 10px 0" }}>
+          Если товара не окажется в наличии на сайте ВкусВилл — нажмите <PackageSearch size={11} style={{ verticalAlign: -1 }} /> рядом с ним, подберём замену
+        </p>
+      )}
       {plan.grouped.map((g) => (
         <div key={g.name} style={{ marginBottom: 14 }}>
           <div style={styles.deptLabel}>{g.name}</div>
           <div style={styles.listBox}>
-            {g.items.map((it) => (
-              <div key={it.name} style={styles.listRow}>
-                <span>{it.name}</span>
-                <span style={{ color: "var(--text-tertiary)" }}>{it.amount} {it.unit}</span>
-              </div>
-            ))}
+            {g.items.map((it) => {
+              const sub = subs[it.name];
+              return (
+                <div key={it.name}>
+                  <div style={styles.listRow}>
+                    <span style={{ minWidth: 0 }}>
+                      {sub ? (
+                        <>
+                          <span style={{ textDecoration: "line-through", color: "var(--text-tertiary)" }}>{it.name}</span>
+                          {" → "}{sub.name}
+                        </>
+                      ) : (
+                        it.name
+                      )}
+                    </span>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+                      {sub ? (
+                        <>
+                          <span style={{ color: "var(--text-tertiary)" }}>{sub.price} ₽</span>
+                          <button onClick={() => revertSubstitute(it.name)} title="Отменить замену" style={styles.subRevertBtn}>
+                            <X size={13} />
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          <span style={{ color: "var(--text-tertiary)" }}>{it.amount} {it.unit}</span>
+                          {canOrderForReal && (
+                            <button onClick={() => handleFindSubstitute(it.name)} title="Нет в наличии — подобрать замену" style={styles.subFindBtn}>
+                              <PackageSearch size={13} />
+                            </button>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  </div>
+
+                  {activeItem === it.name && (
+                    <div style={styles.subPanel}>
+                      {panelState.status === "loading" && (
+                        <span style={styles.subPanelHint}><Loader2 size={13} className="spin" /> Ищем замену…</span>
+                      )}
+                      {panelState.status === "error" && <span style={styles.subPanelHint}>{panelState.message}</span>}
+                      {panelState.status === "loaded" && panelState.options.map((opt) => (
+                        <button key={opt.xmlId} onClick={() => chooseSubstitute(it.name, opt)} style={styles.subOptionBtn}>
+                          <span style={{ flex: 1, minWidth: 0, textAlign: "left" }}>{opt.name}</span>
+                          <span style={{ flexShrink: 0, fontWeight: 600 }}>{opt.price} ₽</span>
+                        </button>
+                      ))}
+                      <button onClick={() => setActiveItem(null)} style={styles.subCancelBtn}>Отмена</button>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </div>
         </div>
       ))}
@@ -1276,7 +1371,13 @@ const styles = {
   swapBtn: (canSwap) => ({ display: "flex", alignItems: "center", justifyContent: "center", background: "none", border: "none", padding: 2, flexShrink: 0, color: ACCENT, cursor: canSwap ? "pointer" : "default", opacity: canSwap ? 0.8 : 0.25 }),
   deptLabel: { fontSize: 12, fontWeight: 600, color: "var(--text-tertiary)", marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.02em" },
   listBox: { display: "flex", flexDirection: "column" },
-  listRow: { display: "flex", justifyContent: "space-between", padding: "7px 0", borderBottom: "1px solid var(--hairline-2)", fontSize: 13.5 },
+  listRow: { display: "flex", justifyContent: "space-between", gap: 8, padding: "7px 0", borderBottom: "1px solid var(--hairline-2)", fontSize: 13.5 },
+  subFindBtn: { display: "flex", alignItems: "center", justifyContent: "center", background: "none", border: "none", padding: 2, color: "var(--text-tertiary)", cursor: "pointer" },
+  subRevertBtn: { display: "flex", alignItems: "center", justifyContent: "center", background: "none", border: "none", padding: 2, color: "var(--danger)", cursor: "pointer" },
+  subPanel: { display: "flex", flexDirection: "column", gap: 6, padding: "8px 10px 10px", marginBottom: 4, borderRadius: 14, ...glass(0.5, 10), border: "1px solid var(--hairline)" },
+  subPanelHint: { display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, color: "var(--text-tertiary)" },
+  subOptionBtn: { display: "flex", alignItems: "center", gap: 8, width: "100%", textAlign: "left", background: "none", border: "1px solid var(--hairline)", borderRadius: 10, padding: "8px 10px", fontSize: 12.5, color: "var(--text-primary)", cursor: "pointer" },
+  subCancelBtn: { alignSelf: "flex-end", background: "none", border: "none", color: "var(--text-tertiary)", fontSize: 12, cursor: "pointer", padding: "2px 4px" },
   orderBtn: { width: "100%", padding: "14px 0", background: `linear-gradient(180deg, ${ACCENT}, #0066DB)`, border: "none", borderRadius: 18, color: "#fff", fontSize: 14.5, fontWeight: 600, cursor: "pointer", marginTop: 8, boxShadow: "0 8px 20px rgba(10,132,255,0.35)" },
   orderError: { fontSize: 12, color: "var(--danger)", textAlign: "center", marginTop: 8 },
   orderNote: { fontSize: 12, color: "var(--text-tertiary)", textAlign: "center", marginTop: 8, lineHeight: 1.4 },

@@ -22,7 +22,7 @@
 // вдруг перестанут иметь смысл — стоит перепроверить эти ID тем же вызовом,
 // они не гарантированно вечны.
 
-import { searchRecipes, resolvePrices } from "./vkusvillMcp.js";
+import { searchRecipes, resolvePrices, searchProducts, getProductAnalogs } from "./vkusvillMcp.js";
 
 const CATEGORY_BY_MEAL = { breakfast: 339, main: 332, snack: 335 };
 
@@ -125,6 +125,32 @@ function recipeViolatesDiet(recipe, diet) {
   return false;
 }
 
+// Те же самые проверки (recipeHasKeyword/…Allergies/…Diet выше), но для
+// голого названия товара, а не объекта рецепта с .ingr — нужны для замены
+// "нет в наличии" (getSubstituteOptions ниже): аналог с полки ВкусВилл это
+// просто {name}, а не рецепт с составом.
+function nameHasKeyword(name, keywords) {
+  if (keywords.length === 0) return false;
+  const lower = name.toLowerCase();
+  return keywords.some((kw) => lower.includes(kw));
+}
+function nameViolatesAllergies(name, allergyIds) {
+  return nameHasKeyword(name, allergyIds.flatMap((id) => ALLERGEN_KEYWORDS[id] || []));
+}
+function nameViolatesDiet(name, diet) {
+  if (diet === "veg") return nameHasKeyword(name, MEAT_FISH_KEYWORDS);
+  if (diet === "vegan") return nameHasKeyword(name, VEGAN_FORBIDDEN_KEYWORDS);
+  return false;
+}
+
+// ВкусВилл отдаёт названия с HTML-сущностями (например "900&nbsp;мл") —
+// DOMParser здесь безопасен и уместен: мы всегда в браузере (это клиентский
+// модуль), а не строим DOM из чужого HTML для показа как есть, только читаем
+// обратно текстовое содержимое.
+function decodeHtmlEntities(str) {
+  return new DOMParser().parseFromString(str, "text/html").documentElement.textContent;
+}
+
 function isWeightOrVolumeUnit(unit) {
   return unit === "г" || unit === "мл" || unit === "кг" || unit === "л";
 }
@@ -216,4 +242,37 @@ export async function fetchVkusvillPools({ diet, cuisines, devices, allergies, c
   // поэтому сортируем здесь, а не раньше.
   Object.values(pools).forEach((recipes) => recipes.sort((a, b) => a.cost - b.cost));
   return pools;
+}
+
+/** "Нет в наличии" в списке покупок (ResultView) — предлагает замену
+ * конкретному товару. Сначала ищем сам товар в каталоге (то же, что делает
+ * resolvePrices при сборке корзины) — аналоги запрашиваются именно под
+ * найденный id, а не под текст рецепта. `vkusvill_product_analogs` — штатный
+ * инструмент MCP ровно под этот сценарий ("похожие товары"), не наш
+ * самодельный подбор по названию.
+ *
+ * Возвращает до 6 вариантов, отсортированных по цене (дешёвые впереди —
+ * осмысленный выбор по умолчанию, раз уж всё равно нужно докупать), уже
+ * прошедших те же проверки на аллергию/рацион, что и обычные рецепты — без
+ * этого "замена" могла бы тихо подсунуть что-то запрещённое. */
+export async function getSubstituteOptions({ name, allergies, diet }) {
+  const search = await searchProducts({ q: name, mode: "short", vvonly: 0 });
+  const original = search.items?.[0];
+  if (!original) return [];
+
+  const analogs = await getProductAnalogs(original.xml_id);
+  const effectiveAllergies = diet === "gf" && !allergies.includes("gluten") ? [...allergies, "gluten"] : allergies;
+
+  return (analogs.products || [])
+    .map((p) => ({
+      xmlId: p.xml_id,
+      name: decodeHtmlEntities(p.name || ""),
+      price: p.price?.current ?? null,
+      productUnit: p.unit,
+      image: p.images?.[0]?.small || null,
+    }))
+    .filter((p) => p.price != null && p.xmlId !== original.xml_id)
+    .filter((p) => !nameViolatesAllergies(p.name, effectiveAllergies) && !nameViolatesDiet(p.name, diet))
+    .sort((a, b) => a.price - b.price)
+    .slice(0, 6);
 }

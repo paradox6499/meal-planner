@@ -130,10 +130,26 @@ function toVkusvillQuantity(amount, ourUnit, productUnit) {
  * в единице товара. Общая часть для сборки корзины (buildCartFromShoppingList)
  * и для подсчёта настоящей стоимости рецептов (vkusvillRecipes.js) — обе
  * задачи по сути "сколько это будет стоить и что из этого реально есть в
- * каталоге", разница только в том, что происходит с результатом дальше. */
+ * каталоге", разница только в том, что происходит с результатом дальше.
+ *
+ * Если пункт уже несёт xmlId (пользователь явно выбрал товар-замену через
+ * "Нет в наличии" в ResultView, см. getSubstituteOptions в
+ * vkusvillRecipes.js) — поиск не повторяем, берём то, что уже знаем: искать
+ * заново по названию самого товара-замены не только лишний запрос, но и
+ * риск найти НЕ ЕГО (мало ли похожих товаров в каталоге). */
 export async function resolvePrices(items) {
   const settled = await Promise.allSettled(
     items.map(async (item) => {
+      if (item.xmlId) {
+        return {
+          matched: true,
+          name: item.name,
+          xml_id: item.xmlId,
+          price: item.knownPrice ?? null,
+          productUnit: item.knownUnit,
+          q: toVkusvillQuantity(item.amount, item.unit, item.knownUnit),
+        };
+      }
       const data = await searchProducts({ q: item.name, mode: "short", vvonly: 0 });
       const match = data.items?.[0];
       if (!match) return { matched: false, name: item.name };
