@@ -602,6 +602,7 @@ export default function MealPlanner() {
               onClick={() => setShowAccount((v) => !v)}
               style={styles.accountBtn}
               title={showAccount ? "Закрыть аккаунт" : "Аккаунт"}
+              aria-label={showAccount ? "Закрыть аккаунт" : "Аккаунт"}
             >
               <Settings size={16} />
             </button>
@@ -1153,7 +1154,11 @@ function ResultView({ plan, storeId, storeName, budget, family, mealsCount, diet
               <div key={i} style={styles.recipeRow}>
                 <span style={{ width: 68, flexShrink: 0, fontSize: 12, color: "var(--text-tertiary)" }}>{dm.mealLabel}</span>
                 <button onClick={() => onOpenRecipe(dm)} title="Открыть рецепт" className="recipe-row-btn" style={styles.recipeRowBtn}>
-                  <span style={styles.recipeEmoji}>{dm.recipe.emoji}</span>
+                  {dm.recipe.photoUrl ? (
+                    <img src={dm.recipe.photoUrl} alt="" style={styles.recipeThumb} />
+                  ) : (
+                    <span style={styles.recipeEmoji}>{dm.recipe.emoji}</span>
+                  )}
                   <span className="recipe-name-text" style={{ fontWeight: 500 }}>{dm.recipe.name}</span>
                   <ChevronRight size={14} style={{ color: "var(--text-tertiary)", flexShrink: 0 }} />
                 </button>
@@ -1165,6 +1170,7 @@ function ResultView({ plan, storeId, storeName, budget, family, mealsCount, diet
                   onClick={() => onSwap(dayIndex, i)}
                   disabled={!dm.canSwap}
                   title={dm.canSwap ? "Заменить блюдо" : "Нет других вариантов под ваши фильтры"}
+                  aria-label={dm.canSwap ? "Заменить блюдо" : "Нет других вариантов под ваши фильтры"}
                   style={styles.swapBtn(dm.canSwap)}
                 >
                   <Repeat size={14} />
@@ -1204,7 +1210,7 @@ function ResultView({ plan, storeId, storeName, budget, family, mealsCount, diet
                       {sub ? (
                         <>
                           <span style={{ color: "var(--text-tertiary)" }}>{substituteLineCost(it, sub).toLocaleString("ru-RU")} ₽</span>
-                          <button onClick={() => revertSubstitute(it.name)} title="Отменить замену" style={styles.subRevertBtn}>
+                          <button onClick={() => revertSubstitute(it.name)} title="Отменить замену" aria-label="Отменить замену" style={styles.subRevertBtn}>
                             <X size={13} />
                           </button>
                         </>
@@ -1215,7 +1221,7 @@ function ResultView({ plan, storeId, storeName, budget, family, mealsCount, diet
                             {plan.itemized && it.cost != null && ` · ${it.cost.toLocaleString("ru-RU")} ₽`}
                           </span>
                           {canOrderForReal && (
-                            <button onClick={() => handleFindSubstitute(it.name)} title="Нет в наличии — подобрать замену" style={styles.subFindBtn}>
+                            <button onClick={() => handleFindSubstitute(it.name)} title="Нет в наличии — подобрать замену" aria-label="Нет в наличии — подобрать замену" style={styles.subFindBtn}>
                               <PackageSearch size={13} />
                             </button>
                           )}
@@ -1232,6 +1238,7 @@ function ResultView({ plan, storeId, storeName, budget, family, mealsCount, diet
                       {panelState.status === "error" && <span style={styles.subPanelHint}>{panelState.message}</span>}
                       {panelState.status === "loaded" && panelState.options.map((opt) => (
                         <button key={opt.xmlId} onClick={() => chooseSubstitute(it.name, opt)} style={styles.subOptionBtn}>
+                          {opt.image ? <img src={opt.image} alt="" style={styles.subOptionThumb} /> : <span style={styles.subOptionThumbPlaceholder} />}
                           <span style={{ flex: 1, minWidth: 0, textAlign: "left" }}>{opt.name}</span>
                           <span style={{ flexShrink: 0, fontWeight: 600 }}>{opt.price} ₽</span>
                         </button>
@@ -1310,7 +1317,7 @@ function RecipeModal({ dm, family, onClose }) {
   return (
     <div style={styles.modalOverlay} className="modal-overlay-in" onClick={onClose}>
       <div style={styles.modalCard} className="modal-card-in" onClick={(e) => e.stopPropagation()}>
-        <button onClick={onClose} title="Закрыть" style={styles.modalClose}>
+        <button onClick={onClose} title="Закрыть" aria-label="Закрыть" style={styles.modalClose}>
           <X size={16} />
         </button>
 
@@ -1464,6 +1471,8 @@ const styles = {
   subPanel: { display: "flex", flexDirection: "column", gap: 6, padding: "8px 10px 10px", marginBottom: 4, borderRadius: 14, ...glass(0.5, 10), border: "1px solid var(--hairline)" },
   subPanelHint: { display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, color: "var(--text-tertiary)" },
   subOptionBtn: { display: "flex", alignItems: "center", gap: 8, width: "100%", textAlign: "left", background: "none", border: "1px solid var(--hairline)", borderRadius: 10, padding: "8px 10px", fontSize: 12.5, color: "var(--text-primary)", cursor: "pointer" },
+  subOptionThumb: { width: 28, height: 28, borderRadius: 7, objectFit: "cover", flexShrink: 0 },
+  subOptionThumbPlaceholder: { width: 28, height: 28, borderRadius: 7, flexShrink: 0, background: "var(--track-bg)" },
   subCancelBtn: { alignSelf: "flex-end", background: "none", border: "none", color: "var(--text-tertiary)", fontSize: 12, cursor: "pointer", padding: "2px 4px" },
   orderBtn: { width: "100%", padding: "14px 0", background: `linear-gradient(180deg, ${ACCENT}, #0066DB)`, border: "none", borderRadius: 18, color: "#fff", fontSize: 14.5, fontWeight: 600, cursor: "pointer", marginTop: 8, boxShadow: "0 8px 20px rgba(10,132,255,0.35)" },
   orderError: { fontSize: 12, color: "var(--danger)", textAlign: "center", marginTop: 8 },
@@ -1472,6 +1481,7 @@ const styles = {
 
   recipeRowBtn: { flex: 1, display: "flex", alignItems: "center", gap: 8, background: "none", border: "none", padding: "4px 2px", borderRadius: 10, textAlign: "left", cursor: "pointer", color: "var(--text-primary)", font: "inherit", minWidth: 0 },
   recipeEmoji: { fontSize: 17, flexShrink: 0, width: 20, textAlign: "center" },
+  recipeThumb: { width: 22, height: 22, borderRadius: 6, objectFit: "cover", flexShrink: 0 },
 
   modalOverlay: { position: "fixed", inset: 0, background: "var(--modal-backdrop)", backdropFilter: "blur(6px)", WebkitBackdropFilter: "blur(6px)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20, zIndex: 50 },
   modalCard: { width: "100%", maxWidth: 420, maxHeight: "85vh", overflowY: "auto", ...glass(0.9, 30), borderRadius: 28, border: "1px solid var(--hairline)", padding: 26, boxShadow: "var(--modal-shadow)", position: "relative" },
