@@ -18,7 +18,42 @@
 const MCP_URL = "https://mcp.vkusvill.ru/mcp";
 const DEFAULT_TIMEOUT_MS = 8000;
 
+// Кэш в памяти вкладки для read-only вызовов (ничего не создают/не меняют
+// на стороне ВкусВилл) — сбрасывается при перезагрузке страницы, этого
+// достаточно: обычная сессия (собрать план -> заказать -> может ещё раз
+// "нет в наличии") укладывается в разумный TTL. Причина завести его именно
+// сейчас: "Заказать" почти всегда ищет ТЕ ЖЕ названия ингредиентов, что
+// секунды назад уже искались при сборке плана (attachRealCosts в
+// vkusvillRecipes.js) — без кэша это гарантированный повторный залп из
+// 15-20 одинаковых запросов, а после недавнего живого rate-limit это не
+// абстрактный риск. vkusvill_cart_link_create сюда НЕ входит — это
+// создающий вызов, кэшировать создание нельзя.
+const CACHEABLE_TOOLS = new Set(["vkusvill_products_search", "vkusvill_product_analogs", "vkusvill_recipes"]);
+const CACHE_TTL_MS = 10 * 60 * 1000;
+// Реалистичная сессия — от силы несколько десятков уникальных запросов
+// (ингредиенты одной недели + пара "подобрать замену"), простой лимит на
+// размер карты не даёт ей расти неограниченно, если вкладку не закрывают
+// часами — вытесняем самую старую запись, а не городим LRU ради этого.
+const CACHE_MAX_ENTRIES = 200;
+const cache = new Map(); // key -> { data, expiresAt }
+
+function cacheKeyFor(name, args) {
+  return `${name}:${JSON.stringify(args)}`;
+}
+
+export function clearMcpCache() {
+  cache.clear();
+}
+
 async function callTool(name, args, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+  const cacheable = CACHEABLE_TOOLS.has(name);
+  const cacheKey = cacheable ? cacheKeyFor(name, args) : null;
+  if (cacheKey) {
+    const hit = cache.get(cacheKey);
+    if (hit && hit.expiresAt > Date.now()) return hit.data;
+    if (hit) cache.delete(cacheKey); // протухла — не оставляем мусор в карте
+  }
+
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
@@ -61,6 +96,14 @@ async function callTool(name, args, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
   const inner = JSON.parse(textPart);
   if (!inner.ok) {
     throw new Error(`VkusVill MCP: ${name} вернул ошибку (${inner.error || "без описания"})`);
+  }
+
+  // Кэшируем только УСПЕШНЫЙ ответ — ошибка/таймаут выбрасывается выше и до
+  // этой строки не доходит, так что неудачный вызов никогда не залипнет в
+  // кэше как будто он и правда так ответил.
+  if (cacheKey) {
+    if (cache.size >= CACHE_MAX_ENTRIES) cache.delete(cache.keys().next().value);
+    cache.set(cacheKey, { data: inner.data, expiresAt: Date.now() + CACHE_TTL_MS });
   }
   return inner.data;
 }
