@@ -10,4 +10,10 @@ export default defineConfig({
   server: {
     host: true,
   },
+  // node, не jsdom — все тесты сейчас на чистых функциях (planLogic.js,
+  // data/recipes.js), без рендера React-компонентов и без DOM. Понадобится
+  // jsdom — добавить отдельно, когда появятся тесты на сами компоненты.
+  test: {
+    environment: "node",
+  },
 });

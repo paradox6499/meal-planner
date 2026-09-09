@@ -1,8 +1,9 @@
 name: Deploy to GitHub Pages
 
-# Собирает Vite-проект и публикует src/ (после сборки — dist/) на GitHub
-# Pages. Сборка идёт на сервере GitHub — на этой машине нет node/npm, поэтому
-# package-lock.json тоже нет, отсюда `npm install`, а не `npm ci`.
+# Прогоняет тесты (vitest — src/**/*.test.js, чистые функции без React), затем
+# собирает Vite-проект и публикует dist/ на GitHub Pages. Упавший тест
+# останавливает деплой ДО того, как сломанный код уйдёт на прод — раньше тут
+# вообще не было проверок, кроме "собралось / не собралось".
 #
 # Разово перед первым запуском: Settings -> Pages -> Source ->
 # "GitHub Actions" (не "Deploy from a branch") в самом репозитории.
@@ -29,7 +30,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - run: npm install
+          cache: npm
+      - run: npm ci
+      - run: npm test
       - run: npm run build
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3

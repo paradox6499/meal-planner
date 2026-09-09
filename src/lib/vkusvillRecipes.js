@@ -59,7 +59,7 @@ const ALLERGEN_KEYWORDS = {
 const MEAT_FISH_KEYWORDS = ["куриц", "куриног", "говядин", "свинин", "бекон", "баранин", "индейк", "рыб", "лосос", "треск", "креветк", "морепродукт", "фарш"];
 const VEGAN_FORBIDDEN_KEYWORDS = [...MEAT_FISH_KEYWORDS, "молок", "сыр", "сливк", "сметан", "творог", "йогурт", "яйц", "мёд", "масло сливочн"];
 
-function parseCookingTimeMinutes(name) {
+export function parseCookingTimeMinutes(name) {
   if (!name) return 30;
   if (name.includes("до 20")) return 20;
   if (name.includes("до 40")) return 35;
@@ -71,7 +71,7 @@ function parseCookingTimeMinutes(name) {
 
 // "450 г" -> ["Тесто слоёное дрож.", 450, "г"]; "по вкусу" -> null (не
 // включаем в список покупок то, что нельзя осмысленно докупить в граммах).
-function vkusvillIngredientToTriple(ingredient) {
+export function vkusvillIngredientToTriple(ingredient) {
   // \b здесь бы не сработал: в JS \b/\w по умолчанию понимают только ASCII,
   // граница после кириллической буквы не определяется как ожидается — ловил
   // false negative даже на "400 г". Вместо этого — negative lookahead на
@@ -134,10 +134,10 @@ function nameHasKeyword(name, keywords) {
   const lower = name.toLowerCase();
   return keywords.some((kw) => lower.includes(kw));
 }
-function nameViolatesAllergies(name, allergyIds) {
+export function nameViolatesAllergies(name, allergyIds) {
   return nameHasKeyword(name, allergyIds.flatMap((id) => ALLERGEN_KEYWORDS[id] || []));
 }
-function nameViolatesDiet(name, diet) {
+export function nameViolatesDiet(name, diet) {
   if (diet === "veg") return nameHasKeyword(name, MEAT_FISH_KEYWORDS);
   if (diet === "vegan") return nameHasKeyword(name, VEGAN_FORBIDDEN_KEYWORDS);
   return false;
