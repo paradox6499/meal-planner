@@ -65,6 +65,38 @@ describe("buildPools", () => {
     });
   });
 
+  it("maxCookTime отсекает рецепты дольше указанного времени", () => {
+    // Все устройства сразу — deviceOk не должен путаться с проверкой времени,
+    // иначе фолбэк может сработать по нехватке техники, а не времени, и тест
+    // проверит не то, что заявлено (наступали на это ровно так).
+    const allDevices = ["stove", "oven", "multi", "air", "grill", "blender", "micro"];
+    const pools = buildPools("any", [], allDevices, [], 20);
+    Object.values(pools).forEach((pool) => {
+      pool.forEach((recipe) => expect(recipe.time, `"${recipe.name}" — ${recipe.time} мин > 20`).toBeLessThanOrEqual(20));
+    });
+    // и правда что-то отсеклось, а не "у нас просто все рецепты короткие"
+    const poolsUnrestricted = buildPools("any", [], allDevices, [], null);
+    const totalRestricted = Object.values(pools).reduce((s, p) => s + p.length, 0);
+    const totalUnrestricted = Object.values(poolsUnrestricted).reduce((s, p) => s + p.length, 0);
+    expect(totalRestricted).toBeLessThan(totalUnrestricted);
+  });
+
+  it("maxCookTime смягчается фолбэком, если из-за него категория опустела (мягкое предпочтение, не жёсткое ограничение)", () => {
+    // Нереалистично короткое время — не должно найтись НИ ОДНОГО рецепта в
+    // какой-то категории по строгому фильтру, но пул всё равно не пуст —
+    // значит фолбэк сработал (та же логика, что у кухни/техники).
+    const pools = buildPools("any", [], [], [], 1);
+    Object.values(pools).forEach((pool) => expect(pool.length).toBeGreaterThan(0));
+  });
+
+  it("maxCookTime отсутствует/null — ведёт себя как раньше, без ограничения времени", () => {
+    const withoutArg = buildPools("any", [], [], []);
+    const withNull = buildPools("any", [], [], [], null);
+    Object.keys(withoutArg).forEach((cat) => {
+      expect(withoutArg[cat].map((r) => r.id).sort()).toEqual(withNull[cat].map((r) => r.id).sort());
+    });
+  });
+
   it("аллергия не смягчается фолбэком, даже если из-за этого категория опустеет", () => {
     // Синтетический случай: аллергия, которая гипотетически покрывает все
     // рецепты категории — buildPools не должен тайком вернуть их обратно.

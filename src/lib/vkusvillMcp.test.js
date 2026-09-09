@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { toVkusvillQuantity, searchProducts, createCartLink, clearMcpCache } from "./vkusvillMcp.js";
+import { toVkusvillQuantity, searchProducts, createCartLink, clearMcpCache, resolvePrices } from "./vkusvillMcp.js";
 
 // Используется и при сборке реальной корзины, и при пересчёте "Итого за
 // продукты" на замену товара (ResultView в App.jsx) — если эта функция
@@ -97,5 +97,91 @@ describe("кэширование read-only вызовов", () => {
     clearMcpCache();
     await searchProducts({ q: "молоко" });
     expect(fetch).toHaveBeenCalledTimes(2);
+  });
+});
+
+// Живой пример ответа ВкусВилл на реальный rate-limit (зафиксировано вживую
+// в чате): inner.error.retryable === false, но ВЕРХНИЙ уровень (inner.code /
+// inner.retryable) говорит другое — единственное надёжное поле здесь
+// http_status. mockMcpError воспроизводит именно эту форму ответа.
+function mockMcpError(errorObj, topLevelExtra = {}) {
+  return {
+    ok: true,
+    json: async () => ({ jsonrpc: "2.0", id: 1, result: { content: [{ text: JSON.stringify({ ok: false, error: errorObj, ...topLevelExtra }) }] } }),
+  };
+}
+const RATE_LIMIT_ERROR = { code: "invalid_input", message: "Превышен лимит запросов, попробуйте позже", http_status: 429, retryable: false };
+
+describe("повтор запроса при 429 (rate limit) — регрессия: 'Итого' схлопывалось в 0 ₽ после реального rate-limit ВкусВилл", () => {
+  beforeEach(() => {
+    clearMcpCache();
+    vi.stubGlobal("fetch", vi.fn());
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it("повторяет попытку после 429 и в итоге успевает получить успешный ответ", async () => {
+    vi.useFakeTimers();
+    fetch
+      .mockResolvedValueOnce(mockMcpError(RATE_LIMIT_ERROR))
+      .mockResolvedValueOnce(mockMcpResponse({ items: [{ xml_id: 1, name: "Молоко" }] }));
+    const promise = searchProducts({ q: "молоко" });
+    await vi.advanceTimersByTimeAsync(600); // первая задержка ретрая
+    const result = await promise;
+    expect(result.items[0].name).toBe("Молоко");
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("после исчерпания попыток на постоянном 429 всё равно бросает читаемую ошибку", async () => {
+    vi.useFakeTimers();
+    fetch.mockResolvedValue(mockMcpError(RATE_LIMIT_ERROR));
+    const promise = searchProducts({ q: "молоко" });
+    const assertion = expect(promise).rejects.toThrow(/лимит запросов/);
+    await vi.advanceTimersByTimeAsync(600);
+    await vi.advanceTimersByTimeAsync(1500);
+    await assertion;
+    expect(fetch).toHaveBeenCalledTimes(3); // исходная попытка + 2 ретрая
+  });
+
+  it("не ретраит ошибки, отличные от 429 (например, некорректный запрос)", async () => {
+    fetch.mockResolvedValue(mockMcpError({ code: "invalid_input", message: "Некорректный id товара", http_status: 400, retryable: false }));
+    await expect(searchProducts({ q: "молоко" })).rejects.toThrow(/Некорректный id товара/);
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("resolvePrices — ограничение параллелизма (регрессия: 40 одновременных запросов triggers rate-limit)", () => {
+  beforeEach(() => {
+    clearMcpCache();
+    vi.stubGlobal("fetch", vi.fn());
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("никогда не держит больше 6 запросов в полёте одновременно", async () => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    fetch.mockImplementation(async () => {
+      inFlight++;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((r) => setTimeout(r, 4));
+      inFlight--;
+      return mockMcpResponse({ items: [{ xml_id: 1, name: "товар", price: { current: 10 }, unit: "шт" }] });
+    });
+    const items = Array.from({ length: 20 }, (_, i) => ({ name: `товар${i}`, amount: 1, unit: "шт" }));
+    await resolvePrices(items);
+    expect(maxInFlight).toBeLessThanOrEqual(6);
+    expect(fetch).toHaveBeenCalledTimes(20); // все всё равно обработаны, просто волнами
+  });
+
+  it("результат для каждого товара приходит в правильном порядке несмотря на параллельность", async () => {
+    fetch.mockImplementation(async (url, opts) => {
+      const q = JSON.parse(opts.body).params.arguments.q;
+      return mockMcpResponse({ items: [{ xml_id: 1, name: q, price: { current: 5 }, unit: "шт" }] });
+    });
+    const items = Array.from({ length: 10 }, (_, i) => ({ name: `товар${i}`, amount: 1, unit: "шт" }));
+    const resolved = await resolvePrices(items);
+    expect(resolved.map((r) => r.name)).toEqual(items.map((it) => it.name));
   });
 });

@@ -1,4 +1,10 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
+
+vi.mock("./vkusvillMcp.js", async (importOriginal) => {
+  const actual = await importOriginal();
+  return { ...actual, searchRecipes: vi.fn() };
+});
+import { searchRecipes } from "./vkusvillMcp.js";
 import {
   vkusvillIngredientToTriple,
   parseCookingTimeMinutes,
@@ -6,6 +12,7 @@ import {
   nameViolatesDiet,
   isWeightOrVolumeUnit,
   pricePerBaseUnit,
+  searchRawRecipes,
 } from "./vkusvillRecipes.js";
 
 describe("vkusvillIngredientToTriple", () => {
@@ -97,5 +104,48 @@ describe("pricePerBaseUnit / isWeightOrVolumeUnit", () => {
     expect(isWeightOrVolumeUnit("кг")).toBe(true);
     expect(isWeightOrVolumeUnit("л")).toBe(true);
     expect(isWeightOrVolumeUnit("шт")).toBe(false);
+  });
+});
+
+// Реальный ВкусВилл принимает только ОДИН id_cooking_time_filter за раз (не
+// массив — проверено вживую, сервер отвечает ошибкой валидации), а бакет
+// "до 40 минут" — это буквально 21-40 минут, не "0-40". Чтобы честно закрыть
+// "до 40 минут" целиком, searchRawRecipes на этом уровне делает ДВА запроса
+// (оба бакета) и объединяет — это и тестируется здесь на мокнутом searchRecipes.
+describe("searchRawRecipes — бюджет времени готовки", () => {
+  const baseArgs = { q: "", categoryId: 332, cookingMethod: 0, excludeAllergens: [] };
+
+  it("без maxCookTime — один запрос без фильтра времени (как раньше)", async () => {
+    searchRecipes.mockResolvedValue({ items: [{ id: 1 }] });
+    const items = await searchRawRecipes(baseArgs);
+    expect(searchRecipes).toHaveBeenCalledTimes(1);
+    expect(searchRecipes).toHaveBeenCalledWith(expect.objectContaining({ id_cooking_time_filter: 0 }));
+    expect(items).toEqual([{ id: 1 }]);
+  });
+
+  it("maxCookTime=20 — один запрос на единственный бакет 'до 20 минут'", async () => {
+    searchRecipes.mockResolvedValue({ items: [{ id: 1 }] });
+    await searchRawRecipes({ ...baseArgs, maxCookTime: 20 });
+    expect(searchRecipes).toHaveBeenCalledTimes(1);
+    expect(searchRecipes).toHaveBeenCalledWith(expect.objectContaining({ id_cooking_time_filter: 397967 }));
+  });
+
+  it("maxCookTime=40 — два запроса (оба бакета), результат объединён и без дублей по id", async () => {
+    searchRecipes.mockImplementation(({ id_cooking_time_filter }) =>
+      Promise.resolve({
+        items: id_cooking_time_filter === 397967 ? [{ id: 1 }, { id: 2 }] : [{ id: 2 }, { id: 3 }], // id=2 встречается в обоих — не должен задвоиться
+      })
+    );
+    const items = await searchRawRecipes({ ...baseArgs, maxCookTime: 40 });
+    expect(searchRecipes).toHaveBeenCalledTimes(2);
+    expect(items.map((r) => r.id).sort()).toEqual([1, 2, 3]);
+  });
+
+  it("сбой одного из двух запросов бакета 40 минут не роняет весь результат — берём то, что получилось", async () => {
+    searchRecipes.mockImplementation(({ id_cooking_time_filter }) =>
+      id_cooking_time_filter === 397967 ? Promise.resolve({ items: [{ id: 1 }] }) : Promise.reject(new Error("boom"))
+    );
+    const items = await searchRawRecipes({ ...baseArgs, maxCookTime: 40 });
+    expect(items).toEqual([{ id: 1 }]);
   });
 });

@@ -45,7 +45,28 @@ export function clearMcpCache() {
   cache.clear();
 }
 
-async function callTool(name, args, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+// RATE_LIMIT_RETRY_DELAYS_MS — только для http_status 429 (см. callToolOnce
+// ниже). Раньше единичный 429 сразу превращался в "не нашли цену" для этого
+// товара — теперь одна-две короткие паузы и повтор часто успевают проскочить,
+// не заставляя пользователя вручную пересобирать весь план.
+const RATE_LIMIT_RETRY_DELAYS_MS = [600, 1500];
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function callTool(name, args, opts = {}) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await callToolOnce(name, args, opts);
+    } catch (err) {
+      if (err.httpStatus === 429 && attempt < RATE_LIMIT_RETRY_DELAYS_MS.length) {
+        await sleep(RATE_LIMIT_RETRY_DELAYS_MS[attempt]);
+        continue;
+      }
+      throw err;
+    }
+  }
+}
+
+async function callToolOnce(name, args, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
   const cacheable = CACHEABLE_TOOLS.has(name);
   const cacheKey = cacheable ? cacheKeyFor(name, args) : null;
   if (cacheKey) {
@@ -100,10 +121,17 @@ async function callTool(name, args, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
     // "[object Object]" вместо текста, это и был баг "vernul oshibku
     // ([object Object])" из чата. message — то, что реально стоит показать
     // человеку (например "Превышен лимит запросов, попробуйте позже").
+    //
+    // На живом 429 сам ответ противоречив: inner.error.retryable === false,
+    // но ВЕРХНИЙ уровень inner.retryable === true и inner.code === "rate_limited"
+    // одновременно. Полагаться на inner.error.retryable нельзя — он там,
+    // где реально проверял, всегда false вне зависимости от сути ошибки.
+    // http_status — единственное надёжное поле для решения "стоит ли
+    // повторить попытку" (см. callTool: ретраит именно на 429).
     const msg = inner.error?.message || inner.error?.code || (typeof inner.error === "string" ? inner.error : "без описания");
     const err = new Error(`VkusVill MCP: ${name} вернул ошибку (${msg})`);
-    err.code = inner.error?.code;
-    err.retryable = inner.error?.retryable ?? inner.retryable;
+    err.code = inner.error?.code || inner.code;
+    err.httpStatus = inner.error?.http_status;
     throw err;
   }
 
@@ -193,32 +221,57 @@ export function toVkusvillQuantity(amount, ourUnit, productUnit) {
  * vkusvillRecipes.js) — поиск не повторяем, берём то, что уже знаем: искать
  * заново по названию самого товара-замены не только лишний запрос, но и
  * риск найти НЕ ЕГО (мало ли похожих товаров в каталоге). */
-export async function resolvePrices(items) {
-  const settled = await Promise.allSettled(
-    items.map(async (item) => {
-      if (item.xmlId) {
-        return {
-          matched: true,
-          name: item.name,
-          xml_id: item.xmlId,
-          price: item.knownPrice ?? null,
-          productUnit: item.knownUnit,
-          q: toVkusvillQuantity(item.amount, item.unit, item.knownUnit),
-        };
+// Раньше resolvePrices запускало ВСЕ поиски одним Promise.allSettled разом —
+// для плана из ~40 уникальных ингредиентов это 40 одновременных запросов к
+// MCP в один момент. Поймали живьём в чате: именно это, похоже, и triggers
+// rate-limit ВкусВилл (лимит скорее burst — "не больше N запросов
+// одновременно/в секунду", а не общий объём за минуту) — сумма "Итого"
+// схлопывалась в 0 ₽ сразу после сборки плана. mapWithConcurrency ограничивает
+// параллелизм, не убирая его совсем (полностью последовательно 40 запросов
+// были бы неприемлемо медленными).
+async function mapWithConcurrency(items, limit, fn) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+  async function worker() {
+    while (nextIndex < items.length) {
+      const i = nextIndex++;
+      try {
+        results[i] = { status: "fulfilled", value: await fn(items[i], i) };
+      } catch (err) {
+        results[i] = { status: "rejected", reason: err };
       }
-      const data = await searchProducts({ q: item.name, mode: "short", vvonly: 0 });
-      const match = data.items?.[0];
-      if (!match) return { matched: false, name: item.name };
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
+}
+
+const SEARCH_CONCURRENCY = 6;
+
+export async function resolvePrices(items) {
+  const settled = await mapWithConcurrency(items, SEARCH_CONCURRENCY, async (item) => {
+    if (item.xmlId) {
       return {
         matched: true,
         name: item.name,
-        xml_id: match.xml_id,
-        price: match.price?.current ?? null,
-        productUnit: match.unit,
-        q: toVkusvillQuantity(item.amount, item.unit, match.unit),
+        xml_id: item.xmlId,
+        price: item.knownPrice ?? null,
+        productUnit: item.knownUnit,
+        q: toVkusvillQuantity(item.amount, item.unit, item.knownUnit),
       };
-    })
-  );
+    }
+    const data = await searchProducts({ q: item.name, mode: "short", vvonly: 0 });
+    const match = data.items?.[0];
+    if (!match) return { matched: false, name: item.name };
+    return {
+      matched: true,
+      name: item.name,
+      xml_id: match.xml_id,
+      price: match.price?.current ?? null,
+      productUnit: match.unit,
+      q: toVkusvillQuantity(item.amount, item.unit, match.unit),
+    };
+  });
   return settled.map((r) => (r.status === "fulfilled" ? r.value : { matched: false, name: "?" }));
 }
 

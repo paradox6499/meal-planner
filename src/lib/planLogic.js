@@ -8,7 +8,7 @@ import { pricePerBaseUnit, isWeightOrVolumeUnit } from "./vkusvillRecipes.js";
 
 // пул подходящих рецептов на категорию: рацион/кухня/техника — мягкие предпочтения
 // (при пустом пуле смягчаются), аллергии — жёсткое исключение (не смягчается никогда)
-export function buildPools(diet, cuisines, devices, allergies) {
+export function buildPools(diet, cuisines, devices, allergies, maxCookTime) {
   const cuisineFilter = cuisines.length === 0 || cuisines.includes("any");
   const forbidden = forbiddenIngredientsFor(allergies);
   // Найдено при разборе жалобы "не нашлось рецептов для Перекрёстка": если
@@ -32,11 +32,12 @@ export function buildPools(diet, cuisines, devices, allergies) {
       const dietOk = safeDiet === "any" || r.diets.includes(safeDiet);
       const cuisineOk = category !== "main" || cuisineFilter || r.cuisine === "any" || cuisines.includes(r.cuisine);
       const deviceOk = r.devices.length === 0 || r.devices.some((d) => devices.includes(d));
-      return dietOk && cuisineOk && deviceOk;
+      const timeOk = !maxCookTime || r.time <= maxCookTime;
+      return dietOk && cuisineOk && deviceOk && timeOk;
     });
     if (pool.length === 0) {
-      // смягчаем фильтр по кухне/технике, если совсем ничего не подошло, чтобы план
-      // не был пустым — но аллергию НИКОГДА не смягчаем, это не предпочтение
+      // смягчаем кухню/технику/время готовки, если совсем ничего не подошло,
+      // чтобы план не был пустым — но аллергию НИКОГДА не смягчаем, это не предпочтение
       pool = RECIPES.filter(
         (r) =>
           r.category === category &&

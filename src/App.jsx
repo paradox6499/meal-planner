@@ -53,6 +53,16 @@ const DEVICES = [
   { id: "blender", label: "Блендер" },
 ];
 
+// Уровни привязаны к реальной таксономии ВкусВилл (см. vkusvillRecipes.js,
+// COOKING_TIME_BUCKET_IDS) — не произвольные 10/15/30, а то, что реально
+// достижимо без пустых пулов: у них самый мелкий бакет "до 20 минут", более
+// дробного деления в их данных просто нет.
+const COOK_TIME_TIERS = [
+  { id: "any", label: "Неважно", hint: "покажем любые по времени", maxMinutes: null },
+  { id: "fast", label: "До 20 минут", hint: "быстро, когда пришли уставшие", maxMinutes: 20 },
+  { id: "medium", label: "До 40 минут", hint: "готовы уделить готовке чуть больше", maxMinutes: 40 },
+];
+
 // какие приёмы пищи планируем закрывать рецептами
 const MEALS = [
   { id: "breakfast", label: "Завтрак", category: "breakfast" },
@@ -77,6 +87,7 @@ const STEP_META = [
   { key: "allergies", label: "Аллергии" },
   { key: "cuisine", label: "Кухня" },
   { key: "devices", label: "Техника" },
+  { key: "cooktime", label: "Время готовки" },
 ];
 const QUICK_STEP_KEYS = ["store", "budget"];
 
@@ -121,6 +132,7 @@ export default function MealPlanner() {
   const [allergies, setAllergies] = useState(savedProfile?.allergies ?? []);
   const [cuisines, setCuisines] = useState(savedProfile?.cuisines ?? []);
   const [devices, setDevices] = useState(savedProfile?.devices ?? []);
+  const [maxCookTime, setMaxCookTime] = useState(savedProfile?.maxCookTime ?? null);
   const [done, setDone] = useState(false);
   const [assembling, setAssembling] = useState(false);
   const [planState, setPlanState] = useState(null);
@@ -170,6 +182,7 @@ export default function MealPlanner() {
     allergies: true, // необязательны — их отсутствие тоже осознанный ответ
     cuisine: true, // необязательна
     devices: devices.length > 0,
+    cooktime: true, // необязателен — "неважно" тоже осознанный ответ
   };
 
   // Раньше пересчитывалось на каждое изменение фильтра (useMemo) — теперь
@@ -209,17 +222,17 @@ export default function MealPlanner() {
       // откатываемся на прежний статический список, а не роняем экран:
       // пользователь всё равно должен получить план, просто оценочный.
       try {
-        const result = await fetchVkusvillPools({ diet, cuisines, devices, allergies, categories: neededCategories });
+        const result = await fetchVkusvillPools({ diet, cuisines, devices, allergies, categories: neededCategories, maxCookTime });
         resolvedPools = result.pools;
         resolvedPriceByName = result.priceByName;
         const gotAnything = neededCategories.some((c) => (resolvedPools[c] || []).length > 0);
         if (!gotAnything) throw new Error("VkusVill не вернул рецептов под эти фильтры");
       } catch (err) {
         console.warn("VkusVill MCP недоступен, откат на статические рецепты:", err.message);
-        resolvedPools = buildPools(diet, cuisines, devices, allergies);
+        resolvedPools = buildPools(diet, cuisines, devices, allergies, maxCookTime);
       }
     } else {
-      resolvedPools = buildPools(diet, cuisines, devices, allergies);
+      resolvedPools = buildPools(diet, cuisines, devices, allergies, maxCookTime);
     }
 
     setPools(resolvedPools);
@@ -260,13 +273,13 @@ export default function MealPlanner() {
     setOpenRecipe(null); setAssembling(false); setPools(null); setPriceByName(null);
     if (!hasProfile) {
       setFamily(2); setMeals(["lunch", "dinner"]); setDiet(null);
-      setAllergies([]); setCuisines([]); setDevices([]);
+      setAllergies([]); setCuisines([]); setDevices([]); setMaxCookTime(null);
     }
   };
 
   const handleSaveProfile = () => {
     hapticNotify("success");
-    saveProfile({ family, meals, diet, allergies, cuisines, devices, displayName, mealTimes });
+    saveProfile({ family, meals, diet, allergies, cuisines, devices, displayName, mealTimes, maxCookTime });
   };
   const handleClearProfile = () => {
     clearProfile();
@@ -444,6 +457,7 @@ export default function MealPlanner() {
             allergies={allergies} setAllergies={setAllergies}
             cuisines={cuisines} setCuisines={setCuisines}
             devices={devices} setDevices={setDevices}
+            maxCookTime={maxCookTime} setMaxCookTime={setMaxCookTime}
             mealTimes={mealTimes} setMealTimes={setMealTimes}
             toggleSimple={toggleSimple} toggleCuisine={toggleCuisine}
             hasProfile={hasProfile}
@@ -582,6 +596,22 @@ export default function MealPlanner() {
               </StepShell>
             )}
 
+            {currentStepKey === "cooktime" && (
+              <StepShell icon={<Clock size={20} />} title="Сколько времени готовы тратить на готовку?" sub="Пришли уставшие после работы — выберите быстрые рецепты, будет время — берите любые">
+                <div style={styles.stack}>
+                  {COOK_TIME_TIERS.map((t) => (
+                    <button key={t.id} className="chip" onClick={() => { hapticSelect(); setMaxCookTime(t.maxMinutes); }} style={styles.rowChip(maxCookTime === t.maxMinutes)}>
+                      <div>
+                        <div style={{ fontWeight: 600 }}>{t.label}</div>
+                        <div style={styles.chipHint}>{t.hint}</div>
+                      </div>
+                      {maxCookTime === t.maxMinutes && <Check size={16} color={ACCENT} />}
+                    </button>
+                  ))}
+                </div>
+              </StepShell>
+            )}
+
             <div style={styles.navRow} className="mp-nav-row">
               <button onClick={() => { hapticImpact("light"); setStep((s) => Math.max(0, s - 1)); }} disabled={step === 0} style={{ ...styles.navBtn, visibility: step === 0 ? "hidden" : "visible" }}>
                 <ChevronLeft size={16} /> назад
@@ -673,6 +703,7 @@ function AccountView({
   displayName, setDisplayName, theme, setTheme,
   family, setFamily, meals, setMeals, diet, setDiet,
   allergies, setAllergies, cuisines, setCuisines, devices, setDevices,
+  maxCookTime, setMaxCookTime,
   mealTimes, setMealTimes,
   toggleSimple, toggleCuisine, hasProfile, onSave, onClear, onClose,
 }) {
@@ -798,6 +829,19 @@ function AccountView({
           {DEVICES.map((d) => (
             <button key={d.id} className="chip" onClick={() => toggleSimple(devices, setDevices, d.id)} style={styles.storeChip(devices.includes(d.id))}>
               <div style={{ fontWeight: 600 }}>{d.label}</div>
+            </button>
+          ))}
+        </div>
+
+        <div style={{ ...styles.acctLabel, marginTop: 16 }}>Время готовки</div>
+        <div style={styles.stack}>
+          {COOK_TIME_TIERS.map((t) => (
+            <button key={t.id} className="chip" onClick={() => { hapticSelect(); setMaxCookTime(t.maxMinutes); }} style={styles.rowChip(maxCookTime === t.maxMinutes)}>
+              <div>
+                <div style={{ fontWeight: 600 }}>{t.label}</div>
+                <div style={styles.chipHint}>{t.hint}</div>
+              </div>
+              {maxCookTime === t.maxMinutes && <Check size={16} color={ACCENT} />}
             </button>
           ))}
         </div>
@@ -1081,7 +1125,7 @@ function ResultView({ plan, storeId, storeName, budget, family, mealsCount, diet
                   ) : (
                     <span style={styles.recipeEmoji}>{dm.recipe.emoji}</span>
                   )}
-                  <span className="recipe-name-text" style={{ fontWeight: 500 }}>{dm.recipe.name}</span>
+                  <span className="recipe-name-text" style={styles.recipeName}>{dm.recipe.name}</span>
                   <ChevronRight size={14} style={{ color: "var(--text-tertiary)", flexShrink: 0 }} />
                 </button>
                 <span style={styles.timeBadge}>
@@ -1443,6 +1487,15 @@ const styles = {
 
   recipeRowBtn: { flex: 1, display: "flex", alignItems: "center", gap: 8, background: "none", border: "none", padding: "4px 2px", borderRadius: 10, textAlign: "left", cursor: "pointer", color: "var(--text-primary)", font: "inherit", minWidth: 0 },
   recipeEmoji: { fontSize: 17, flexShrink: 0, width: 20, textAlign: "center" },
+  // Раньше длинные названия (особенно у ВкусВилл — "Тушёные куриные желудки"
+  // и длиннее) в тесной строке (иконка + время + цена + кнопка замены на
+  // одной линии) расползались на 3-4 строки — нечитаемо. line-clamp режет
+  // ровно на 2 строки с многоточием, не трогая сам layout строки.
+  recipeName: {
+    fontWeight: 500, minWidth: 0,
+    display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical",
+    overflow: "hidden", wordBreak: "break-word", lineHeight: 1.25,
+  },
   recipeThumb: { width: 22, height: 22, borderRadius: 6, objectFit: "cover", flexShrink: 0 },
 
   modalOverlay: { position: "fixed", inset: 0, background: "var(--modal-backdrop)", backdropFilter: "blur(6px)", WebkitBackdropFilter: "blur(6px)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20, zIndex: 50 },

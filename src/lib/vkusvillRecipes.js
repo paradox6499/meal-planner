@@ -47,6 +47,15 @@ const ALLERGEN_EXCLUDE_ID = {
 
 const CUISINE_HINT = { it: "итальянская", asia: "азиатская", cauc: "кавказская", med: "средиземноморская" };
 
+// "Время готовки" — у ВкусВилл ОДИН бакет за запрос, не диапазон (проверено
+// вживую: массив в id_cooking_time_filter не принимается, только integer,
+// сервер отвечает ошибкой валидации). Бакет "до 40 минут" — это буквально
+// 21-40 минут, а не "0-40": рецепты короче 20 минут туда не попадают
+// (тоже проверено — id 397967 "до 20 минут" отдельно от 305736 "до 40 минут").
+// Чтобы честно закрыть уровень "до 40 минут" целиком (а не только 21-40),
+// на этом уровне делаем два запроса (оба бакета) и объединяем по id.
+const COOKING_TIME_BUCKET_IDS = { 20: [397967], 40: [397967, 305736] };
+
 const ALLERGEN_KEYWORDS = {
   nuts: ["орех", "миндал", "фундук", "кешью", "фисташ", "арахис"],
   dairy: ["молок", "сыр", "сливк", "сметан", "творог", "йогурт", "масло сливочн"],
@@ -215,28 +224,58 @@ async function attachRealCosts(pools) {
  *
  * `categories` — только те категории, что реально нужны (из выбранных
  * приёмов пищи) — не тратим вызовы на то, что пользователь не спрашивал. */
-export async function fetchVkusvillPools({ diet, cuisines, devices, allergies, categories }) {
+// Один "сырой" поиск рецептов под заданный бюджет времени — либо один
+// запрос без фильтра времени (maxCookTime не задан), либо один запрос на
+// бакет (20 минут), либо два запроса-и-объединить (40 минут, см. комментарий
+// у COOKING_TIME_BUCKET_IDS). Ошибка отдельного под-запроса не должна
+// обрушивать всю категорию — считаем её как "ничего не нашли на этом бакете".
+export async function searchRawRecipes({ q, categoryId, cookingMethod, excludeAllergens, maxCookTime }) {
+  const bucketIds = maxCookTime ? COOKING_TIME_BUCKET_IDS[maxCookTime] : null;
+  const fetchBucket = (timeId) =>
+    searchRecipes({
+      q, page: 1, sort: "popularity",
+      id_category_filter: categoryId, id_cooking_method_filter: cookingMethod,
+      id_cooking_time_filter: timeId, id_exclude_allergens_filter: excludeAllergens,
+    })
+      .then((d) => d.items || [])
+      .catch(() => []);
+
+  if (!bucketIds) return fetchBucket(0);
+  const results = await Promise.all(bucketIds.map(fetchBucket));
+  const seen = new Set();
+  return results.flat().filter((r) => (seen.has(r.id) ? false : (seen.add(r.id), true)));
+}
+
+/** maxCookTime — 20 | 40 | null ("не важно", как раньше). Мягкое
+ * предпочтение, как кухня/техника: если с ним категория опустела, повторяем
+ * запрос без ограничения времени — лучше показать план с рецептом подольше,
+ * чем оставить приём пищи вообще без рецепта. */
+export async function fetchVkusvillPools({ diet, cuisines, devices, allergies, categories, maxCookTime }) {
   const effectiveAllergies = diet === "gf" && !allergies.includes("gluten") ? [...allergies, "gluten"] : allergies;
   const excludeAllergens = [...new Set(effectiveAllergies.map((a) => ALLERGEN_EXCLUDE_ID[a]).filter(Boolean))];
   const cookingMethod = devices.map((d) => COOKING_METHOD_BY_DEVICE[d]).find(Boolean) || 0;
   const specificCuisines = cuisines.filter((c) => c !== "any");
   const q = specificCuisines.length === 1 ? CUISINE_HINT[specificCuisines[0]] || "" : "";
 
+  const normalizeAndFilter = (raw, category) =>
+    raw
+      .map((r) => normalizeVkusvillRecipe(r, category))
+      .filter((r) => r.ingr.length > 0 && !recipeViolatesDiet(r, diet) && !recipeViolatesAllergies(r, effectiveAllergies));
+
   const pools = {};
   await Promise.all(
     categories.map(async (category) => {
+      const categoryId = CATEGORY_BY_MEAL[category] || 0;
       try {
-        const data = await searchRecipes({
-          q,
-          page: 1,
-          sort: "popularity",
-          id_category_filter: CATEGORY_BY_MEAL[category] || 0,
-          id_cooking_method_filter: cookingMethod,
-          id_exclude_allergens_filter: excludeAllergens,
-        });
-        pools[category] = (data.items || [])
-          .map((raw) => normalizeVkusvillRecipe(raw, category))
-          .filter((r) => r.ingr.length > 0 && !recipeViolatesDiet(r, diet) && !recipeViolatesAllergies(r, effectiveAllergies));
+        const raw = await searchRawRecipes({ q, categoryId, cookingMethod, excludeAllergens, maxCookTime });
+        let normalized = normalizeAndFilter(raw, category);
+        if (normalized.length === 0 && maxCookTime) {
+          // смягчаем время готовки, если из-за него пул опустел — та же
+          // логика, что у buildPools() для кухни/техники в data/recipes.js
+          const rawUnrestricted = await searchRawRecipes({ q, categoryId, cookingMethod, excludeAllergens, maxCookTime: null });
+          normalized = normalizeAndFilter(rawUnrestricted, category);
+        }
+        pools[category] = normalized;
       } catch {
         pools[category] = [];
       }
