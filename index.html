@@ -4,6 +4,17 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Съедим</title>
+    <!-- Раньше не было ни иконки вкладки, ни og:-тегов — при пересылке ссылки
+         в Telegram (см. кнопка "Поделиться") показывался бы пустой блок без
+         превью, и вкладка браузера — с иконкой-заглушкой. SVG-favicon как
+         data URI — тот же образ (миска), что и в шапке приложения и на
+         аватарке бота, без отдельного файла-ассета. -->
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%8D%B2%3C/text%3E%3C/svg%3E" />
+    <meta name="description" content="Съедим — соберём меню на неделю под ваш бюджет и список покупок за пару минут" />
+    <meta name="theme-color" content="#0A84FF" />
+    <meta property="og:title" content="Съедим" />
+    <meta property="og:description" content="Меню на неделю под ваш бюджет и список покупок за пару минут" />
+    <meta property="og:type" content="website" />
     <style>
       /* html/body/#root не имели явной высоты — из-за этого .page (minHeight:100%)
          не дотягивался до низа окна на некоторых размерах экрана, снизу
