@@ -137,9 +137,28 @@ export default function MealPlanner() {
   const [assembling, setAssembling] = useState(false);
   const [planState, setPlanState] = useState(null);
   const [openRecipe, setOpenRecipe] = useState(null);
+  const [showProModal, setShowProModal] = useState(false);
   const [showAccount, setShowAccount] = useState(false);
   const [displayName, setDisplayName] = useState(savedProfile?.displayName ?? "");
   const [mealTimes, setMealTimes] = useState(savedProfile?.mealTimes ?? DEFAULT_MEAL_TIMES);
+
+  // Известный баг части Android-WebView (в т.ч. внутри Telegram Mini App) —
+  // после программного обновления DOM (без тач-события от пользователя)
+  // экран не перерисовывается сразу: кадр готов внутри WebView, но не
+  // "запаяснен" на экран, пока пользователь не коснётся его пальцем/не
+  // проскроллит — это и триггерит перерисовку, которую WebView иначе
+  // откладывает. Жалоба в чате: именно на переходе в состояние "собираем
+  // список" и обратно, где контент меняется полностью и программно.
+  // Форсируем reflow вручную на каждый такой переход.
+  useEffect(() => {
+    const el = document.documentElement;
+    el.style.transform = "translateZ(0)";
+    void el.offsetHeight; // синхронно форсирует reflow — без чтения layout-свойства присвоение transform выше могло бы быть "отложено" браузером
+    const raf = requestAnimationFrame(() => {
+      el.style.transform = "";
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [assembling, done]);
 
   // "system" | "light" | "dark" — управляется вручную из Аккаунта, поверх
   // системной темы по умолчанию (см. data-theme в <style> ниже и useEffect,
@@ -464,6 +483,7 @@ export default function MealPlanner() {
             onSave={handleSaveProfile}
             onClear={handleClearProfile}
             onClose={() => setShowAccount(false)}
+            onOpenPro={() => setShowProModal(true)}
           />
         )}
 
@@ -652,6 +672,7 @@ export default function MealPlanner() {
       {openRecipe && (
         <RecipeModal dm={openRecipe} family={family} onClose={() => setOpenRecipe(null)} />
       )}
+      {showProModal && <ProModal onClose={() => setShowProModal(false)} />}
     </div>
   );
 }
@@ -705,7 +726,7 @@ function AccountView({
   allergies, setAllergies, cuisines, setCuisines, devices, setDevices,
   maxCookTime, setMaxCookTime,
   mealTimes, setMealTimes,
-  toggleSimple, toggleCuisine, hasProfile, onSave, onClear, onClose,
+  toggleSimple, toggleCuisine, hasProfile, onSave, onClear, onClose, onOpenPro,
 }) {
   const [saved, setSaved] = useState(false);
   const handleSave = () => {
@@ -864,7 +885,7 @@ function AccountView({
       </div>
 
       <div style={styles.acctDivider} />
-      <AccountSubscriptionCard />
+      <AccountSubscriptionCard onOpenPro={onOpenPro} />
     </div>
   );
 }
@@ -900,36 +921,88 @@ const SUBSCRIPTION_BENEFITS = [
   },
 ];
 
-function AccountSubscriptionCard() {
-  const [openIdx, setOpenIdx] = useState(null);
+// Раньше в Аккаунте был мини-аккордеон с тем же списком, что и здесь — теперь
+// он переехал в отдельный полноэкранный ProModal (пользователь в чате прямо
+// это попросил: компактная карточка в Аккаунте + большое окно с полным
+// питчем и ценой по кнопке "Перейти на Pro", а не два дублирующих друг друга
+// списка). Карточка в Аккаунте теперь просто честно называет, что доступно
+// сейчас, и одной кнопкой ведёт к продающему экрану.
+function AccountSubscriptionCard({ onOpenPro }) {
   return (
     <div style={styles.acctSection}>
       <div style={styles.subCard}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
           <Sparkles size={16} color={ACCENT} />
           <span style={{ fontWeight: 700, fontSize: 15 }}>Подписка</span>
           <span style={styles.freeBadge}>Free</span>
         </div>
+        <p style={styles.acctSectionHint}>
+          Сейчас доступно: сборка плана под бюджет, реальные цены и заказ в ВкусВилл, замена товаров, напоминания
+          (в разработке). Pro снимет ограничения, которые появятся на бесплатном тарифе.
+        </p>
+        <button onClick={() => { hapticImpact("light"); onOpenPro(); }} style={{ ...styles.orderBtn, marginTop: 4 }}>
+          Перейти на Pro
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// Полноэкранный продающий экран подписки — открывается кнопкой "Перейти на
+// Pro" из Аккаунта. Пользователь в чате прямо описал желаемую механику:
+// зачёркнутая старая цена рядом с новой (классический якорь цены) + кнопка
+// оформления. Сама оплата пока никуда не ведёт по-настоящему — ни один
+// провайдер не подключён (см. комментарий у SUBSCRIPTION_BENEFITS выше) —
+// нажатие честно говорит "скоро", а не притворяется, что списало деньги.
+function ProModal({ onClose }) {
+  const [pendingPayment, setPendingPayment] = useState(false);
+  const handleSubscribe = () => {
+    hapticNotify("warning");
+    setPendingPayment(true);
+  };
+  return (
+    <div style={styles.modalOverlay} className="modal-overlay-in" onClick={onClose}>
+      <div style={styles.modalCard} className="modal-card-in" onClick={(e) => e.stopPropagation()}>
+        <button onClick={onClose} title="Закрыть" aria-label="Закрыть" style={styles.modalClose}>
+          <X size={16} />
+        </button>
+
+        <div style={styles.proHero}>
+          <Sparkles size={32} color={ACCENT} />
+        </div>
+        <h2 style={{ ...styles.stepTitle, textAlign: "center" }}>Съедим Pro</h2>
+        <p style={{ ...styles.stepSub, textAlign: "center" }}>Всё то же самое, что уже работает, — но без ограничений</p>
+
         <div style={styles.stack}>
-          {SUBSCRIPTION_BENEFITS.map((b, i) => (
-            <div key={b.title}>
-              <button onClick={() => { hapticSelect(); setOpenIdx((prev) => (prev === i ? null : i)); }} style={styles.benefitRowBtn}>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontWeight: 600, fontSize: 13 }}>{b.title}</div>
-                  <div style={{ fontSize: 11.5, color: "var(--text-tertiary)", marginTop: 2 }}>{b.short}</div>
-                </div>
-                <ChevronRight
-                  size={14}
-                  style={{ color: "var(--text-tertiary)", flexShrink: 0, marginTop: 2, transform: openIdx === i ? "rotate(90deg)" : "none", transition: "transform .15s ease" }}
-                />
-              </button>
-              {openIdx === i && <p style={styles.benefitDetail}>{b.detail}</p>}
+          {SUBSCRIPTION_BENEFITS.map((b) => (
+            <div key={b.title} style={styles.proFeatureRow}>
+              <div style={styles.proFeatureCheck}>
+                <Check size={13} color={ACCENT} />
+              </div>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontWeight: 600, fontSize: 13.5 }}>{b.title}</div>
+                <div style={{ fontSize: 12, color: "var(--text-tertiary)", marginTop: 2, lineHeight: 1.4 }}>{b.detail}</div>
+              </div>
             </div>
           ))}
         </div>
-        <button disabled style={{ ...styles.orderBtn, opacity: 0.4, cursor: "default", marginTop: 14 }}>
-          Скоро
-        </button>
+
+        <div style={styles.proPriceBox}>
+          <div style={styles.proPriceRow}>
+            <span style={styles.proPriceOld}>399 ₽</span>
+            <span style={styles.proPriceNew}>299 ₽</span>
+            <span style={styles.proPricePeriod}>/ мес</span>
+          </div>
+          {!pendingPayment ? (
+            <button onClick={handleSubscribe} style={{ ...styles.navBtnPrimary, width: "100%", justifyContent: "center", marginTop: 12 }}>
+              Оформить подписку
+            </button>
+          ) : (
+            <p style={{ ...styles.acctSectionHint, textAlign: "center", margin: "12px 0 0 0" }}>
+              Оплата пока не подключена — совсем скоро здесь появится настоящая кнопка оплаты картой. Мы напишем, когда будет готово.
+            </p>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -1365,7 +1438,10 @@ const styles = {
     background: "var(--page-bg)",
     padding: "40px 16px", fontFamily: FONT, color: "var(--text-primary)",
   },
-  card: { width: "100%", maxWidth: 440, ...glass(0.55, 24), borderRadius: 28, border: "1px solid var(--hairline)", padding: 26, boxShadow: "var(--card-shadow)" },
+  // will-change держит карточку на собственном GPU-слое постоянно (не
+  // только в момент форсированного reflow из useEffect выше) — вторая,
+  // более "фоновая" защита от той же WebView-проблемы с зависшим кадром.
+  card: { width: "100%", maxWidth: 440, ...glass(0.55, 24), borderRadius: 28, border: "1px solid var(--hairline)", padding: 26, boxShadow: "var(--card-shadow)", willChange: "transform" },
   header: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20 },
   brandRow: { display: "flex", alignItems: "center", gap: 9 },
   logoMark: {
@@ -1415,11 +1491,20 @@ const styles = {
   }),
   subCard: { border: "1px solid var(--hairline)", borderRadius: 20, padding: "16px 16px 18px", ...glass(0.5, 12) },
   freeBadge: { fontSize: 10.5, fontWeight: 700, color: "var(--text-tertiary)", background: "var(--track-bg)", padding: "2px 8px", borderRadius: 999, marginLeft: "auto" },
-  benefitRowBtn: {
-    display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 8, width: "100%", textAlign: "left",
-    background: "none", border: "1px solid var(--hairline)", borderRadius: 14, padding: "10px 12px", cursor: "pointer", color: "var(--text-primary)",
+  proHero: {
+    width: 64, height: 64, borderRadius: 20, margin: "0 auto 14px auto", display: "flex", alignItems: "center", justifyContent: "center",
+    background: "rgba(10,132,255,0.12)",
   },
-  benefitDetail: { fontSize: 12, color: "var(--text-secondary)", lineHeight: 1.45, margin: "6px 4px 0 4px" },
+  proFeatureRow: { display: "flex", gap: 10, alignItems: "flex-start" },
+  proFeatureCheck: {
+    width: 22, height: 22, borderRadius: "50%", flexShrink: 0, marginTop: 1, display: "flex", alignItems: "center", justifyContent: "center",
+    background: "rgba(10,132,255,0.12)",
+  },
+  proPriceBox: { marginTop: 22, paddingTop: 18, borderTop: "1px solid var(--hairline)" },
+  proPriceRow: { display: "flex", alignItems: "baseline", justifyContent: "center", gap: 8 },
+  proPriceOld: { fontSize: 15, color: "var(--text-tertiary)", textDecoration: "line-through" },
+  proPriceNew: { fontSize: 28, fontWeight: 700, letterSpacing: "-0.01em" },
+  proPricePeriod: { fontSize: 13, color: "var(--text-tertiary)" },
   progressWrap: { marginBottom: 22 },
   progressSegments: { display: "flex", gap: 4 },
   progressSegment: (filled) => ({
