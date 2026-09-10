@@ -463,7 +463,7 @@ export default function MealPlanner() {
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             {done && !showAccount && (
               <button onClick={reset} style={styles.resetBtn}>
-                <RotateCcw size={14} /> заново
+                <RotateCcw size={14} /> Заново
               </button>
             )}
             <button
@@ -647,7 +647,7 @@ export default function MealPlanner() {
 
             <div style={styles.navRow} className="mp-nav-row">
               <button onClick={() => { hapticImpact("light"); setStep((s) => Math.max(0, s - 1)); }} disabled={step === 0} style={{ ...styles.navBtn, visibility: step === 0 ? "hidden" : "visible" }}>
-                <ChevronLeft size={16} /> назад
+                <ChevronLeft size={16} /> Назад
               </button>
               <button
                 onClick={() => { hapticImpact("medium"); step === activeSteps.length - 1 ? handleFinish() : setStep((s) => s + 1); }}
