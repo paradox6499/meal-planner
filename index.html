@@ -14,6 +14,20 @@
          не быть в инжектированной версии объекта). Официальная рекомендация
          Telegram — подключать этот тег первым в <head>, до любого своего кода. -->
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <script>
+      // Одна и та же страница обслуживает два разных визита: открытие внутри
+      // Telegram Mini App (обычный сценарий — сразу визард) и обычный браузер
+      // (например, проверка сайта платёжной системой при подключении оплаты —
+      // ей нужно увидеть услугу/цену/условия/реквизиты сразу, а не мастер
+      // выбора магазина). window.Telegram.WebApp.initData непустой ТОЛЬКО
+      // когда страницу реально открыл клиент Telegram как Mini App —
+      // синхронная проверка здесь, до отрисовки, чтобы не было мигания
+      // одного контента поверх другого.
+      (function () {
+        var tg = window.Telegram && window.Telegram.WebApp;
+        if (tg && tg.initData) document.documentElement.classList.add("in-app");
+      })();
+    </script>
     <!-- Раньше не было ни иконки вкладки, ни og:-тегов — при пересылке ссылки
          в Telegram (см. кнопка "Поделиться") показывался бы пустой блок без
          превью, и вкладка браузера — с иконкой-заглушкой. Теперь настоящий
@@ -36,13 +50,99 @@
          подстраховка на самый первый рендер, до того как смонтируется React
          и применится настоящий градиент из App.jsx. */
       html, body, #root { height: 100%; margin: 0; }
-      body { background: #eef1f5; }
+      body { background: #eef1f5; color: #14181f; font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", Arial, sans-serif; }
       @media (prefers-color-scheme: dark) {
-        body { background: #0b0b0d; }
+        body { background: #0b0b0d; color: #f2f2f7; }
       }
+      /* По умолчанию — видна страница для браузера (#landing), приложение
+         (#root) скрыто. Скрипт выше добавляет класс in-app на <html> ДО
+         отрисовки, если это реально открыто в Telegram — тогда местами
+         меняются: приложение показывается, страница для браузера скрывается.
+         Ничего не мигает, потому что переключение происходит синхронно, до
+         первого кадра. */
+      #root { display: none; }
+      #landing { display: block; }
+      html.in-app #root { display: block; }
+      html.in-app #landing { display: none; }
+
+      #landing { max-width: 640px; margin: 0 auto; padding: 48px 20px 80px; line-height: 1.6; }
+      #landing .logo { width: 72px; height: 72px; border-radius: 20px; display: block; margin-bottom: 20px; }
+      #landing h1 { font-size: 26px; margin: 0 0 8px; }
+      #landing .tagline { color: #5b6472; font-size: 15.5px; margin: 0 0 28px; max-width: 46ch; }
+      @media (prefers-color-scheme: dark) { #landing .tagline { color: #9aa3b2; } }
+      #landing .cta {
+        display: inline-flex; align-items: center; gap: 8px; background: #0A84FF; color: #fff; text-decoration: none;
+        font-weight: 600; font-size: 14.5px; padding: 12px 22px; border-radius: 999px; margin-bottom: 40px;
+      }
+      #landing h2 { font-size: 17px; margin: 36px 0 10px; }
+      #landing p { font-size: 14.5px; color: #2a2f38; margin: 0 0 10px; }
+      @media (prefers-color-scheme: dark) { #landing p { color: #d6d9e0; } }
+      #landing .plan-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 14px; }
+      #landing .plan-card { border: 1px solid #dfe4eb; border-radius: 14px; padding: 16px; }
+      @media (prefers-color-scheme: dark) { #landing .plan-card { border-color: #262c36; } }
+      #landing .plan-card .name { font-weight: 700; font-size: 14px; margin-bottom: 6px; }
+      #landing .plan-card .price { font-size: 20px; font-weight: 700; margin-bottom: 8px; }
+      #landing .plan-card ul { margin: 0; padding-left: 18px; font-size: 13px; color: #5b6472; }
+      @media (prefers-color-scheme: dark) { #landing .plan-card ul { color: #9aa3b2; } }
+      #landing .plan-card li { margin-bottom: 4px; }
+      #landing .legal-links { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 8px; }
+      #landing .legal-links a { color: #0A84FF; font-size: 14px; text-decoration: none; }
+      #landing .legal-links a:hover { text-decoration: underline; }
+      #landing .requisites { font-size: 13.5px; color: #5b6472; margin-top: 6px; }
+      @media (prefers-color-scheme: dark) { #landing .requisites { color: #9aa3b2; } }
     </style>
   </head>
   <body>
+    <!-- Показывается только вне Telegram (см. скрипт и CSS выше) — реальный
+         сервис/цена/условия/реквизиты, а не мастер выбора магазина без
+         контекста. Нужно в первую очередь для проверки сайта платёжной
+         системой при подключении приёма платежей (ЮKassa требует видеть это
+         сразу на сайте, без входа куда-либо). -->
+    <div id="landing">
+      <img class="logo" src="./logo.svg" alt="" />
+      <h1>Съедим</h1>
+      <p class="tagline">Планирование меню на неделю под ваш бюджет и список покупок — мини-приложение в Telegram, с реальными ценами магазина ВкусВилл.</p>
+      <a class="cta" href="https://t.me/s_edim_bot">Открыть в Telegram →</a>
+
+      <h2>Тарифы</h2>
+      <div class="plan-grid">
+        <div class="plan-card">
+          <div class="name">Free</div>
+          <div class="price">0 ₽</div>
+          <ul>
+            <li>1 план в неделю</li>
+            <li>Список покупок с ценами</li>
+            <li>Ручной повтор плана</li>
+          </ul>
+        </div>
+        <div class="plan-card">
+          <div class="name">Pro</div>
+          <div class="price">299 ₽ / мес</div>
+          <ul>
+            <li>Безлимитная пересборка плана</li>
+            <li>Несколько планов одновременно</li>
+            <li>Напоминания от бота</li>
+            <li>Общий список на семью</li>
+          </ul>
+        </div>
+      </div>
+
+      <h2>Как оформить и получить доступ</h2>
+      <p>Оплата подписки — картой, через платёжного провайдера ЮKassa, по ссылке прямо из мини-приложения. Доступ к функциям Pro открывается автоматически сразу после оплаты — в том же мини-приложении в Telegram, ничего дополнительно устанавливать или ждать не нужно. Отменить можно в любой момент, обратившись в поддержку.</p>
+
+      <h2>Документы</h2>
+      <div class="legal-links">
+        <a href="./terms.html">Пользовательское соглашение</a>
+        <a href="./privacy.html">Политика конфиденциальности</a>
+      </div>
+
+      <h2>Контакты и реквизиты</h2>
+      <p class="requisites">
+        ИП Киселев Евгений Дмитриевич · ИНН 644302512981 · ОГРНИП 322645700078520<br />
+        Telegram: <a href="https://t.me/s_edim_bot" style="color:#0A84FF;">@s_edim_bot</a> · Email: <a href="mailto:genykis@yandex.ru" style="color:#0A84FF;">genykis@yandex.ru</a>
+      </p>
+    </div>
+
     <div id="root"></div>
     <script type="module" src="/src/main.jsx"></script>
   </body>
