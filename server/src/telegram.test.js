@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { sendTelegramMessage, buildReminderText } from "./telegram.js";
+import { sendTelegramMessage, buildReminderText, sendTelegramDocument } from "./telegram.js";
 
 describe("sendTelegramMessage", () => {
   afterEach(() => vi.unstubAllGlobals());
@@ -32,6 +32,30 @@ describe("sendTelegramMessage", () => {
   it("бросает ошибку при HTTP-сбое без валидного JSON-тела", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 500, json: async () => { throw new Error("not json"); } }));
     await expect(sendTelegramMessage("BOT:TOKEN", 42, "Привет")).rejects.toThrow("500");
+  });
+});
+
+describe("sendTelegramDocument", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("шлёт multipart POST на sendDocument с chat_id, файлом и подписью", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ ok: true, result: {} }) });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await sendTelegramDocument("BOT:TOKEN", 777, Buffer.from("hello"), "backup.db", "Бэкап");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, opts] = fetchMock.mock.calls[0];
+    expect(url).toBe("https://api.telegram.org/botBOT:TOKEN/sendDocument");
+    expect(opts.body).toBeInstanceOf(FormData);
+    expect(opts.body.get("chat_id")).toBe("777");
+    expect(opts.body.get("caption")).toBe("Бэкап");
+    expect(opts.body.get("document").name).toBe("backup.db");
+  });
+
+  it("бросает понятную ошибку при ok:false", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({ ok: false, description: "File too large" }) }));
+    await expect(sendTelegramDocument("BOT:TOKEN", 777, Buffer.from("x"), "b.db")).rejects.toThrow(/too large/);
   });
 });
 

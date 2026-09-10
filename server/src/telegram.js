@@ -36,3 +36,29 @@ export async function sendTelegramMessage(botToken, chatId, text, opts = {}) {
 export function buildReminderText(mealLabel, recipeName) {
   return `🍽 Скоро ${mealLabel.toLowerCase()}: *${recipeName}*. Самое время начинать готовить.`;
 }
+
+/**
+ * Отправка файла (бэкап БД, см. backup.js) документом в чат — тот же бот,
+ * никакого стороннего файлового хранилища заводить не пришлось.
+ * @param {string} botToken
+ * @param {number} chatId
+ * @param {Buffer} buffer — содержимое файла
+ * @param {string} filename
+ * @param {string} [caption]
+ */
+export async function sendTelegramDocument(botToken, chatId, buffer, filename, caption) {
+  const form = new FormData();
+  form.append("chat_id", String(chatId));
+  if (caption) form.append("caption", caption);
+  form.append("document", new Blob([buffer]), filename);
+
+  const res = await fetch(`https://api.telegram.org/bot${botToken}/sendDocument`, {
+    method: "POST",
+    body: form,
+  });
+  const body = await res.json().catch(() => null);
+  if (!res.ok || !body?.ok) {
+    throw new Error(`Telegram sendDocument: ${body?.description || res.status}`);
+  }
+  return body.result;
+}
