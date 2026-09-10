@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect } from "react";
-import { Check, ChevronLeft, ChevronRight, Store, Users, Wallet, Salad, ChefHat, Flame, RotateCcw, UtensilsCrossed, Clock, Repeat, Ban, TriangleAlert, X, Loader2, Share2, Settings, Sun, Moon, MonitorSmartphone, Sparkles, PackageSearch } from "lucide-react";
+import { Check, ChevronLeft, ChevronRight, Store, Users, Wallet, Salad, ChefHat, Flame, RotateCcw, UtensilsCrossed, Clock, Repeat, Ban, TriangleAlert, X, Loader2, Share2, Settings, Sun, Moon, MonitorSmartphone, Sparkles, PackageSearch, Home } from "lucide-react";
 import { ALLERGENS } from "./data/recipes.js";
 import { buildCartFromShoppingList, toVkusvillQuantity } from "./lib/vkusvillMcp.js";
 import { fetchVkusvillPools, getSubstituteOptions } from "./lib/vkusvillRecipes.js";
@@ -8,6 +8,7 @@ import { buildPools, buildInitialPlan, buildPlanView } from "./lib/planLogic.js"
 import { submitPlanToBackend } from "./lib/backend.js";
 import logoUrl from "./assets/logo.svg";
 import { hapticSelect, hapticImpact, hapticNotify } from "./lib/haptics.js";
+import { checkHomeScreenStatus, promptAddToHomeScreen, onHomeScreenAdded } from "./lib/homeScreen.js";
 
 // Разумные дефолты "во сколько вы обычно едите" — единственное, чего не
 // хватало для напоминаний от бота (см. server/README.md и обсуждение в
@@ -141,6 +142,16 @@ export default function MealPlanner() {
   const [showAccount, setShowAccount] = useState(false);
   const [displayName, setDisplayName] = useState(savedProfile?.displayName ?? "");
   const [mealTimes, setMealTimes] = useState(savedProfile?.mealTimes ?? DEFAULT_MEAL_TIMES);
+
+  // "Добавить на экран" (Bot API 8.0+, см. lib/homeScreen.js) — статус
+  // проверяем один раз при монтировании, а не при каждом открытии Аккаунта:
+  // он не меняется сам по себе, кроме момента, когда пользователь реально
+  // подтвердит добавление (тогда прилетит событие homeScreenAdded).
+  const [homeScreenStatus, setHomeScreenStatus] = useState("unsupported");
+  useEffect(() => {
+    checkHomeScreenStatus().then(setHomeScreenStatus);
+    return onHomeScreenAdded(() => setHomeScreenStatus("added"));
+  }, []);
 
   // Известный баг части Android-WebView (в т.ч. внутри Telegram Mini App) —
   // после программного обновления DOM (без тач-события от пользователя)
@@ -484,6 +495,8 @@ export default function MealPlanner() {
             onClear={handleClearProfile}
             onClose={() => setShowAccount(false)}
             onOpenPro={() => setShowProModal(true)}
+            homeScreenStatus={homeScreenStatus}
+            onAddToHomeScreen={() => { hapticImpact("light"); promptAddToHomeScreen(); }}
           />
         )}
 
@@ -727,6 +740,7 @@ function AccountView({
   maxCookTime, setMaxCookTime,
   mealTimes, setMealTimes,
   toggleSimple, toggleCuisine, hasProfile, onSave, onClear, onClose, onOpenPro,
+  homeScreenStatus, onAddToHomeScreen,
 }) {
   const [saved, setSaved] = useState(false);
   const handleSave = () => {
@@ -768,6 +782,28 @@ function AccountView({
           ))}
         </div>
       </div>
+
+      {homeScreenStatus !== "unsupported" && (
+        <div style={styles.acctSection}>
+          <div style={styles.acctLabel}>Быстрый доступ</div>
+          {homeScreenStatus === "added" ? (
+            <div style={styles.homeScreenAddedRow}>
+              <Home size={16} color={ACCENT} />
+              <span>Уже на экране телефона</span>
+            </div>
+          ) : (
+            <button onClick={onAddToHomeScreen} className="chip" style={styles.rowChip(false)}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <Home size={16} color={ACCENT} />
+                <div>
+                  <div style={{ fontWeight: 600 }}>Добавить на экран</div>
+                  <div style={styles.chipHint}>Открывать одним тапом, без захода в Telegram</div>
+                </div>
+              </div>
+            </button>
+          )}
+        </div>
+      )}
 
       <div style={styles.acctDivider} />
 
@@ -1450,7 +1486,10 @@ const styles = {
   },
   brand: { fontSize: 19, fontWeight: 700, letterSpacing: "-0.015em" },
   greeting: { fontSize: 12, color: "var(--text-tertiary)", marginTop: 2 },
-  resetBtn: { display: "flex", alignItems: "center", gap: 5, ...glass(0.5, 8), border: "1px solid var(--hairline)", borderRadius: 999, padding: "6px 12px", fontSize: 12, fontWeight: 500, color: "var(--text-secondary)", cursor: "pointer" },
+  // height: 32 — та же высота, что у круглой accountBtn (шестерёнки) рядом
+  // в шапке: раньше разной высоты пилюля и кружок в одном ряду выглядели
+  // рассинхронизированно, хотя обе уже были "стеклянными".
+  resetBtn: { display: "flex", alignItems: "center", gap: 5, height: 32, ...glass(0.5, 8), border: "1px solid var(--hairline)", borderRadius: 999, padding: "0 13px", fontSize: 12, fontWeight: 500, color: "var(--text-secondary)", cursor: "pointer" },
   accountBtn: { display: "flex", alignItems: "center", justifyContent: "center", width: 32, height: 32, ...glass(0.5, 8), border: "1px solid var(--hairline)", borderRadius: "50%", color: "var(--text-secondary)", cursor: "pointer" },
   // Раньше marginTop:10 — визуально впритык к кнопкам "назад"/"Далее" сразу
   // над ним (у них свой отступ всего 22px сверху, но снизу ничего не было).
@@ -1466,6 +1505,10 @@ const styles = {
   acctDivider: { height: 1, background: "var(--hairline)", margin: "22px 0" },
   acctClearBtn: { width: "100%", background: "none", border: "none", color: "var(--danger)", fontSize: 12.5, fontWeight: 500, cursor: "pointer", padding: "10px 0 0 0" },
   acctWarnHint: { fontSize: 12, color: "var(--warning-text)", textAlign: "center", marginTop: 8 },
+  homeScreenAddedRow: {
+    display: "flex", alignItems: "center", gap: 10, padding: "13px 15px", borderRadius: 18,
+    border: "1px solid var(--hairline)", ...glass(0.45, 12), fontSize: 13.5, fontWeight: 500, color: "var(--text-secondary)",
+  },
   textInput: {
     width: "100%", padding: "12px 14px", borderRadius: 14, border: "1px solid var(--hairline)",
     ...glass(0.45, 10), color: "var(--text-primary)",
@@ -1542,7 +1585,15 @@ const styles = {
   slider: { width: "100%" },
   sliderLabels: { display: "flex", justifyContent: "space-between", fontSize: 12, color: "var(--text-tertiary)", marginTop: 6 },
   navRow: { display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: "auto", paddingTop: 22 },
-  navBtn: { display: "flex", alignItems: "center", gap: 4, background: "none", border: "none", color: "var(--text-tertiary)", fontSize: 13.5, fontWeight: 500, cursor: "pointer", padding: "8px 4px" },
+  // Раньше — голый текст с иконкой, без фона и рамки: единственный элемент
+  // интерфейса без стеклянного оформления, на фоне чипов/кнопок/бейджей
+  // вокруг он выглядел "недоделанным". Теперь та же лёгкая стеклянная
+  // пилюля, что у remainder кнопок — просто менее контрастная, чем
+  // navBtnPrimary ("Далее"), чтобы порядок важности читался однозначно.
+  navBtn: {
+    display: "flex", alignItems: "center", gap: 4, ...glass(0.4, 8), border: "1px solid var(--hairline)",
+    color: "var(--text-secondary)", fontSize: 13, fontWeight: 500, cursor: "pointer", padding: "9px 14px", borderRadius: 999,
+  },
   navBtnPrimary: { display: "flex", alignItems: "center", gap: 4, background: `linear-gradient(180deg, ${ACCENT}, #0066DB)`, border: "none", color: "#fff", fontSize: 13.5, fontWeight: 600, cursor: "pointer", padding: "11px 18px", borderRadius: 999, marginLeft: "auto", boxShadow: "0 6px 16px rgba(10,132,255,0.35)" },
   resultHeader: { marginBottom: 14 },
   warningBox: { display: "flex", gap: 8, alignItems: "flex-start", background: "var(--warning-soft)", border: "1px solid var(--warning-border)", borderRadius: 16, padding: "12px 14px", fontSize: 12.5, color: "var(--warning-text)", marginBottom: 14, lineHeight: 1.4 },
