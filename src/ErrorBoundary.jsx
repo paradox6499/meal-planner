@@ -1,4 +1,5 @@
 import { Component } from "react";
+import { trackEvent } from "./lib/analytics.js";
 
 // Ловит ЛЮБУЮ необработанную ошибку рендера в дереве ниже — без этого
 // сломанный компонент (например, из-за неожиданного ответа VkusVill: сами же
@@ -22,9 +23,12 @@ export default class ErrorBoundary extends Component {
   }
 
   componentDidCatch(error, info) {
-    // Пока нет бэкенда/телеметрии (обсуждали в чате) — хотя бы в консоль,
-    // чтобы было что скопировать в багрепорт.
+    // В консоль — чтобы было что скопировать в багрепорт локально. И (best
+    // effort, см. lib/analytics.js) на бэкенд — то самое "как понять, что у
+    // пользователей что-то не так", без этого раздел "Технические детали"
+    // ниже увидел бы только сам пользователь, а разработчик — никогда.
     console.error("ErrorBoundary поймал ошибку рендера:", error, info.componentStack);
+    trackEvent("app_error", { message: String(error?.message || error).slice(0, 300) });
   }
 
   // Просто reload решает подавляющее большинство случаев (ошибка была

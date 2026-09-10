@@ -1,11 +1,12 @@
 import { useState, useMemo, useEffect } from "react";
-import { Check, ChevronLeft, ChevronRight, Store, Users, Wallet, Salad, ChefHat, Flame, RotateCcw, UtensilsCrossed, Clock, Repeat, Ban, TriangleAlert, X, Loader2, Share2, Settings, Sun, Moon, MonitorSmartphone, Sparkles, PackageSearch, Home } from "lucide-react";
+import { Check, ChevronLeft, ChevronRight, Store, Users, Wallet, Salad, ChefHat, Flame, RotateCcw, UtensilsCrossed, Clock, Repeat, Ban, TriangleAlert, X, Loader2, Share2, Settings, Sun, Moon, MonitorSmartphone, Sparkles, PackageSearch, Home, MessageCircle } from "lucide-react";
 import { ALLERGENS } from "./data/recipes.js";
 import { buildCartFromShoppingList, toVkusvillQuantity } from "./lib/vkusvillMcp.js";
-import { fetchVkusvillPools, getSubstituteOptions } from "./lib/vkusvillRecipes.js";
+import { fetchVkusvillPools, getSubstituteOptions, attachRealCosts } from "./lib/vkusvillRecipes.js";
 import { loadProfile, saveProfile, clearProfile, loadTheme, saveTheme } from "./lib/profile.js";
 import { buildPools, buildInitialPlan, buildPlanView } from "./lib/planLogic.js";
-import { submitPlanToBackend } from "./lib/backend.js";
+import { submitPlanToBackend, checkPlanStatus, savePlanToHistory, fetchPlanHistory } from "./lib/backend.js";
+import { trackEvent } from "./lib/analytics.js";
 import logoUrl from "./assets/logo.svg";
 import { hapticSelect, hapticImpact, hapticNotify } from "./lib/haptics.js";
 import { checkHomeScreenStatus, promptAddToHomeScreen, onHomeScreenAdded } from "./lib/homeScreen.js";
@@ -16,6 +17,12 @@ import { checkHomeScreenStatus, promptAddToHomeScreen, onHomeScreenAdded } from 
 // шага под это нет — правится в Аккаунте, вместе с остальными "настроил
 // один раз" полями.
 const DEFAULT_MEAL_TIMES = { breakfast: "08:00", lunch: "13:00", dinner: "19:00", snack: "16:00" };
+
+// t.me-ссылка на чат для обратной связи (личка разработчика или отдельный
+// саппорт-аккаунт) — задаётся переменной окружения при сборке (см.
+// .github/workflows/deploy.yml), кнопка в Аккаунте сама скрывается, если
+// переменная не задана, ничего не гадаем и не хардкодим никакой хендл.
+const SUPPORT_URL = import.meta.env.VITE_SUPPORT_URL || null;
 
 // ---------- UI-конфигурация (не контент рецептов — та живёт в data/recipes.js) ----------
 
@@ -143,6 +150,23 @@ export default function MealPlanner() {
   const [displayName, setDisplayName] = useState(savedProfile?.displayName ?? "");
   const [mealTimes, setMealTimes] = useState(savedProfile?.mealTimes ?? DEFAULT_MEAL_TIMES);
 
+  // Тариф и история — реальные данные с бэкенда (null = ещё не спрашивали
+  // или нечем спросить, см. lib/backend.js). Запрашиваем при открытии
+  // Аккаунта, не на каждый рендер — это единственное место, где они видны.
+  const [planStatus, setPlanStatus] = useState(null);
+  const [planHistory, setPlanHistory] = useState(null);
+  useEffect(() => {
+    if (!showAccount) return;
+    checkPlanStatus().then(setPlanStatus);
+    fetchPlanHistory().then(setPlanHistory);
+  }, [showAccount]);
+
+  // Блокировка "бесплатный лимит исчерпан" — знаем об этом только после
+  // ответа бэкенда на попытку "Собрать список" (см. handleFinish), поэтому
+  // отдельное состояние, а не часть planStatus выше (тот обновляется только
+  // пока открыт Аккаунт).
+  const [limitBlocked, setLimitBlocked] = useState(null); // null | { nextResetHint }
+
   // "Добавить на экран" (Bot API 8.0+, см. lib/homeScreen.js) — статус
   // проверяем один раз при монтировании, а не при каждом открытии Аккаунта:
   // он не меняется сам по себе, кроме момента, когда пользователь реально
@@ -150,7 +174,16 @@ export default function MealPlanner() {
   const [homeScreenStatus, setHomeScreenStatus] = useState("unsupported");
   useEffect(() => {
     checkHomeScreenStatus().then(setHomeScreenStatus);
-    return onHomeScreenAdded(() => setHomeScreenStatus("added"));
+    return onHomeScreenAdded(() => {
+      setHomeScreenStatus("added");
+      trackEvent("home_screen_added");
+    });
+  }, []);
+
+  // "Открыли приложение" — раз за сессию, не при каждом ререндере.
+  useEffect(() => {
+    trackEvent("app_opened", { has_profile: hasProfile });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Известный баг части Android-WebView (в т.ч. внутри Telegram Mini App) —
@@ -224,6 +257,26 @@ export default function MealPlanner() {
   // Карта ингредиент->цена товара (ВкусВилл) — null для остальных сетей или
   // если реальные рецепты не подтянулись (см. комментарий у buildPlanView).
   const [priceByName, setPriceByName] = useState(null);
+  const [retryingPrices, setRetryingPrices] = useState(false);
+
+  // "Повторить получение цен" — ВкусВилл иногда лимитирует burst запросов
+  // (см. vkusvillMcp.js), и план собирается с mostlyUnpriced=true. Раньше
+  // единственный совет был "соберите план заново через пару минут" — то есть
+  // заново пройти весь визард ради того, чтобы пулы рецептов остались теми
+  // же, просто ещё раз спросить цены. Пулы уже есть в состоянии — просто
+  // зовём attachRealCosts ещё раз на них же и обновляем priceByName.
+  const handleRetryPrices = async () => {
+    if (!pools) return;
+    setRetryingPrices(true);
+    try {
+      const fresh = await attachRealCosts(pools);
+      setPriceByName(fresh);
+    } catch (err) {
+      console.warn("Повторная попытка получить цены не удалась:", err.message);
+    } finally {
+      setRetryingPrices(false);
+    }
+  };
 
   // planState хранит только id рецептов по дням — так swapMeal меняет один слот,
   // не трогая остальную неделю и не требуя пересборки с нуля
@@ -240,6 +293,17 @@ export default function MealPlanner() {
   }, [done, planView, mealTimes]);
 
   const handleFinish = async () => {
+    // Бесплатный лимит — только если есть у кого спросить (бэкенд задеплоен
+    // и мы в Telegram); без него checkPlanStatus() вернёт null и мы честно
+    // ничего не блокируем — тот же принцип "бэкенд опционален", что и везде.
+    const status = await checkPlanStatus();
+    if (status && status.canGenerate === false) {
+      hapticNotify("error");
+      setLimitBlocked({ nextResetHint: status.nextResetHint });
+      return;
+    }
+    setLimitBlocked(null);
+
     const selectedMeals = MEALS.filter((m) => meals.includes(m.id));
     const neededCategories = [...new Set(selectedMeals.map((m) => m.category))];
     setAssembling(true);
@@ -265,12 +329,37 @@ export default function MealPlanner() {
       resolvedPools = buildPools(diet, cuisines, devices, allergies, maxCookTime);
     }
 
+    const newPlanState = buildInitialPlan(resolvedPools, selectedMeals, budget, family);
     setPools(resolvedPools);
     setPriceByName(resolvedPriceByName);
-    setPlanState(buildInitialPlan(resolvedPools, selectedMeals, budget, family));
+    setPlanState(newPlanState);
     setDone(true);
     setAssembling(false);
     hapticNotify("success");
+    trackEvent("plan_generated", { store, budget, family, meals_count: selectedMeals.length });
+
+    // Считаем planView сами, здесь же — planView-в-состоянии соберётся
+    // только на следующий рендер (useMemo), а в историю нужно положить
+    // РОВНО тот план, что только что собрали, один раз, а не всё, во что он
+    // потом превратится после замен товаров (см. лимит выше — тот сценарий
+    // сознательно повторяет отправку при каждой замене, этот — нет).
+    const freshPlanView = buildPlanView(newPlanState, resolvedPools, family, resolvedPriceByName);
+    savePlanToHistory({
+      storeId: store,
+      storeName: STORES.find((s) => s.id === store)?.name || store,
+      budget,
+      family,
+      totalCost: freshPlanView.total,
+      plan: {
+        total: freshPlanView.total,
+        itemized: freshPlanView.itemized,
+        shoppingItemsCount: freshPlanView.grouped.reduce((sum, g) => sum + g.items.length, 0),
+        days: freshPlanView.days.map((d) => ({
+          day: d.day,
+          dayMeals: d.dayMeals.map((dm) => ({ mealLabel: dm.mealLabel, name: dm.recipe.name, emoji: dm.recipe.emoji, time: dm.recipe.time, cost: dm.cost })),
+        })),
+      },
+    });
   };
 
   const swapMeal = (dayIndex, slotIndex) => {
@@ -502,13 +591,32 @@ export default function MealPlanner() {
             onSave={handleSaveProfile}
             onClear={handleClearProfile}
             onClose={() => setShowAccount(false)}
-            onOpenPro={() => setShowProModal(true)}
+            onOpenPro={() => { trackEvent("pro_modal_opened"); setShowProModal(true); }}
             homeScreenStatus={homeScreenStatus}
-            onAddToHomeScreen={() => { hapticImpact("light"); promptAddToHomeScreen(); }}
+            onAddToHomeScreen={() => { hapticImpact("light"); trackEvent("home_screen_prompted"); promptAddToHomeScreen(); }}
+            planStatus={planStatus}
+            planHistory={planHistory}
           />
         )}
 
-        {!showAccount && !done && !assembling && (
+        {!showAccount && limitBlocked && (
+          <div style={styles.stepBody} className="mp-step-body">
+            <StepShell icon={<Sparkles size={20} color={ACCENT} />} title="Бесплатный лимит на этой неделе исчерпан" sub="На бесплатном тарифе доступен 1 план в неделю">
+              <p style={{ ...styles.acctSectionHint, marginTop: 0 }}>
+                Новый план будет доступен позже — или оформите Pro прямо сейчас, чтобы собирать план без ограничений.
+              </p>
+              <button
+                onClick={() => { hapticImpact("light"); trackEvent("pro_modal_opened", { source: "limit_blocked" }); setShowProModal(true); }}
+                style={{ ...styles.navBtnPrimary, width: "100%", justifyContent: "center", marginTop: 8 }}
+              >
+                Открыть Pro
+              </button>
+              <button onClick={() => setLimitBlocked(null)} style={styles.acctClearBtn}>Назад</button>
+            </StepShell>
+          </div>
+        )}
+
+        {!showAccount && !limitBlocked && !done && !assembling && (
           <div style={styles.progressWrap}>
             {/* Раньше — одна сплошная полоска-заливка. Отдельный сегмент на
                 каждый шаг читается яснее ("вот сколько шагов всего, вот сколько
@@ -526,9 +634,9 @@ export default function MealPlanner() {
           </div>
         )}
 
-        {!showAccount && assembling && <SkeletonView />}
+        {!showAccount && !limitBlocked && assembling && <SkeletonView />}
 
-        {!showAccount && !done && !assembling && (
+        {!showAccount && !limitBlocked && !done && !assembling && (
           <div style={styles.stepBody} className="mp-step-body">
             {currentStepKey === "store" && (
               <StepShell icon={<Store size={20} />} title="Где вам удобно заказывать?" sub="Выберите магазин с доставкой в вашем районе">
@@ -655,14 +763,18 @@ export default function MealPlanner() {
 
             <div style={styles.navRow} className="mp-nav-row">
               <button onClick={() => { hapticImpact("light"); setStep((s) => Math.max(0, s - 1)); }} disabled={step === 0} style={{ ...styles.navBtn, visibility: step === 0 ? "hidden" : "visible" }}>
-                <ChevronLeft size={16} /> Назад
+                <ChevronLeft size={16} /><span>Назад</span>
               </button>
               <button
-                onClick={() => { hapticImpact("medium"); step === activeSteps.length - 1 ? handleFinish() : setStep((s) => s + 1); }}
+                onClick={() => {
+                  hapticImpact("medium");
+                  trackEvent("wizard_step_completed", { step: currentStepKey });
+                  step === activeSteps.length - 1 ? handleFinish() : setStep((s) => s + 1);
+                }}
                 disabled={!canNextByKey[currentStepKey]}
                 style={{ ...styles.navBtnPrimary, opacity: canNextByKey[currentStepKey] ? 1 : 0.4 }}
               >
-                {step === activeSteps.length - 1 ? "Собрать список" : "Далее"} <ChevronRight size={16} />
+                <span>{step === activeSteps.length - 1 ? "Собрать список" : "Далее"}</span><ChevronRight size={16} />
               </button>
             </div>
             {hasProfile && (
@@ -686,6 +798,8 @@ export default function MealPlanner() {
             allergies={allergies}
             onSwap={swapMeal}
             onOpenRecipe={setOpenRecipe}
+            onRetryPrices={handleRetryPrices}
+            retryingPrices={retryingPrices}
           />
         )}
       </div>
@@ -749,6 +863,7 @@ function AccountView({
   mealTimes, setMealTimes,
   toggleSimple, toggleCuisine, hasProfile, onSave, onClear, onClose, onOpenPro,
   homeScreenStatus, onAddToHomeScreen,
+  planStatus, planHistory,
 }) {
   const [saved, setSaved] = useState(false);
   const handleSave = () => {
@@ -761,7 +876,7 @@ function AccountView({
     <div className="fade-in-up mp-account-body" style={styles.stepBody}>
       <div style={styles.accountHeaderRow}>
         <button onClick={onClose} style={styles.navBtn}>
-          <ChevronLeft size={16} /> назад
+          <ChevronLeft size={16} /><span>Назад</span>
         </button>
       </div>
       <h2 style={{ ...styles.stepTitle, marginTop: 4 }}>Аккаунт</h2>
@@ -790,6 +905,29 @@ function AccountView({
           ))}
         </div>
       </div>
+
+      {SUPPORT_URL && (
+        <div style={styles.acctSection}>
+          <button
+            className="chip"
+            onClick={() => {
+              hapticImpact("light");
+              trackEvent("support_clicked");
+              // openTelegramLink — официальный способ открыть t.me-ссылку из
+              // Mini App (обычный window.open в некоторых клиентах может не
+              // сработать); вне Telegram (локальный просмотр) — просто
+              // открываем как обычную ссылку.
+              window.Telegram?.WebApp?.openTelegramLink ? window.Telegram.WebApp.openTelegramLink(SUPPORT_URL) : window.open(SUPPORT_URL, "_blank");
+            }}
+            style={styles.rowChip(false)}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <MessageCircle size={16} color={ACCENT} />
+              <div style={{ fontWeight: 600 }}>Написать в поддержку</div>
+            </div>
+          </button>
+        </div>
+      )}
 
       {homeScreenStatus !== "unsupported" && (
         <div style={styles.acctSection}>
@@ -932,7 +1070,8 @@ function AccountView({
       </div>
 
       <div style={styles.acctDivider} />
-      <AccountSubscriptionCard onOpenPro={onOpenPro} />
+      <AccountSubscriptionCard onOpenPro={onOpenPro} planStatus={planStatus} />
+      <PlanHistorySection planHistory={planHistory} />
     </div>
   );
 }
@@ -941,7 +1080,10 @@ function AccountView({
 // ЮKassa) не подключён, кнопка ничего не списывает. Это осознанно: платить
 // за то, чего нет, — обман пользователя. Как только появится бэкенд с
 // вебхуком от платёжного провайдера (см. docs/telegram-bot-architecture.md),
-// кнопка ниже превратится в реальный openLink на страницу оплаты.
+// кнопка ниже превратится в реальный openLink на страницу оплаты. Само
+// разделение на бесплатный/платный тариф — уже реальное (см.
+// server/src/app.js: /api/plan-status), просто выдать Pro можно сейчас
+// только вручную (server/scripts/set-pro.js), а не по факту оплаты.
 // Раньше был один абзац текста — сухое перечисление без объяснения "зачем
 // мне это". Пользователь в чате прямо попросил: разворачивающиеся пункты,
 // чтобы понять пользу подробнее, а не просто прочитать список слов.
@@ -949,7 +1091,7 @@ const SUBSCRIPTION_BENEFITS = [
   {
     title: "Безлимитная пересборка плана",
     short: "Меняйте магазин, бюджет или просто пересобирайте заново — без ограничений",
-    detail: "Сейчас пересборка ничем не ограничена для всех. Когда появится бесплатный тариф с лимитом (например, раз в неделю) — с подпиской ограничения не будет вообще.",
+    detail: "На бесплатном тарифе — 1 план в неделю. С подпиской ограничения нет вообще.",
   },
   {
     title: "Несколько планов одновременно",
@@ -974,23 +1116,86 @@ const SUBSCRIPTION_BENEFITS = [
 // питчем и ценой по кнопке "Перейти на Pro", а не два дублирующих друг друга
 // списка). Карточка в Аккаунте теперь просто честно называет, что доступно
 // сейчас, и одной кнопкой ведёт к продающему экрану.
-function AccountSubscriptionCard({ onOpenPro }) {
+function AccountSubscriptionCard({ onOpenPro, planStatus }) {
+  // planStatus === null — либо бэкенд не задеплоен, либо ещё грузится:
+  // в обоих случаях честнее не утверждать конкретную цифру лимита, раз мы
+  // её на самом деле не знаем прямо сейчас.
+  const isPro = planStatus?.isPro ?? false;
   return (
     <div style={styles.acctSection}>
       <div style={styles.subCard}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
           <Sparkles size={16} color={ACCENT} />
           <span style={{ fontWeight: 700, fontSize: 15 }}>Подписка</span>
-          <span style={styles.freeBadge}>Free</span>
+          <span style={isPro ? styles.proBadge : styles.freeBadge}>{isPro ? "Pro" : "Free"}</span>
         </div>
-        <p style={styles.acctSectionHint}>
-          Сейчас доступно: сборка плана под бюджет, реальные цены и заказ в ВкусВилл, замена товаров, напоминания
-          (в разработке). Pro снимет ограничения, которые появятся на бесплатном тарифе.
-        </p>
-        <button onClick={() => { hapticImpact("light"); onOpenPro(); }} style={{ ...styles.orderBtn, marginTop: 4 }}>
-          Перейти на Pro
-        </button>
+        {isPro ? (
+          <p style={styles.acctSectionHint}>Спасибо за подписку — пересборка плана без ограничений.</p>
+        ) : (
+          <p style={styles.acctSectionHint}>
+            На бесплатном тарифе — 1 план в неделю{planStatus ? ` (использовано: ${planStatus.usedThisWeek}/${planStatus.freeLimitPerWeek})` : ""}.
+            Pro снимает это ограничение и добавляет напоминания, несколько планов и общий список на семью.
+          </p>
+        )}
+        {!isPro && (
+          <button onClick={() => { hapticImpact("light"); onOpenPro(); }} style={{ ...styles.orderBtn, marginTop: 4 }}>
+            Перейти на Pro
+          </button>
+        )}
       </div>
+    </div>
+  );
+}
+
+const HISTORY_DAY_EMOJI_FALLBACK = "🍽";
+
+// Список прошлых планов — только если бэкенд вообще способен на него
+// ответить (planHistory !== null, см. lib/backend.js:fetchPlanHistory).
+// Пустой массив — реальное "пока нет истории", не то же самое, что "нечем
+// спросить" (тогда весь раздел скрыт целиком, чтобы не обещать того, что
+// зависит от недоступного бэкенда).
+function PlanHistorySection({ planHistory }) {
+  const [openId, setOpenId] = useState(null);
+  if (planHistory === null) return null;
+
+  return (
+    <div style={styles.acctSection}>
+      <div style={styles.acctSectionTitle}>История планов</div>
+      {planHistory.length === 0 ? (
+        <p style={styles.acctSectionHint}>Пока пусто — здесь появятся планы, которые вы соберёте.</p>
+      ) : (
+        <div style={styles.stack}>
+          {planHistory.map((p) => {
+            const open = openId === p.id;
+            const dateLabel = new Date(p.createdAt).toLocaleDateString("ru-RU", { day: "numeric", month: "long" });
+            return (
+              <div key={p.id}>
+                <button className="chip" onClick={() => { hapticSelect(); setOpenId(open ? null : p.id); }} style={styles.rowChip(false)}>
+                  <div>
+                    <div style={{ fontWeight: 600 }}>{dateLabel} · {p.storeName}</div>
+                    <div style={styles.chipHint}>
+                      {p.totalCost != null ? `${p.totalCost.toLocaleString("ru-RU")} ₽` : "без цены"} из {p.budget.toLocaleString("ru-RU")} ₽ · на {p.family} {p.family === 1 ? "человека" : "человек"}
+                    </div>
+                  </div>
+                  <ChevronRight size={16} style={{ transform: open ? "rotate(90deg)" : "none", transition: "transform .15s" }} />
+                </button>
+                {open && (
+                  <div style={styles.historyDetail}>
+                    {p.plan?.days?.map((d) => (
+                      <div key={d.day} style={styles.historyDay}>
+                        <span style={styles.historyDayLabel}>День {d.day}</span>
+                        <span>
+                          {d.dayMeals.map((dm) => `${dm.emoji || HISTORY_DAY_EMOJI_FALLBACK} ${dm.name}`).join(" · ")}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
@@ -1005,6 +1210,7 @@ function ProModal({ onClose }) {
   const [pendingPayment, setPendingPayment] = useState(false);
   const handleSubscribe = () => {
     hapticNotify("warning");
+    trackEvent("pro_subscribe_clicked");
     setPendingPayment(true);
   };
   return (
@@ -1055,7 +1261,7 @@ function ProModal({ onClose }) {
   );
 }
 
-function ResultView({ plan, storeId, storeName, budget, family, mealsCount, diet, allergies, onSwap, onOpenRecipe }) {
+function ResultView({ plan, storeId, storeName, budget, family, mealsCount, diet, allergies, onSwap, onOpenRecipe, onRetryPrices, retryingPrices }) {
   const [orderState, setOrderState] = useState({ status: "idle" }); // idle | loading | error
   // Отделы списка покупок сворачиваемые — по умолчанию все раскрыты (старое
   // поведение не меняется для короткого списка), но для семьи с 3+ приёмами
@@ -1100,6 +1306,7 @@ function ResultView({ plan, storeId, storeName, budget, family, mealsCount, diet
   };
   const chooseSubstitute = (itemName, option) => {
     hapticImpact("medium");
+    trackEvent("substitute_used");
     setSubs((prev) => ({ ...prev, [itemName]: option }));
     setActiveItem(null);
   };
@@ -1145,6 +1352,7 @@ function ResultView({ plan, storeId, storeName, budget, family, mealsCount, diet
   const over = adjustedTotal > budget;
 
   const handleOrder = async () => {
+    trackEvent("order_clicked", { store: storeId, substitutions_count: Object.keys(subs).length });
     setOrderState({ status: "loading" });
     try {
       // Товары с выбранной заменой идут в корзину СВОИМ xml_id/ценой
@@ -1197,11 +1405,26 @@ function ResultView({ plan, storeId, storeName, budget, family, mealsCount, diet
       {plan.mostlyUnpriced && (
         <div style={styles.warningBox}>
           <TriangleAlert size={15} style={{ flexShrink: 0, marginTop: 1 }} />
-          <span>
-            Не удалось получить цены почти ни на один товар — похоже, у ВкусВилл сейчас перегружен сервис или
-            временно превышен лимит запросов на нашей стороне. Сумма ниже недостоверна. Попробуйте собрать план
-            заново через несколько минут.
-          </span>
+          <div style={{ minWidth: 0 }}>
+            <span>
+              Не удалось получить цены почти ни на один товар — похоже, у ВкусВилл сейчас перегружен сервис или
+              временно превышен лимит запросов на нашей стороне. Сумма ниже недостоверна.
+            </span>
+            {/* Раньше единственный совет был "соберите план заново" — то есть
+                заново пройти весь визард ради того, чтобы попробовать
+                получить те же цены ещё раз. Рецепты уже выбраны, дублировать
+                весь визард незачем — пробуем получить цены ещё раз на то же
+                самое меню. */}
+            {onRetryPrices && (
+              <button
+                onClick={onRetryPrices}
+                disabled={retryingPrices}
+                style={{ ...styles.retryPricesBtn, opacity: retryingPrices ? 0.6 : 1 }}
+              >
+                {retryingPrices ? <><Loader2 size={13} className="spin" /> Пробуем ещё раз…</> : "Повторить получение цен"}
+              </button>
+            )}
+          </div>
         </div>
       )}
 
@@ -1347,7 +1570,7 @@ function ResultView({ plan, storeId, storeName, budget, family, mealsCount, diet
         );
       })}
 
-      <button onClick={() => shareViaTelegram(buildShareText(plan, storeName, family), BOT_SHARE_URL)} style={styles.shareBtn}>
+      <button onClick={() => { trackEvent("share_clicked"); shareViaTelegram(buildShareText(plan, storeName, family), BOT_SHARE_URL); }} style={styles.shareBtn}>
         <Share2 size={16} /> Поделиться
       </button>
       {canOrderForReal ? (
@@ -1363,9 +1586,21 @@ function ResultView({ plan, storeId, storeName, budget, family, mealsCount, diet
           )}
         </>
       ) : (
-        <button disabled style={{ ...styles.orderBtn, opacity: 0.4, cursor: "default" }} title="Реальный заказ пока подключён только для ВкусВилл">
-          Заказать в {storeName} (скоро)
-        </button>
+        <>
+          <button disabled style={{ ...styles.orderBtn, opacity: 0.4, cursor: "default" }} title="Реальный заказ пока подключён только для ВкусВилл">
+            Заказать в {storeName} (скоро)
+          </button>
+          {/* Раньше объяснение "почему" было только в title — на тач-экране
+              его никто не видит (нет hover). Пользователь в чате попросил
+              видимый текст, но НЕ называть техническую причину ("у ВкусВилл
+              есть открытый доступ к каталогу") — это подсказка, что цены
+              можно посмотреть напрямую у ВкусВилл в обход приложения. Текст
+              ниже называет только факт (какие сети уже поддержаны) без "почему". */}
+          <p style={styles.orderNote}>
+            Цены и список для {storeName} — ориентировочные. Точные цены и сборка корзины одним кликом пока доступны
+            только для ВкусВилл — подключим другие сети по мере возможности.
+          </p>
+        </>
       )}
     </div>
   );
@@ -1496,7 +1731,12 @@ const styles = {
     boxShadow: "0 3px 10px rgba(0,0,0,0.25)",
   },
   brand: { fontSize: 19, fontWeight: 700, letterSpacing: "-0.015em" },
-  greeting: { fontSize: 12, color: "var(--text-tertiary)", marginTop: 2 },
+  // marginLeft = ширина логотипа (32) + gap строки с ним (9) — раньше
+  // приветствие начиналось от самого края (x=0), то есть ровно под
+  // логотипом, а с учётом тени логотипа (boxShadow у logoMark) визуально
+  // наезжало на неё. Теперь строка начинается под названием "Съедим", а не
+  // под иконкой — логотип и текст больше не соседствуют по вертикали.
+  greeting: { fontSize: 12, color: "var(--text-tertiary)", marginTop: 2, marginLeft: 41 },
   // height: 32 — та же высота, что у круглой accountBtn (шестерёнки) рядом
   // в шапке: раньше разной высоты пилюля и кружок в одном ряду выглядели
   // рассинхронизированно, хотя обе уже были "стеклянными".
@@ -1549,6 +1789,10 @@ const styles = {
   }),
   subCard: { border: "1px solid var(--hairline)", borderRadius: 20, padding: "16px 16px 18px", ...glass(0.5, 12) },
   freeBadge: { fontSize: 10.5, fontWeight: 700, color: "var(--text-tertiary)", background: "var(--track-bg)", padding: "2px 8px", borderRadius: 999, marginLeft: "auto" },
+  proBadge: { fontSize: 10.5, fontWeight: 700, color: "#fff", background: ACCENT, padding: "2px 8px", borderRadius: 999, marginLeft: "auto" },
+  historyDetail: { padding: "10px 14px", display: "flex", flexDirection: "column", gap: 6 },
+  historyDay: { display: "flex", flexDirection: "column", gap: 2, fontSize: 12.5, color: "var(--text-secondary)" },
+  historyDayLabel: { fontSize: 11, fontWeight: 700, color: "var(--text-tertiary)", textTransform: "uppercase" },
   proHero: {
     width: 64, height: 64, borderRadius: 20, margin: "0 auto 14px auto", display: "flex", alignItems: "center", justifyContent: "center",
     background: "rgba(10,132,255,0.12)",
@@ -1605,13 +1849,32 @@ const styles = {
   // вокруг он выглядел "недоделанным". Теперь та же лёгкая стеклянная
   // пилюля, что у remainder кнопок — просто менее контрастная, чем
   // navBtnPrimary ("Далее"), чтобы порядок важности читался однозначно.
+  // navBtn и navBtnPrimary раньше отличались не только цветом, но и
+  // padding/fontSize/line-height — из-за этого "Назад" и "Далее" в одном и
+  // том же ряду визуально были разного размера, хотя должны читаться как
+  // пара равнозначных по геометрии кнопок с разным уровнем акцента. Теперь
+  // геометрия (padding, fontSize, lineHeight, gap) у обеих идентична,
+  // отличается только оформление (фон/рамка/тень) — так пара выглядит
+  // единообразно. lineHeight: 1 — иконка (фиксированная высота SVG) и текст
+  // (высота строки шрифта, обычно больше самого глифа) центровались по
+  // alignItems:"center" каждый по СВОЕЙ высоте box'а, из-за чего текст
+  // визуально "плавал" на пиксель-два относительно иконки; line-height:1
+  // прижимает высоту текстового box'а к фактической высоте глифов.
   navBtn: {
-    display: "flex", alignItems: "center", gap: 4, ...glass(0.4, 8), border: "1px solid var(--hairline)",
-    color: "var(--text-secondary)", fontSize: 13, fontWeight: 500, cursor: "pointer", padding: "9px 14px", borderRadius: 999,
+    display: "flex", alignItems: "center", gap: 4, lineHeight: 1, ...glass(0.4, 8), border: "1px solid var(--hairline)",
+    color: "var(--text-secondary)", fontSize: 13.5, fontWeight: 500, cursor: "pointer", padding: "11px 18px", borderRadius: 999,
   },
-  navBtnPrimary: { display: "flex", alignItems: "center", gap: 4, background: `linear-gradient(180deg, ${ACCENT}, #0066DB)`, border: "none", color: "#fff", fontSize: 13.5, fontWeight: 600, cursor: "pointer", padding: "11px 18px", borderRadius: 999, marginLeft: "auto", boxShadow: "0 6px 16px rgba(10,132,255,0.35)" },
+  navBtnPrimary: { display: "flex", alignItems: "center", gap: 4, lineHeight: 1, background: `linear-gradient(180deg, ${ACCENT}, #0066DB)`, border: "none", color: "#fff", fontSize: 13.5, fontWeight: 600, cursor: "pointer", padding: "11px 18px", borderRadius: 999, marginLeft: "auto", boxShadow: "0 6px 16px rgba(10,132,255,0.35)" },
   resultHeader: { marginBottom: 14 },
   warningBox: { display: "flex", gap: 8, alignItems: "flex-start", background: "var(--warning-soft)", border: "1px solid var(--warning-border)", borderRadius: 16, padding: "12px 14px", fontSize: 12.5, color: "var(--warning-text)", marginBottom: 14, lineHeight: 1.4 },
+  // --warning-text (#8a5a1e, тёмно-коричневый) не переопределяется в тёмной
+  // теме (см. :root) — то есть остаётся одним и тем же в обеих темах, поэтому
+  // белый текст поверх него безопасен и там, и там, отдельного dark-варианта
+  // не нужно.
+  retryPricesBtn: {
+    display: "flex", alignItems: "center", gap: 6, marginTop: 8, background: "var(--warning-text)", color: "#fff",
+    border: "none", borderRadius: 999, padding: "7px 14px", fontSize: 12, fontWeight: 600, cursor: "pointer",
+  },
   totalBox: { display: "flex", flexDirection: "column", alignItems: "center", gap: 2, padding: "18px 0", border: "1px solid var(--hairline)", borderRadius: 20, marginBottom: 20, ...glass(0.55, 12) },
   sectionTitle: { fontSize: 13, fontWeight: 600, color: "var(--text-tertiary)", margin: "0 0 8px 0" },
   dayBlock: { paddingBottom: 8, marginBottom: 4, borderBottom: "1px solid var(--hairline)" },

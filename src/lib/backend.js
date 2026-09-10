@@ -27,6 +27,75 @@ export function buildMealSlots(planView, mealTimes) {
   );
 }
 
+function currentInitData() {
+  return window.Telegram?.WebApp?.initData || null;
+}
+
+/** Возвращает null, если проверять нечем/не у кого (нет бэкенда или не в
+ * Telegram) — вызывающий код (App.jsx) в этом случае не блокирует сборку
+ * плана вообще, тот же принцип "бэкенд опционален", что и у остальных
+ * функций этого файла. */
+export async function checkPlanStatus() {
+  const backendUrl = import.meta.env.VITE_BACKEND_URL;
+  const initData = currentInitData();
+  if (!backendUrl || !initData) return null;
+
+  try {
+    const res = await fetch(`${backendUrl}/api/plan-status`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ initData }),
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (err) {
+    console.warn("Не удалось получить статус тарифа:", err.message);
+    return null;
+  }
+}
+
+/** Сохраняет собранный план в историю (server/src/db.js:plan_history) —
+ * best-effort, как и всё остальное здесь: без бэкенда просто не сохраняется,
+ * история — приятное дополнение, а не часть основного сценария. */
+export async function savePlanToHistory({ storeId, storeName, budget, family, totalCost, plan }) {
+  const backendUrl = import.meta.env.VITE_BACKEND_URL;
+  const initData = currentInitData();
+  if (!backendUrl || !initData) return;
+
+  try {
+    await fetch(`${backendUrl}/api/plans`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ initData, storeId, storeName, budget, family, totalCost, plan }),
+    });
+  } catch (err) {
+    console.warn("Не удалось сохранить план в историю:", err.message);
+  }
+}
+
+/** Список прошлых планов — null означает "нечем спросить" (нет бэкенда/не в
+ * Telegram), пустой массив [] — "спросили, там пока пусто". Разные вещи для
+ * UI: null скрывает раздел "История" целиком, [] показывает "пока пусто". */
+export async function fetchPlanHistory() {
+  const backendUrl = import.meta.env.VITE_BACKEND_URL;
+  const initData = currentInitData();
+  if (!backendUrl || !initData) return null;
+
+  try {
+    const res = await fetch(`${backendUrl}/api/plans/list`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ initData }),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data.plans || [];
+  } catch (err) {
+    console.warn("Не удалось получить историю планов:", err.message);
+    return null;
+  }
+}
+
 export async function submitPlanToBackend(planView, mealTimes) {
   const backendUrl = import.meta.env.VITE_BACKEND_URL;
   if (!backendUrl) return; // бэкенд ещё не задеплоен — молча ничего не делаем, это ок

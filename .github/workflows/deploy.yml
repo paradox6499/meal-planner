@@ -14,6 +14,10 @@ name: Deploy to GitHub Pages
 # Пока переменная не задана — просто не задана в сборке, фронтенд тихо не
 # пытается ничего отправлять на бэкенд (см. src/lib/backend.js), остальное
 # приложение работает как обычная статика.
+#
+# VITE_SUPPORT_URL (та же вкладка Variables) — t.me-ссылка для кнопки
+# "Написать в поддержку" в Аккаунте (см. src/App.jsx). Не задана — кнопка
+# просто не показывается, ничего не ломается.
 
 on:
   push:
@@ -43,6 +47,7 @@ jobs:
       - run: npm run build
         env:
           VITE_BACKEND_URL: ${{ vars.VITE_BACKEND_URL }}
+          VITE_SUPPORT_URL: ${{ vars.VITE_SUPPORT_URL }}
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

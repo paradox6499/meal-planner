@@ -1,5 +1,9 @@
-import { describe, it, expect } from "vitest";
-import { buildMealSlots, todayPlusDays } from "./backend.js";
+import { describe, it, expect, vi, afterEach } from "vitest";
+import { buildMealSlots, todayPlusDays, checkPlanStatus, savePlanToHistory, fetchPlanHistory } from "./backend.js";
+
+function stubTelegram(initData) {
+  vi.stubGlobal("window", { Telegram: initData !== undefined ? { WebApp: { initData } } : undefined });
+}
 
 describe("todayPlusDays", () => {
   it("возвращает дату в формате YYYY-MM-DD", () => {
@@ -43,5 +47,102 @@ describe("buildMealSlots", () => {
   it("если для mealId нет времени в mealTimes — берёт разумный дефолт 19:00, не падает", () => {
     const slots = buildMealSlots(planView, {});
     expect(slots.every((s) => s.mealTime === "19:00")).toBe(true);
+  });
+});
+
+describe("checkPlanStatus", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+  });
+
+  it("null без VITE_BACKEND_URL или вне Telegram — ничего не запрашивает", async () => {
+    vi.stubEnv("VITE_BACKEND_URL", "");
+    stubTelegram("x");
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    expect(await checkPlanStatus()).toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("возвращает распарсенный JSON-ответ бэкенда", async () => {
+    vi.stubEnv("VITE_BACKEND_URL", "https://api.example.com");
+    stubTelegram("initdata-blob");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({ ok: true, isPro: false, canGenerate: true }) }));
+    const status = await checkPlanStatus();
+    expect(status).toEqual({ ok: true, isPro: false, canGenerate: true });
+  });
+
+  it("null при сетевой ошибке или не-200 ответе — не бросает исключение", async () => {
+    vi.stubEnv("VITE_BACKEND_URL", "https://api.example.com");
+    stubTelegram("x");
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("boom")));
+    expect(await checkPlanStatus()).toBeNull();
+
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false }));
+    expect(await checkPlanStatus()).toBeNull();
+  });
+});
+
+describe("savePlanToHistory", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+  });
+
+  it("ничего не делает без бэкенда/вне Telegram", async () => {
+    vi.stubEnv("VITE_BACKEND_URL", "");
+    stubTelegram("x");
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    await savePlanToHistory({ storeId: "vv", storeName: "ВкусВилл", budget: 4000, family: 2, totalCost: 3800, plan: {} });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("шлёт POST /api/plans с initData и данными плана", async () => {
+    vi.stubEnv("VITE_BACKEND_URL", "https://api.example.com");
+    stubTelegram("initdata-blob");
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await savePlanToHistory({ storeId: "vv", storeName: "ВкусВилл", budget: 4000, family: 2, totalCost: 3800, plan: { days: [] } });
+
+    expect(fetchMock).toHaveBeenCalledWith("https://api.example.com/api/plans", expect.objectContaining({ method: "POST" }));
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body).toEqual({ initData: "initdata-blob", storeId: "vv", storeName: "ВкусВилл", budget: 4000, family: 2, totalCost: 3800, plan: { days: [] } });
+  });
+
+  it("не бросает исключение при сетевой ошибке", async () => {
+    vi.stubEnv("VITE_BACKEND_URL", "https://api.example.com");
+    stubTelegram("x");
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("boom")));
+    await expect(savePlanToHistory({ storeId: "vv", storeName: "В", budget: 1, family: 1, plan: {} })).resolves.toBeUndefined();
+  });
+});
+
+describe("fetchPlanHistory", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+  });
+
+  it("null без бэкенда/вне Telegram (не пустой массив — это другое состояние UI)", async () => {
+    vi.stubEnv("VITE_BACKEND_URL", "");
+    stubTelegram("x");
+    expect(await fetchPlanHistory()).toBeNull();
+  });
+
+  it("возвращает data.plans при успехе", async () => {
+    vi.stubEnv("VITE_BACKEND_URL", "https://api.example.com");
+    stubTelegram("x");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({ ok: true, plans: [{ id: 1 }] }) }));
+    expect(await fetchPlanHistory()).toEqual([{ id: 1 }]);
+  });
+
+  it("null при сетевой ошибке", async () => {
+    vi.stubEnv("VITE_BACKEND_URL", "https://api.example.com");
+    stubTelegram("x");
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("boom")));
+    expect(await fetchPlanHistory()).toBeNull();
   });
 });
