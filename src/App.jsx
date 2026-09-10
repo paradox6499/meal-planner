@@ -441,6 +441,14 @@ export default function MealPlanner() {
         }
         input[type="range"] { -webkit-appearance: none; height: 4px; border-radius: 2px; background: var(--track-bg); }
         input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; width: 22px; height: 22px; border-radius: 50%; background: #fff; box-shadow: 0 2px 8px rgba(0,0,0,0.25), 0 0 0 1px rgba(0,0,0,0.04); cursor: pointer; }
+        /* Нативная иконка часов у <input type="time"> красится браузером сама
+           (обычно серым/чёрным) — CSS не даёт задать ей произвольный цвет
+           напрямую. Прячем её (opacity почти 0, а не 0 — на части WebKit
+           полностью прозрачный элемент перестаёт быть кликабельным), а
+           поверх рисуем свою Clock-иконку в акцентном цвете (см. mealTimeRow
+           в JSX) — клик всё равно попадает на невидимый нативный контрол под
+           ней, просто визуально показываем свою. */
+        input[type="time"]::-webkit-calendar-picker-indicator { opacity: 0.015; }
       `}</style>
 
       <div style={styles.card} className="mp-card">
@@ -838,12 +846,15 @@ function AccountView({
               {MEALS.filter((m) => meals.includes(m.id)).map((m) => (
                 <div key={m.id} style={styles.mealTimeRow}>
                   <span>{m.label}</span>
-                  <input
-                    type="time"
-                    value={mealTimes[m.id] || DEFAULT_MEAL_TIMES[m.id]}
-                    onChange={(e) => setMealTimes((prev) => ({ ...prev, [m.id]: e.target.value }))}
-                    style={styles.timeInput}
-                  />
+                  <div style={styles.timeInputWrap}>
+                    <input
+                      type="time"
+                      value={mealTimes[m.id] || DEFAULT_MEAL_TIMES[m.id]}
+                      onChange={(e) => setMealTimes((prev) => ({ ...prev, [m.id]: e.target.value }))}
+                      style={styles.timeInput}
+                    />
+                    <Clock size={14} color={ACCENT} style={styles.timeInputIcon} />
+                  </div>
                 </div>
               ))}
             </div>
@@ -1521,10 +1532,14 @@ const styles = {
     display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 15px",
     borderRadius: 18, border: "1px solid var(--hairline)", ...glass(0.45, 12), fontSize: 14, fontWeight: 500,
   },
+  timeInputWrap: { position: "relative", display: "inline-flex", alignItems: "center" },
   timeInput: {
-    border: "1px solid var(--hairline)", borderRadius: 10, padding: "6px 8px", color: "var(--text-primary)",
+    border: "1px solid var(--hairline)", borderRadius: 10, padding: "6px 28px 6px 8px", color: "var(--text-primary)",
     background: "transparent", fontSize: 16, fontFamily: "inherit", // 16px — та же причина, что у textInput выше
   },
+  // pointerEvents:"none" — иконка декоративная, клик должен пройти сквозь
+  // неё на невидимый нативный picker-indicator под ней (см. CSS выше).
+  timeInputIcon: { position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)", pointerEvents: "none" },
   themeChip: (active) => ({
     flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 4, padding: "12px 6px", borderRadius: 16, cursor: "pointer",
     border: active ? "1.5px solid rgba(10,132,255,0.55)" : "1px solid var(--hairline)",
