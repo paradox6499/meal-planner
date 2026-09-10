@@ -70,7 +70,21 @@ export function buildInitialPlan(pools, selectedMeals, budget, family) {
   const totalSlots = 7 * selectedMeals.length;
   let remainingBudget = family > 0 ? budget / family : budget; // считаем в цене на человека, family умножается позже в buildPlanView
   let remainingSlots = totalSlots;
-  const recentByCategory = {}; // последние выбранные id на категорию — чтобы не повторять одно и то же блюдо подряд без нужды
+  // Сколько раз рецепт уже использован за всю неделю (id уникальны в рамках
+  // категории, так что один общий счётчик на все категории безопасен) —
+  // раньше избегали повтора только среди ПОСЛЕДНИХ 2 выборов, из-за чего на
+  // небольшом пуле одно и то же блюдо вполне могло вернуться уже через пару
+  // дней (жалоба в чате: "может предложить одно и то же блюдо несколько раз
+  // за неделю"). Теперь среди вариантов в рамках бюджета всегда предпочитаем
+  // наименее использованный — блюда распределяются по неделе куда ровнее.
+  const usageCount = {};
+  // Сбрасывается на каждый новый день — то же блюдо не должно повторяться
+  // ДВАЖДЫ В ОДИН ДЕНЬ (жалоба: "то же самое блюдо в рамках одного дня и на
+  // завтрак, и на обед"). Раньше это тоже как бы исключалось "последними 2",
+  // но только пока в бюджет укладывалось больше одного варианта — если из
+  // всего пула на этот приём проходил ровно один рецепт (частый случай при
+  // низком бюджете), защиты не было вообще.
+  let usedToday = new Set();
 
   const pickRecipe = (category) => {
     const pool = pools[category];
@@ -84,14 +98,23 @@ export function buildInitialPlan(pools, selectedMeals, budget, family) {
       if (pool[i].cost <= allowedAvg) candidateIdx = i;
       else break;
     }
-    const recent = recentByCategory[category] || [];
-    let chosen = pool[candidateIdx];
-    if (candidateIdx > 0) {
-      // из вариантов в рамках бюджета — предпочитаем не повторять последние 2 блюда подряд
-      const notRecent = pool.slice(0, candidateIdx + 1).filter((r) => !recent.includes(r.id));
-      if (notRecent.length > 0) chosen = notRecent[notRecent.length - 1];
-    }
-    recentByCategory[category] = [...recent, chosen.id].slice(-2);
+    const affordable = pool.slice(0, candidateIdx + 1);
+
+    // Сначала — жёстко исключаем то, что уже было сегодня, если есть хоть
+    // одна альтернатива в рамках бюджета (иначе оставляем как есть: лучше
+    // повтор, чем пустой приём пищи).
+    const notToday = affordable.filter((r) => !usedToday.has(r.id));
+    const candidates = notToday.length > 0 ? notToday : affordable;
+
+    // Среди оставшихся — наименее использованные за неделю; при равенстве
+    // берём самый дорогой из них (сохраняет прежнее свойство "тратим бюджет
+    // осмысленно", а не всегда самое дешёвое).
+    const minUsage = Math.min(...candidates.map((r) => usageCount[r.id] || 0));
+    const leastUsed = candidates.filter((r) => (usageCount[r.id] || 0) === minUsage);
+    const chosen = leastUsed[leastUsed.length - 1];
+
+    usageCount[chosen.id] = (usageCount[chosen.id] || 0) + 1;
+    usedToday.add(chosen.id);
     remainingBudget -= chosen.cost;
     remainingSlots -= 1;
     return chosen;
@@ -100,6 +123,7 @@ export function buildInitialPlan(pools, selectedMeals, budget, family) {
   const days = [];
   const emptyMealLabels = new Set();
   for (let day = 1; day <= 7; day++) {
+    usedToday = new Set();
     const dayMeals = [];
     selectedMeals.forEach((m) => {
       const pool = pools[m.category];

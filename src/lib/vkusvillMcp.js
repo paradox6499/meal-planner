@@ -47,9 +47,12 @@ export function clearMcpCache() {
 
 // RATE_LIMIT_RETRY_DELAYS_MS — только для http_status 429 (см. callToolOnce
 // ниже). Раньше единичный 429 сразу превращался в "не нашли цену" для этого
-// товара — теперь одна-две короткие паузы и повтор часто успевают проскочить,
-// не заставляя пользователя вручную пересобирать весь план.
-const RATE_LIMIT_RETRY_DELAYS_MS = [600, 1500];
+// товара — пауза и повтор часто успевают проскочить, не заставляя
+// пользователя вручную пересобирать весь план. Один повтор добавлен (было
+// 2 попытки, стало 3) — жалоба в чате "опять не нашли цены" повторилась и
+// после первой версии ретрая, часть burst'а из ~40-80 запросов всё равно не
+// успевала пройти за две попытки.
+const RATE_LIMIT_RETRY_DELAYS_MS = [700, 1600, 3000];
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function callTool(name, args, opts = {}) {
@@ -58,7 +61,12 @@ async function callTool(name, args, opts = {}) {
       return await callToolOnce(name, args, opts);
     } catch (err) {
       if (err.httpStatus === 429 && attempt < RATE_LIMIT_RETRY_DELAYS_MS.length) {
-        await sleep(RATE_LIMIT_RETRY_DELAYS_MS[attempt]);
+        // + случайный джиттер до 30% сверху: без него десятки запросов,
+        // отклонённых одним и тем же burst-лимитом одновременно, ждали бы
+        // РОВНО одинаковое время и повторялись бы снова ВСЕ ВМЕСТЕ — то
+        // есть retry сам воссоздавал тот же burst, что и вызвал 429.
+        const delay = RATE_LIMIT_RETRY_DELAYS_MS[attempt];
+        await sleep(delay + Math.random() * delay * 0.3);
         continue;
       }
       throw err;
@@ -246,7 +254,11 @@ async function mapWithConcurrency(items, limit, fn) {
   return results;
 }
 
-const SEARCH_CONCURRENCY = 6;
+// Было 6 — жалоба на "не удалось получить цены" повторилась и с ретраем (см.
+// callTool выше), похоже, лимит ВкусВилл жёстче, чем казалось изначально.
+// 4 параллельных запроса вместо 6 — план собирается на секунду-другую
+// дольше, но заметно реже упирается в burst-лимит целиком.
+const SEARCH_CONCURRENCY = 4;
 
 export async function resolvePrices(items) {
   const settled = await mapWithConcurrency(items, SEARCH_CONCURRENCY, async (item) => {

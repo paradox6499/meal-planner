@@ -116,10 +116,15 @@ describe("повтор запроса при 429 (rate limit) — регресс
   beforeEach(() => {
     clearMcpCache();
     vi.stubGlobal("fetch", vi.fn());
+    // Ретраи теперь добавляют случайный джиттер сверху базовой задержки (см.
+    // vkusvillMcp.js) — фиксируем Math.random на 0, чтобы задержка равнялась
+    // ровно базовому значению и таймеры в тестах продвигались предсказуемо.
+    vi.spyOn(Math, "random").mockReturnValue(0);
   });
   afterEach(() => {
     vi.unstubAllGlobals();
     vi.useRealTimers();
+    Math.random.mockRestore();
   });
 
   it("повторяет попытку после 429 и в итоге успевает получить успешный ответ", async () => {
@@ -128,7 +133,7 @@ describe("повтор запроса при 429 (rate limit) — регресс
       .mockResolvedValueOnce(mockMcpError(RATE_LIMIT_ERROR))
       .mockResolvedValueOnce(mockMcpResponse({ items: [{ xml_id: 1, name: "Молоко" }] }));
     const promise = searchProducts({ q: "молоко" });
-    await vi.advanceTimersByTimeAsync(600); // первая задержка ретрая
+    await vi.advanceTimersByTimeAsync(700); // первая задержка ретрая
     const result = await promise;
     expect(result.items[0].name).toBe("Молоко");
     expect(fetch).toHaveBeenCalledTimes(2);
@@ -139,10 +144,11 @@ describe("повтор запроса при 429 (rate limit) — регресс
     fetch.mockResolvedValue(mockMcpError(RATE_LIMIT_ERROR));
     const promise = searchProducts({ q: "молоко" });
     const assertion = expect(promise).rejects.toThrow(/лимит запросов/);
-    await vi.advanceTimersByTimeAsync(600);
-    await vi.advanceTimersByTimeAsync(1500);
+    await vi.advanceTimersByTimeAsync(700);
+    await vi.advanceTimersByTimeAsync(1600);
+    await vi.advanceTimersByTimeAsync(3000);
     await assertion;
-    expect(fetch).toHaveBeenCalledTimes(3); // исходная попытка + 2 ретрая
+    expect(fetch).toHaveBeenCalledTimes(4); // исходная попытка + 3 ретрая
   });
 
   it("не ретраит ошибки, отличные от 429 (например, некорректный запрос)", async () => {

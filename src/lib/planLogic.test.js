@@ -168,6 +168,47 @@ describe("buildInitialPlan", () => {
       expect(allSame, `дни ${i - 2}-${i} — три раза подряд одно и то же блюдо`).toBe(false);
     }
   });
+
+  // Регрессия на жалобу в чате: "может предложить одно и то же блюдо по
+  // итогу несколько раз за неделю в разные дни" — раньше избегали повтора
+  // только среди последних 2 выборов, на небольшом пуле блюдо возвращалось
+  // уже через пару дней.
+  it("при достаточном пуле распределяет блюда по неделе ровно, не концентрируя повторы", () => {
+    const pool = [100, 102, 104, 106, 108, 110, 112].map((c, i) => mkRecipe(i, c));
+    const pools = { breakfast: [], main: pool, snack: [] };
+    const plan = buildInitialPlan(pools, [{ id: "lunch", label: "Обед", category: "main" }], 700 * 7, 1);
+    const ids = plan.days.map((d) => d.dayMeals[0].recipeId);
+    const counts = {};
+    ids.forEach((id) => { counts[id] = (counts[id] || 0) + 1; });
+    // 7 приёмов на 7 подходящих рецептов — при равномерном распределении
+    // каждый должен встретиться не больше 2 раз (round-robin дал бы ровно 1).
+    expect(Math.max(...Object.values(counts))).toBeLessThanOrEqual(2);
+  });
+
+  // Регрессия на жалобу в чате: "то же самое блюдо в рамках одного дня и на
+  // завтрак, и на обед к примеру" — то же самое для обеда/ужина (общая
+  // категория "main"): раньше при единственном подходящем по бюджету
+  // варианте (candidateIdx === 0) защиты от повтора не было вообще.
+  it("не предлагает одно и то же блюдо дважды в один день, если есть альтернатива", () => {
+    const pool = [100, 110].map((c, i) => mkRecipe(i, c)); // оба варианта свободно укладываются в бюджет ниже
+    const pools = { breakfast: [], main: pool, snack: [] };
+    const meals2 = [{ id: "lunch", label: "Обед", category: "main" }, { id: "dinner", label: "Ужин", category: "main" }];
+    const plan = buildInitialPlan(pools, meals2, 999999, 1); // бюджет с большим запасом — обе цены всегда доступны
+    plan.days.forEach((d, i) => {
+      expect(d.dayMeals[0].recipeId, `день ${i + 1}: обед и ужин совпали`).not.toBe(d.dayMeals[1].recipeId);
+    });
+  });
+
+  it("повторяет блюдо в тот же день только если реальных альтернатив в пуле нет вообще", () => {
+    const pool = [mkRecipe(0, 100)]; // единственный рецепт в пуле
+    const pools = { breakfast: [], main: pool, snack: [] };
+    const meals2 = [{ id: "lunch", label: "Обед", category: "main" }, { id: "dinner", label: "Ужин", category: "main" }];
+    const plan = buildInitialPlan(pools, meals2, 100 * 14, 1);
+    // не падает и не пропускает приём — честно повторяет единственное, что есть
+    expect(plan.days[0].dayMeals).toHaveLength(2);
+    expect(plan.days[0].dayMeals[0].recipeId).toBe(0);
+    expect(plan.days[0].dayMeals[1].recipeId).toBe(0);
+  });
 });
 
 describe("buildPlanView", () => {

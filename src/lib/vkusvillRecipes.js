@@ -180,7 +180,10 @@ export function pricePerBaseUnit(price, productUnit) {
 // товара — она же нужна снаружи (App.jsx/buildPlanView), чтобы посчитать
 // итемизированную стоимость списка покупок ТЕМИ ЖЕ цифрами, а не запрашивать
 // каталог второй раз ради того, что уже знаем.
-async function attachRealCosts(pools) {
+// export — App.jsx зовёт это напрямую повторно как "Повторить получение
+// цен" (см. ResultView), не пересобирая весь план заново: пулы рецептов уже
+// есть, нужно только ещё раз попробовать получить цены на них.
+export async function attachRealCosts(pools) {
   const allNames = new Set();
   Object.values(pools).forEach((recipes) => recipes.forEach((r) => r.ingr.forEach(([name]) => allNames.add(name))));
   const priceByName = new Map();
