@@ -112,32 +112,36 @@ describe("pricePerBaseUnit / isWeightOrVolumeUnit", () => {
 // "до 40 минут" — это буквально 21-40 минут, не "0-40". Чтобы честно закрыть
 // "до 40 минут" целиком, searchRawRecipes на этом уровне делает ДВА запроса
 // (оба бакета) и объединяет — это и тестируется здесь на мокнутом searchRecipes.
+// Плюс, отдельно от бакетов времени, каждый бакет теперь сам берёт 2
+// страницы (RECIPE_SEARCH_PAGES) — жалоба в чате на повторяющиеся блюда:
+// одной страницы часто не хватало на разнообразие недели.
 describe("searchRawRecipes — бюджет времени готовки", () => {
   const baseArgs = { q: "", categoryId: 332, cookingMethod: 0, excludeAllergens: [] };
 
-  it("без maxCookTime — один запрос без фильтра времени (как раньше)", async () => {
+  it("без maxCookTime — две страницы одного запроса без фильтра времени (без дублей по id)", async () => {
     searchRecipes.mockResolvedValue({ items: [{ id: 1 }] });
     const items = await searchRawRecipes(baseArgs);
-    expect(searchRecipes).toHaveBeenCalledTimes(1);
-    expect(searchRecipes).toHaveBeenCalledWith(expect.objectContaining({ id_cooking_time_filter: 0 }));
-    expect(items).toEqual([{ id: 1 }]);
+    expect(searchRecipes).toHaveBeenCalledTimes(2); // страница 1 и страница 2
+    expect(searchRecipes).toHaveBeenCalledWith(expect.objectContaining({ id_cooking_time_filter: 0, page: 1 }));
+    expect(searchRecipes).toHaveBeenCalledWith(expect.objectContaining({ id_cooking_time_filter: 0, page: 2 }));
+    expect(items).toEqual([{ id: 1 }]); // обе страницы вернули один и тот же id=1 в моке — задвоения нет
   });
 
-  it("maxCookTime=20 — один запрос на единственный бакет 'до 20 минут'", async () => {
+  it("maxCookTime=20 — две страницы на единственный бакет 'до 20 минут'", async () => {
     searchRecipes.mockResolvedValue({ items: [{ id: 1 }] });
     await searchRawRecipes({ ...baseArgs, maxCookTime: 20 });
-    expect(searchRecipes).toHaveBeenCalledTimes(1);
+    expect(searchRecipes).toHaveBeenCalledTimes(2);
     expect(searchRecipes).toHaveBeenCalledWith(expect.objectContaining({ id_cooking_time_filter: 397967 }));
   });
 
-  it("maxCookTime=40 — два запроса (оба бакета), результат объединён и без дублей по id", async () => {
+  it("maxCookTime=40 — оба бакета по 2 страницы каждый (4 запроса), результат объединён и без дублей по id", async () => {
     searchRecipes.mockImplementation(({ id_cooking_time_filter }) =>
       Promise.resolve({
         items: id_cooking_time_filter === 397967 ? [{ id: 1 }, { id: 2 }] : [{ id: 2 }, { id: 3 }], // id=2 встречается в обоих — не должен задвоиться
       })
     );
     const items = await searchRawRecipes({ ...baseArgs, maxCookTime: 40 });
-    expect(searchRecipes).toHaveBeenCalledTimes(2);
+    expect(searchRecipes).toHaveBeenCalledTimes(4);
     expect(items.map((r) => r.id).sort()).toEqual([1, 2, 3]);
   });
 

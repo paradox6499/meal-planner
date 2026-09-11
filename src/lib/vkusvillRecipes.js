@@ -227,21 +227,43 @@ export async function attachRealCosts(pools) {
  *
  * `categories` — только те категории, что реально нужны (из выбранных
  * приёмов пищи) — не тратим вызовы на то, что пользователь не спрашивал. */
-// Один "сырой" поиск рецептов под заданный бюджет времени — либо один
-// запрос без фильтра времени (maxCookTime не задан), либо один запрос на
-// бакет (20 минут), либо два запроса-и-объединить (40 минут, см. комментарий
-// у COOKING_TIME_BUCKET_IDS). Ошибка отдельного под-запроса не должна
-// обрушивать всю категорию — считаем её как "ничего не нашли на этом бакете".
+// Раньше брали только страницу 1 — для многих сочетаний фильтров (узкая
+// кухня + диета + аллергии) это оставляло буквально несколько рецептов на
+// категорию, и при 14 приёмах пищи в неделю (2×7) блюда неизбежно
+// повторялись — жалоба в чате "иногда попадаются одинаковые блюда изо дня в
+// день". Вторая страница примерно удваивает пул почти без доп. цены по
+// времени (один лишний параллельный запрос) — и это ДРУГОЙ инструмент MCP
+// (vkusvill_recipes, не vkusvill_products_search), который спрашивается
+// всего пару раз за сборку плана, так что риска для burst-лимита цен
+// (см. vkusvillMcp.js) это не добавляет.
+const RECIPE_SEARCH_PAGES = [1, 2];
+
+// Один "сырой" поиск рецептов под заданный бюджет времени — либо один-два
+// запроса (по числу страниц выше) без фильтра времени (maxCookTime не
+// задан), либо на бакет (20 минут), либо на оба бакета (40 минут, см.
+// комментарий у COOKING_TIME_BUCKET_IDS), с сохранением дедупликации по id.
+// Ошибка отдельного под-запроса не должна обрушивать всю категорию —
+// считаем её как "ничего не нашли на этой странице/бакете".
 export async function searchRawRecipes({ q, categoryId, cookingMethod, excludeAllergens, maxCookTime }) {
   const bucketIds = maxCookTime ? COOKING_TIME_BUCKET_IDS[maxCookTime] : null;
-  const fetchBucket = (timeId) =>
-    searchRecipes({
-      q, page: 1, sort: "popularity",
-      id_category_filter: categoryId, id_cooking_method_filter: cookingMethod,
-      id_cooking_time_filter: timeId, id_exclude_allergens_filter: excludeAllergens,
-    })
-      .then((d) => d.items || [])
-      .catch(() => []);
+  const fetchBucket = async (timeId) => {
+    const pages = await Promise.all(
+      RECIPE_SEARCH_PAGES.map((page) =>
+        searchRecipes({
+          q, page, sort: "popularity",
+          id_category_filter: categoryId, id_cooking_method_filter: cookingMethod,
+          id_cooking_time_filter: timeId, id_exclude_allergens_filter: excludeAllergens,
+        })
+          .then((d) => d.items || [])
+          .catch(() => [])
+      )
+    );
+    // На случай, если у ВкусВилл страницы 1 и 2 когда-нибудь пересекутся
+    // (короткий хвостовой список, дубли на границе страницы) — дедуп по id
+    // тут же, а не только на уровне бакетов ниже.
+    const seenInBucket = new Set();
+    return pages.flat().filter((r) => (seenInBucket.has(r.id) ? false : (seenInBucket.add(r.id), true)));
+  };
 
   if (!bucketIds) return fetchBucket(0);
   const results = await Promise.all(bucketIds.map(fetchBucket));

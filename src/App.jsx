@@ -1,7 +1,7 @@
 import { useState, useMemo, useEffect } from "react";
 import { Check, ChevronLeft, ChevronRight, Store, Users, Wallet, Salad, ChefHat, Flame, RotateCcw, UtensilsCrossed, Clock, Repeat, Ban, TriangleAlert, X, Loader2, Share2, Settings, Sun, Moon, MonitorSmartphone, Sparkles, PackageSearch, Home, MessageCircle } from "lucide-react";
 import { ALLERGENS } from "./data/recipes.js";
-import { buildCartFromShoppingList, toVkusvillQuantity } from "./lib/vkusvillMcp.js";
+import { buildCartFromShoppingList, toVkusvillQuantity, clearMcpCache } from "./lib/vkusvillMcp.js";
 import { fetchVkusvillPools, getSubstituteOptions, attachRealCosts } from "./lib/vkusvillRecipes.js";
 import { loadProfile, saveProfile, clearProfile, loadTheme, saveTheme } from "./lib/profile.js";
 import { buildPools, buildInitialPlan, buildPlanView } from "./lib/planLogic.js";
@@ -18,10 +18,13 @@ import { checkHomeScreenStatus, promptAddToHomeScreen, onHomeScreenAdded } from 
 // один раз" полями.
 const DEFAULT_MEAL_TIMES = { breakfast: "08:00", lunch: "13:00", dinner: "19:00", snack: "16:00" };
 
-// t.me-ссылка на чат для обратной связи (личка разработчика или отдельный
-// саппорт-аккаунт) — задаётся переменной окружения при сборке (см.
-// .github/workflows/deploy.yml), кнопка в Аккаунте сама скрывается, если
-// переменная не задана, ничего не гадаем и не хардкодим никакой хендл.
+// t.me-ссылка на чат для обратной связи — это чат с самим ботом
+// (https://t.me/s_edim_bot), не личный аккаунт разработчика: сервер умеет
+// принимать и агрегировать такие сообщения (см. server/src/webhook.js —
+// свободный текст сохраняется как обращение и отвечает благодарностью,
+// админ смотрит накопленное командой /feedback). Задаётся переменной
+// окружения при сборке (см. .github/workflows/deploy.yml), кнопка в
+// Аккаунте сама скрывается, если переменная не задана.
 const SUPPORT_URL = import.meta.env.VITE_SUPPORT_URL || null;
 
 // ---------- UI-конфигурация (не контент рецептов — та живёт в data/recipes.js) ----------
@@ -258,6 +261,7 @@ export default function MealPlanner() {
   // если реальные рецепты не подтянулись (см. комментарий у buildPlanView).
   const [priceByName, setPriceByName] = useState(null);
   const [retryingPrices, setRetryingPrices] = useState(false);
+  const [priceRetryFailed, setPriceRetryFailed] = useState(false);
 
   // "Повторить получение цен" — ВкусВилл иногда лимитирует burst запросов
   // (см. vkusvillMcp.js), и план собирается с mostlyUnpriced=true. Раньше
@@ -265,14 +269,30 @@ export default function MealPlanner() {
   // заново пройти весь визард ради того, чтобы пулы рецептов остались теми
   // же, просто ещё раз спросить цены. Пулы уже есть в состоянии — просто
   // зовём attachRealCosts ещё раз на них же и обновляем priceByName.
+  //
+  // Жалоба в чате "нажимаю кнопку — ничего не происходит": вероятная причина —
+  // сам MCP-клиент кэширует УСПЕШНЫЕ ответы на 10 минут (см. vkusvillMcp.js),
+  // а VkusVill под нагрузкой иногда отвечает 200 с пустым items вместо
+  // честного 429 — такой ответ не ошибка, значит кэшируется как есть, и
+  // повтор молча получал бы тот же пустой результат из кэша, ни разу не
+  // спросив сеть заново. clearMcpCache() перед повтором — чтобы "повторить"
+  // означало по-настоящему повторить, а не отдать то же самое из кэша.
   const handleRetryPrices = async () => {
     if (!pools) return;
     setRetryingPrices(true);
+    setPriceRetryFailed(false);
+    clearMcpCache();
     try {
       const fresh = await attachRealCosts(pools);
       setPriceByName(fresh);
+      // Та же грубая эвристика, что и mostlyUnpriced в planLogic.js — если
+      // цену не нашли почти ни для чего и на этот раз, честно показываем,
+      // что попытка не удалась, а не молча оставляем ту же надпись, будто
+      // кнопка вообще ничего не сделала.
+      setPriceRetryFailed(fresh.size === 0);
     } catch (err) {
       console.warn("Повторная попытка получить цены не удалась:", err.message);
+      setPriceRetryFailed(true);
     } finally {
       setRetryingPrices(false);
     }
@@ -800,6 +820,7 @@ export default function MealPlanner() {
             onOpenRecipe={setOpenRecipe}
             onRetryPrices={handleRetryPrices}
             retryingPrices={retryingPrices}
+            priceRetryFailed={priceRetryFailed}
           />
         )}
       </div>
@@ -1261,7 +1282,7 @@ function ProModal({ onClose }) {
   );
 }
 
-function ResultView({ plan, storeId, storeName, budget, family, mealsCount, diet, allergies, onSwap, onOpenRecipe, onRetryPrices, retryingPrices }) {
+function ResultView({ plan, storeId, storeName, budget, family, mealsCount, diet, allergies, onSwap, onOpenRecipe, onRetryPrices, retryingPrices, priceRetryFailed }) {
   const [orderState, setOrderState] = useState({ status: "idle" }); // idle | loading | error
   // Отделы списка покупок сворачиваемые — по умолчанию все раскрыты (старое
   // поведение не меняется для короткого списка), но для семьи с 3+ приёмами
@@ -1423,6 +1444,15 @@ function ResultView({ plan, storeId, storeName, budget, family, mealsCount, diet
               >
                 {retryingPrices ? <><Loader2 size={13} className="spin" /> Пробуем ещё раз…</> : "Повторить получение цен"}
               </button>
+            )}
+            {/* Явная обратная связь на неудачную попытку — раньше кнопка
+                просто молча оставляла ту же самую надпись сверху, если
+                ВкусВилл всё ещё не отвечал, и выглядело это так, будто
+                нажатие вообще ни на что не повлияло. */}
+            {priceRetryFailed && !retryingPrices && (
+              <p style={{ fontSize: 11.5, marginTop: 6, opacity: 0.85 }}>
+                Не получилось — ВкусВилл всё ещё ограничивает запросы. Попробуйте ещё раз через минуту-другую.
+              </p>
             )}
           </div>
         </div>
