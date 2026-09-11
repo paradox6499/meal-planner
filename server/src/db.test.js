@@ -4,6 +4,7 @@ import {
   insertEvent, summarizeEventsSince, getLastDigestAt, setLastDigestAt,
   getLastBackupAt, setLastBackupAt,
   setUserPro, getUserPro, countPlanGenerationsSince, savePlanHistory, listPlanHistory,
+  saveFeedback, listRecentFeedback,
 } from "./db.js";
 
 describe("db", () => {
@@ -197,5 +198,33 @@ describe("история планов (plan_history)", () => {
     const list = listPlanHistory(db, 42, 100);
     expect(list).toHaveLength(12);
     expect(list[0].createdAt).toBe("2026-09-15T09:00:00Z"); // самые новые остались
+  });
+});
+
+describe("обращения в поддержку (feedback)", () => {
+  let db;
+  beforeEach(() => {
+    db = openDb(":memory:");
+  });
+
+  it("сохраняет и читает обращения, новые сверху", () => {
+    saveFeedback(db, { telegramUserId: 42, text: "Не находит цены на творог", createdAtISO: "2026-09-10T09:00:00Z" });
+    saveFeedback(db, { telegramUserId: 7, text: "Спасибо, всё отлично!", createdAtISO: "2026-09-10T10:00:00Z" });
+    const list = listRecentFeedback(db);
+    expect(list).toHaveLength(2);
+    expect(list[0].text).toBe("Спасибо, всё отлично!"); // самое новое первым
+    expect(list[0].telegramUserId).toBe(7);
+    expect(list[1].text).toBe("Не находит цены на творог");
+  });
+
+  it("пустой список, если обращений ещё не было", () => {
+    expect(listRecentFeedback(db)).toEqual([]);
+  });
+
+  it("limit ограничивает выдачу", () => {
+    for (let i = 0; i < 5; i++) {
+      saveFeedback(db, { telegramUserId: 1, text: `сообщение ${i}`, createdAtISO: `2026-09-10T09:0${i}:00Z` });
+    }
+    expect(listRecentFeedback(db, 2)).toHaveLength(2);
   });
 });

@@ -24,6 +24,11 @@ const DIGEST_CHECK_INTERVAL_MS = 15 * 60 * 1000; // достаточно час�
 // на таком масштабе копеечный, слать чаще незачем.
 const BACKUP_INTERVAL_HOURS = Number(process.env.BACKUP_INTERVAL_HOURS) || 24;
 const BACKUP_CHECK_INTERVAL_MS = 60 * 60 * 1000;
+// Секрет для /telegram/webhook (см. app.js) — придумываете сами (любая
+// длинная случайная строка), задаётся и здесь, и Telegram-у через setWebhook
+// (см. server/README.md). Без него POST /telegram/webhook отклоняет всё —
+// нет открытого до настройки состояния "доверяем всем подряд".
+const WEBHOOK_SECRET = process.env.TELEGRAM_WEBHOOK_SECRET || null;
 
 if (!BOT_TOKEN) {
   console.error("TELEGRAM_BOT_TOKEN не задан — без него нельзя ни проверить initData, ни отправить напоминание. Задайте переменную окружения и перезапустите.");
@@ -31,7 +36,7 @@ if (!BOT_TOKEN) {
 }
 
 const db = openDb(DB_PATH);
-const server = createApp(db, { botToken: BOT_TOKEN });
+const server = createApp(db, { botToken: BOT_TOKEN, adminTelegramId: ADMIN_TELEGRAM_ID, webhookSecret: WEBHOOK_SECRET });
 
 server.listen(PORT, () => {
   console.log(`meal-planner-server слушает порт ${PORT}, БД: ${DB_PATH}`);

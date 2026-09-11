@@ -57,16 +57,19 @@ export function buildDigestText(summary, { sinceISO, now }) {
   return lines.join("\n");
 }
 
-/** Возвращает { sent: boolean, ... } — не бросает исключение при неудаче
+/** Собирает и шлёт отчёт ПРЯМО СЕЙЧАС, без проверки "пора ли" — используется
+ * и автоматическим тиком (через runDigest ниже), и командой /report из
+ * webhook.js (см. planReplyForUpdate), когда захотелось посмотреть отчёт
+ * без ожидания следующего DIGEST_HOUR. Обновляет last_digest_at в обоих
+ * случаях — если админ запросил отчёт вручную посреди дня, автоматический
+ * тик за тот же день его не задвоит. Не бросает исключение при неудаче
  * отправки (например, разработчик ещё не написал боту /start, и Telegram
- * не даёт слать в чат, который бот не открывал первым) — index.js логирует
- * и просто пробует на следующем тике, весь процесс падать не должен. */
-export async function runDigest(db, { botToken, adminTelegramId, digestHour = 9 }, now = new Date()) {
+ * не даёт слать в чат, который бот не открывал первым) — вызывающий код
+ * логирует и пробует в следующий раз, процесс падать не должен. */
+export async function sendDigestNow(db, { botToken, adminTelegramId }, now = new Date()) {
   if (!adminTelegramId) return { sent: false, reason: "ADMIN_TELEGRAM_ID не задан" };
 
   const lastDigestAt = getLastDigestAt(db);
-  if (!shouldRunDigest(now, lastDigestAt, digestHour)) return { sent: false, reason: "не время" };
-
   const sinceISO = lastDigestAt || new Date(now.getTime() - 24 * 3_600_000).toISOString();
   const summary = summarizeEventsSince(db, sinceISO);
   const text = buildDigestText(summary, { sinceISO, now });
@@ -79,4 +82,15 @@ export async function runDigest(db, { botToken, adminTelegramId, digestHour = 9 
     console.error("[digest] не удалось отправить отчёт:", err.message);
     return { sent: false, reason: err.message };
   }
+}
+
+/** Обёртка sendDigestNow с проверкой "пора ли" — то, что реально зовёт
+ * планировщик раз в сутки (см. index.js). */
+export async function runDigest(db, { botToken, adminTelegramId, digestHour = 9 }, now = new Date()) {
+  if (!adminTelegramId) return { sent: false, reason: "ADMIN_TELEGRAM_ID не задан" };
+
+  const lastDigestAt = getLastDigestAt(db);
+  if (!shouldRunDigest(now, lastDigestAt, digestHour)) return { sent: false, reason: "не время" };
+
+  return sendDigestNow(db, { botToken, adminTelegramId }, now);
 }

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { openDb, insertEvent } from "./db.js";
-import { shouldRunDigest, buildDigestText, runDigest } from "./digest.js";
+import { openDb, insertEvent, getLastDigestAt } from "./db.js";
+import { shouldRunDigest, buildDigestText, runDigest, sendDigestNow } from "./digest.js";
 
 describe("shouldRunDigest", () => {
   it("false до наступления digestHour по UTC", () => {
@@ -79,5 +79,42 @@ describe("runDigest", () => {
     // повторный вызов в тот же день больше не шлёт
     const second = await runDigest(db, { botToken: "TOKEN", adminTelegramId: 777, digestHour: 9 }, new Date("2026-09-10T11:00:00Z"));
     expect(second.sent).toBe(false);
+  });
+});
+
+describe("sendDigestNow", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("не шлёт и объясняет причину без ADMIN_TELEGRAM_ID", async () => {
+    const db = openDb(":memory:");
+    const result = await sendDigestNow(db, { botToken: "x", adminTelegramId: null });
+    expect(result.sent).toBe(false);
+    expect(result.reason).toMatch(/ADMIN_TELEGRAM_ID/);
+  });
+
+  it("шлёт НЕЗАВИСИМО от времени суток и от того, отправлялся ли уже сегодня (для /report)", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ ok: true, result: {} }) });
+    vi.stubGlobal("fetch", fetchMock);
+    const db = openDb(":memory:");
+
+    // Вне часа дайджеста (в отличие от runDigest — тот бы отказал)
+    const first = await sendDigestNow(db, { botToken: "TOKEN", adminTelegramId: 777 }, new Date("2026-09-10T03:00:00Z"));
+    expect(first.sent).toBe(true);
+
+    // И повторно в тот же день — тоже отправляет, не блокируется "уже было сегодня"
+    const second = await sendDigestNow(db, { botToken: "TOKEN", adminTelegramId: 777 }, new Date("2026-09-10T04:00:00Z"));
+    expect(second.sent).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("обновляет last_digest_at — последующий автоматический runDigest в тот же день не задваивает", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({ ok: true, result: {} }) }));
+    const db = openDb(":memory:");
+
+    await sendDigestNow(db, { botToken: "TOKEN", adminTelegramId: 777 }, new Date("2026-09-10T03:00:00Z"));
+    expect(getLastDigestAt(db)).toBe("2026-09-10T03:00:00.000Z");
+
+    const autoRun = await runDigest(db, { botToken: "TOKEN", adminTelegramId: 777, digestHour: 9 }, new Date("2026-09-10T09:30:00Z"));
+    expect(autoRun.sent).toBe(false); // уже отправляли сегодня вручную
   });
 });

@@ -1,6 +1,6 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { createHmac } from "node:crypto";
-import { openDb, findCandidateSlots, summarizeEventsSince, setUserPro, insertEvent, listPlanHistory } from "./db.js";
+import { openDb, findCandidateSlots, summarizeEventsSince, setUserPro, insertEvent, listPlanHistory, listRecentFeedback } from "./db.js";
 import { createApp, parsePlanRequest, parseEventRequest, parseSavePlanRequest, computePlanStatus, FREE_PLANS_PER_WEEK } from "./app.js";
 
 const BOT_TOKEN = "123456:TEST-TOKEN";
@@ -298,5 +298,120 @@ describe("HTTP-сервер", () => {
   it("POST /api/plans/list без initData -> 401", async () => {
     const res = await fetch(`${baseUrl}/api/plans/list`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
     expect(res.status).toBe(401);
+  });
+});
+
+describe("POST /telegram/webhook", () => {
+  const WEBHOOK_SECRET = "test-webhook-secret";
+  // Захвачен на этапе регистрации describe (до того, как любой beforeEach/it
+  // успел что-то застабить) — настоящий fetch, нужен ниже, чтобы обращения
+  // к НАШЕМУ тестовому серверу (post()) шли по-настоящему, пока мокается
+  // только то, что сервер сам шлёт в api.telegram.org — оба используют один
+  // и тот же globalThis.fetch в одном процессе, отличить их можно только по URL.
+  const realFetch = globalThis.fetch;
+  let db, server, baseUrl, telegramCalls;
+
+  function stubTelegramFetch(telegramResponse = { ok: true, json: async () => ({ ok: true, result: {} }) }) {
+    vi.stubGlobal("fetch", vi.fn((url, opts) => {
+      if (typeof url === "string" && url.includes("api.telegram.org")) {
+        telegramCalls.push([url, opts]);
+        return Promise.resolve(telegramResponse);
+      }
+      return realFetch(url, opts);
+    }));
+  }
+
+  beforeEach(async () => {
+    db = openDb(":memory:");
+    server = createApp(db, { botToken: BOT_TOKEN, adminTelegramId: 777, webhookSecret: WEBHOOK_SECRET });
+    await new Promise((resolve) => server.listen(0, resolve));
+    baseUrl = `http://127.0.0.1:${server.address().port}`;
+    telegramCalls = [];
+    stubTelegramFetch();
+  });
+  afterEach(async () => {
+    vi.unstubAllGlobals();
+    await new Promise((resolve) => server.close(resolve));
+  });
+
+  const post = (body, secret = WEBHOOK_SECRET) =>
+    realFetch(`${baseUrl}/telegram/webhook`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Telegram-Bot-Api-Secret-Token": secret },
+      body: JSON.stringify(body),
+    });
+
+  it("без верного секрета в заголовке -> 401, ничего не отправляет", async () => {
+    const res = await post({ message: { text: "/start", chat: { id: 42 } } }, "wrong-secret");
+    expect(res.status).toBe(401);
+    expect(telegramCalls).toHaveLength(0);
+  });
+
+  it("/start -> отвечает приветствием тому же chat_id", async () => {
+    const res = await post({ message: { text: "/start", chat: { id: 42 } } });
+    expect(res.status).toBe(200);
+    expect(telegramCalls).toHaveLength(1);
+    const [url, opts] = telegramCalls[0];
+    expect(url).toContain("/sendMessage");
+    const sentBody = JSON.parse(opts.body);
+    expect(sentBody.chat_id).toBe(42);
+    expect(sentBody.text).toContain("Съедим");
+  });
+
+  it("/report от админа -> шлёт дайджест (не sendMessage напрямую, а через sendDigestNow)", async () => {
+    const res = await post({ message: { text: "/report", chat: { id: 777 } } });
+    expect(res.status).toBe(200);
+    expect(telegramCalls).toHaveLength(1);
+    const sentBody = JSON.parse(telegramCalls[0][1].body);
+    expect(sentBody.chat_id).toBe(777);
+  });
+
+  it("/report от чужого chat_id -> 200, но ничего не отправляет (не палим статистику кому попало)", async () => {
+    const res = await post({ message: { text: "/report", chat: { id: 999 } } });
+    expect(res.status).toBe(200);
+    expect(telegramCalls).toHaveLength(0);
+  });
+
+  it("произвольное сообщение от пользователя -> сохраняет как обращение и шлёт благодарность", async () => {
+    const res = await post({ message: { text: "Не находит цены на творог", chat: { id: 42 }, from: { id: 42 } } });
+    expect(res.status).toBe(200);
+    expect(telegramCalls).toHaveLength(1);
+    const sentBody = JSON.parse(telegramCalls[0][1].body);
+    expect(sentBody.chat_id).toBe(42);
+
+    const feedback = listRecentFeedback(db);
+    expect(feedback).toHaveLength(1);
+    expect(feedback[0]).toMatchObject({ telegramUserId: 42, text: "Не находит цены на творог" });
+  });
+
+  it("произвольное сообщение от самого админа -> 200, не сохраняется как обращение", async () => {
+    const res = await post({ message: { text: "тестовое сообщение", chat: { id: 777 }, from: { id: 777 } } });
+    expect(res.status).toBe(200);
+    expect(telegramCalls).toHaveLength(0);
+    expect(listRecentFeedback(db)).toHaveLength(0);
+  });
+
+  it("/feedback от админа -> присылает накопленные обращения", async () => {
+    await post({ message: { text: "Долго грузится план", chat: { id: 42 }, from: { id: 42 } } });
+    telegramCalls.length = 0; // сбросить — интересует только вызов /feedback ниже
+
+    const res = await post({ message: { text: "/feedback", chat: { id: 777 } } });
+    expect(res.status).toBe(200);
+    expect(telegramCalls).toHaveLength(1);
+    const sentBody = JSON.parse(telegramCalls[0][1].body);
+    expect(sentBody.chat_id).toBe(777);
+    expect(sentBody.text).toContain("Долго грузится план");
+  });
+
+  it("/feedback от НЕ админа -> 200, ничего не отправляет", async () => {
+    const res = await post({ message: { text: "/feedback", chat: { id: 999 } } });
+    expect(res.status).toBe(200);
+    expect(telegramCalls).toHaveLength(0);
+  });
+
+  it("всегда отвечает 200, даже если отправка ответа в Telegram не удалась (не хотим дублей от ретрая Telegram)", async () => {
+    stubTelegramFetch({ ok: true, json: async () => ({ ok: false, description: "Forbidden: bot was blocked by the user" }) });
+    const res = await post({ message: { text: "/start", chat: { id: 42 } } });
+    expect(res.status).toBe(200);
   });
 });

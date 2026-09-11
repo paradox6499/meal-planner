@@ -73,6 +73,18 @@ export function openDb(path) {
       plan_json TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_plan_history_user_time ON plan_history (telegram_user_id, created_at DESC);
+
+    -- Свободный текст, который пользователь написал боту напрямую (кнопка
+    -- "Написать в поддержку" ведёт в чат с ботом, не на личный аккаунт
+    -- разработчика, см. webhook.js) — админ смотрит накопленное командой
+    -- /feedback, не обязан отвечать в реальном времени на каждое сообщение.
+    CREATE TABLE IF NOT EXISTS feedback (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      telegram_user_id INTEGER NOT NULL,
+      text TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_feedback_created ON feedback (created_at DESC);
   `);
   return db;
 }
@@ -241,6 +253,15 @@ export function listPlanHistory(db, telegramUserId, limit = PLAN_HISTORY_KEEP_PE
     totalCost: r.total_cost,
     plan: JSON.parse(r.plan_json),
   }));
+}
+
+export function saveFeedback(db, { telegramUserId, text, createdAtISO }) {
+  db.prepare(`INSERT INTO feedback (telegram_user_id, text, created_at) VALUES (?, ?, ?)`).run(telegramUserId, text, createdAtISO);
+}
+
+export function listRecentFeedback(db, limit = 10) {
+  const rows = db.prepare(`SELECT telegram_user_id, text, created_at FROM feedback ORDER BY created_at DESC LIMIT ?`).all(limit);
+  return rows.map((r) => ({ telegramUserId: r.telegram_user_id, text: r.text, createdAt: r.created_at }));
 }
 
 export function getLastBackupAt(db) {

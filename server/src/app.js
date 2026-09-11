@@ -7,7 +7,11 @@ import { validateInitData } from "./initData.js";
 import {
   saveUserPlan, insertEvent,
   getUserPro, countPlanGenerationsSince, savePlanHistory, listPlanHistory,
+  saveFeedback, listRecentFeedback,
 } from "./db.js";
+import { planReplyForUpdate, buildWelcomeText, buildFeedbackAckText, buildFeedbackListText } from "./webhook.js";
+import { sendTelegramMessage } from "./telegram.js";
+import { sendDigestNow } from "./digest.js";
 
 const MEAL_TYPES = new Set(["breakfast", "lunch", "dinner", "snack"]);
 const MAX_EVENT_NAME_LENGTH = 64;
@@ -156,7 +160,7 @@ export function parseSavePlanRequest(body, telegramUserId) {
   };
 }
 
-export function createApp(db, { botToken }) {
+export function createApp(db, { botToken, adminTelegramId = null, webhookSecret = null }) {
   return createServer(async (req, res) => {
     if (req.method === "OPTIONS") {
       sendJson(res, 204, {});
@@ -271,6 +275,47 @@ export function createApp(db, { botToken }) {
         console.error("[api/plans/list] ошибка чтения:", err);
         sendJson(res, 500, { ok: false, error: "не удалось получить историю" });
       }
+      return;
+    }
+
+    if (req.method === "POST" && req.url === "/telegram/webhook") {
+      // Секрет, который Telegram кладёт в этот заголовок, ТОЛЬКО если он был
+      // задан при регистрации вебхука (setWebhook, см. server/README.md) —
+      // без проверки любой в интернете мог бы слать сюда поддельные апдейты,
+      // например звать /report от имени админа, подделав chat.id. Без
+      // заданного webhookSecret вообще — честно отклоняем всё, а не тихо
+      // доверяем непроверенным запросам.
+      if (!webhookSecret || req.headers["x-telegram-bot-api-secret-token"] !== webhookSecret) {
+        sendJson(res, 401, { ok: false, error: "invalid webhook secret" });
+        return;
+      }
+      let update;
+      try {
+        update = await readJsonBody(req);
+      } catch (err) {
+        sendJson(res, 400, { ok: false, error: err.message });
+        return;
+      }
+
+      const reply = planReplyForUpdate(update, { adminTelegramId });
+      try {
+        if (reply?.kind === "start") {
+          await sendTelegramMessage(botToken, reply.chatId, buildWelcomeText());
+        } else if (reply?.kind === "report") {
+          await sendDigestNow(db, { botToken, adminTelegramId });
+        } else if (reply?.kind === "list_feedback") {
+          await sendTelegramMessage(botToken, reply.chatId, buildFeedbackListText(listRecentFeedback(db)));
+        } else if (reply?.kind === "feedback") {
+          saveFeedback(db, { telegramUserId: reply.telegramUserId, text: reply.text, createdAtISO: new Date().toISOString() });
+          await sendTelegramMessage(botToken, reply.chatId, buildFeedbackAckText());
+        }
+      } catch (err) {
+        console.error("[telegram/webhook] не удалось ответить:", err.message);
+      }
+      // Telegram повторяет вебхук, если ответ не 200 — отвечаем 200 всегда,
+      // даже если сама отправка ответа не удалась (залогировано выше), чтобы
+      // не получить дубли одного и того же апдейта.
+      sendJson(res, 200, { ok: true });
       return;
     }
 
