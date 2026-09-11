@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { createHmac } from "node:crypto";
 import { openDb, findCandidateSlots, summarizeEventsSince, setUserPro, insertEvent, listPlanHistory, listRecentFeedback } from "./db.js";
-import { createApp, parsePlanRequest, parseEventRequest, parseSavePlanRequest, computePlanStatus, FREE_PLANS_PER_WEEK } from "./app.js";
+import { createApp, parsePlanRequest, parseEventRequest, parseSavePlanRequest, parseMealTimesRequest, computePlanStatus, FREE_PLANS_PER_WEEK } from "./app.js";
 
 const BOT_TOKEN = "123456:TEST-TOKEN";
 
@@ -117,6 +117,26 @@ describe("parseSavePlanRequest", () => {
     expect(parseSavePlanRequest({ ...validPlan, family: -1 }, 42).ok).toBe(false);
     expect(parseSavePlanRequest({ ...validPlan, plan: null }, 42).ok).toBe(false);
     expect(parseSavePlanRequest({ ...validPlan, plan: [1, 2] }, 42).ok).toBe(false);
+  });
+});
+
+describe("parseMealTimesRequest", () => {
+  it("принимает один или несколько типов приёма пищи", () => {
+    expect(parseMealTimesRequest({ mealTimes: { lunch: "13:30" } }, 42)).toEqual({ ok: true, value: { telegramUserId: 42, mealTimes: { lunch: "13:30" } } });
+    expect(parseMealTimesRequest({ mealTimes: { lunch: "13:30", dinner: "20:00" } }, 42).ok).toBe(true);
+  });
+
+  it("отклоняет отсутствующий/пустой/не-объект mealTimes", () => {
+    expect(parseMealTimesRequest({}, 42).ok).toBe(false);
+    expect(parseMealTimesRequest({ mealTimes: {} }, 42).ok).toBe(false);
+    expect(parseMealTimesRequest({ mealTimes: [] }, 42).ok).toBe(false);
+    expect(parseMealTimesRequest({ mealTimes: "13:00" }, 42).ok).toBe(false);
+  });
+
+  it("отклоняет неизвестный mealType и неверный формат времени", () => {
+    expect(parseMealTimesRequest({ mealTimes: { brunch: "13:00" } }, 42).ok).toBe(false);
+    expect(parseMealTimesRequest({ mealTimes: { lunch: "1:00" } }, 42).ok).toBe(false);
+    expect(parseMealTimesRequest({ mealTimes: { lunch: "25:00" } }, 42).ok).toBe(true); // формат ЧЧ:ММ, разумность часа не проверяем — тот же уровень строгости, что и у parsePlanRequest
   });
 });
 
@@ -299,6 +319,44 @@ describe("HTTP-сервер", () => {
     const res = await fetch(`${baseUrl}/api/plans/list`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
     expect(res.status).toBe(401);
   });
+
+  it("POST /api/meal-times обновляет время уже сохранённого плана, не пересобирая его", async () => {
+    await fetch(`${baseUrl}/api/plan`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ initData: validInitData(42), timezoneOffsetMinutes: 180, mealSlots: [validSlot] }),
+    });
+
+    const res = await fetch(`${baseUrl}/api/meal-times`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ initData: validInitData(42), mealTimes: { dinner: "20:30" } }),
+    });
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data).toEqual({ ok: true, updated: 1 });
+
+    const rows = findCandidateSlots(db, "2026-09-10", "2026-09-11");
+    expect(rows[0].meal_time).toBe("20:30");
+  });
+
+  it("POST /api/meal-times без initData -> 401", async () => {
+    const res = await fetch(`${baseUrl}/api/meal-times`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mealTimes: { dinner: "20:30" } }),
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it("POST /api/meal-times с валидной initData, но без mealTimes -> 400", async () => {
+    const res = await fetch(`${baseUrl}/api/meal-times`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ initData: validInitData(42) }),
+    });
+    expect(res.status).toBe(400);
+  });
 });
 
 describe("POST /telegram/webhook", () => {
@@ -405,6 +463,22 @@ describe("POST /telegram/webhook", () => {
 
   it("/feedback от НЕ админа -> 200, ничего не отправляет", async () => {
     const res = await post({ message: { text: "/feedback", chat: { id: 999 } } });
+    expect(res.status).toBe(200);
+    expect(telegramCalls).toHaveLength(0);
+  });
+
+  it("/backup от админа -> присылает файл БД документом", async () => {
+    const res = await post({ message: { text: "/backup", chat: { id: 777 } } });
+    expect(res.status).toBe(200);
+    expect(telegramCalls).toHaveLength(1);
+    const [url, opts] = telegramCalls[0];
+    expect(url).toContain("/sendDocument");
+    expect(opts.body.get("chat_id")).toBe("777");
+    expect(opts.body.get("document").name).toMatch(/\.db$/);
+  });
+
+  it("/backup от НЕ админа -> 200, ничего не отправляет", async () => {
+    const res = await post({ message: { text: "/backup", chat: { id: 999 } } });
     expect(res.status).toBe(200);
     expect(telegramCalls).toHaveLength(0);
   });

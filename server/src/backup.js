@@ -26,14 +26,14 @@ function vacuumInto(db, targetPath) {
   db.exec(`VACUUM INTO '${escaped}'`);
 }
 
-/** Возвращает { sent, reason? } — так же, как runDigest: не бросает
- * исключение при неудаче (временная сетевая проблема не должна ронять
- * процесс), просто логируется и повторится на следующем тике. */
-export async function runBackup(db, { botToken, adminTelegramId, intervalHours = 24 }, now = new Date()) {
+/** Делает и шлёт бэкап ПРЯМО СЕЙЧАС, без проверки "пора ли" — используется и
+ * автоматическим тиком (через runBackup ниже), и командой /backup из
+ * webhook.js, когда хочется проверить/получить свежий снимок без ожидания
+ * следующего интервала. Обновляет last_backup_at в обоих случаях. Не
+ * бросает исключение при неудаче (временная сетевая проблема не должна
+ * ронять процесс) — просто логируется, вызывающий код решает, что дальше. */
+export async function sendBackupNow(db, { botToken, adminTelegramId }, now = new Date()) {
   if (!adminTelegramId) return { sent: false, reason: "ADMIN_TELEGRAM_ID не задан" };
-
-  const lastBackupAt = getLastBackupAt(db);
-  if (!shouldRunBackup(now, lastBackupAt, intervalHours)) return { sent: false, reason: "не время" };
 
   const tmpPath = join(tmpdir(), `sedim-backup-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
   try {
@@ -49,4 +49,15 @@ export async function runBackup(db, { botToken, adminTelegramId, intervalHours =
   } finally {
     if (existsSync(tmpPath)) unlinkSync(tmpPath);
   }
+}
+
+/** Обёртка sendBackupNow с проверкой "пора ли" — то, что реально зовёт
+ * планировщик по расписанию (см. index.js). */
+export async function runBackup(db, { botToken, adminTelegramId, intervalHours = 24 }, now = new Date()) {
+  if (!adminTelegramId) return { sent: false, reason: "ADMIN_TELEGRAM_ID не задан" };
+
+  const lastBackupAt = getLastBackupAt(db);
+  if (!shouldRunBackup(now, lastBackupAt, intervalHours)) return { sent: false, reason: "не время" };
+
+  return sendBackupNow(db, { botToken, adminTelegramId }, now);
 }

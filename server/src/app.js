@@ -7,11 +7,12 @@ import { validateInitData } from "./initData.js";
 import {
   saveUserPlan, insertEvent,
   getUserPro, countPlanGenerationsSince, savePlanHistory, listPlanHistory,
-  saveFeedback, listRecentFeedback,
+  saveFeedback, listRecentFeedback, updateMealTimesForUser,
 } from "./db.js";
 import { planReplyForUpdate, buildWelcomeText, buildFeedbackAckText, buildFeedbackListText } from "./webhook.js";
 import { sendTelegramMessage } from "./telegram.js";
 import { sendDigestNow } from "./digest.js";
+import { sendBackupNow } from "./backup.js";
 
 const MEAL_TYPES = new Set(["breakfast", "lunch", "dinner", "snack"]);
 const MAX_EVENT_NAME_LENGTH = 64;
@@ -160,6 +161,24 @@ export function parseSavePlanRequest(body, telegramUserId) {
   };
 }
 
+/** {mealTimes: {breakfast: "08:00", ...}} — не обязательно все 4 типа сразу,
+ * только те, что реально поменялись. Отдельно от parseSavePlanRequest —
+ * этот запрос не привязан к конкретному плану вообще, просто обновляет
+ * время у уже сохранённых слотов (см. updateMealTimesForUser в db.js). */
+export function parseMealTimesRequest(body, telegramUserId) {
+  const { mealTimes } = body;
+  if (!mealTimes || typeof mealTimes !== "object" || Array.isArray(mealTimes)) {
+    return { ok: false, error: "mealTimes отсутствует" };
+  }
+  const entries = Object.entries(mealTimes);
+  if (entries.length === 0) return { ok: false, error: "mealTimes пуст" };
+  for (const [mealType, mealTime] of entries) {
+    if (!MEAL_TYPES.has(mealType)) return { ok: false, error: `неизвестный mealType: ${mealType}` };
+    if (!/^\d{2}:\d{2}$/.test(mealTime)) return { ok: false, error: `неверный формат времени для ${mealType}: ${mealTime}` };
+  }
+  return { ok: true, value: { telegramUserId, mealTimes } };
+}
+
 export function createApp(db, { botToken, adminTelegramId = null, webhookSecret = null }) {
   return createServer(async (req, res) => {
     if (req.method === "OPTIONS") {
@@ -265,6 +284,23 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
       return;
     }
 
+    if (req.method === "POST" && req.url === "/api/meal-times") {
+      const auth = await readAuthenticatedBody(req, botToken);
+      if (!auth.ok) return sendJson(res, auth.status, { ok: false, error: auth.error });
+
+      const parsed = parseMealTimesRequest(auth.body, auth.telegramUserId);
+      if (!parsed.ok) return sendJson(res, 400, { ok: false, error: parsed.error });
+
+      try {
+        const updated = updateMealTimesForUser(db, parsed.value.telegramUserId, parsed.value.mealTimes);
+        sendJson(res, 200, { ok: true, updated });
+      } catch (err) {
+        console.error("[api/meal-times] ошибка обновления:", err);
+        sendJson(res, 500, { ok: false, error: "не удалось обновить время приёмов пищи" });
+      }
+      return;
+    }
+
     if (req.method === "POST" && req.url === "/api/plans/list") {
       const auth = await readAuthenticatedBody(req, botToken);
       if (!auth.ok) return sendJson(res, auth.status, { ok: false, error: auth.error });
@@ -303,6 +339,8 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
           await sendTelegramMessage(botToken, reply.chatId, buildWelcomeText());
         } else if (reply?.kind === "report") {
           await sendDigestNow(db, { botToken, adminTelegramId });
+        } else if (reply?.kind === "backup") {
+          await sendBackupNow(db, { botToken, adminTelegramId });
         } else if (reply?.kind === "list_feedback") {
           await sendTelegramMessage(botToken, reply.chatId, buildFeedbackListText(listRecentFeedback(db)));
         } else if (reply?.kind === "feedback") {

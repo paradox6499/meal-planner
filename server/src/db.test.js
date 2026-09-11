@@ -4,7 +4,7 @@ import {
   insertEvent, summarizeEventsSince, getLastDigestAt, setLastDigestAt,
   getLastBackupAt, setLastBackupAt,
   setUserPro, getUserPro, countPlanGenerationsSince, savePlanHistory, listPlanHistory,
-  saveFeedback, listRecentFeedback,
+  saveFeedback, listRecentFeedback, updateMealTimesForUser,
 } from "./db.js";
 
 describe("db", () => {
@@ -226,5 +226,58 @@ describe("обращения в поддержку (feedback)", () => {
       saveFeedback(db, { telegramUserId: 1, text: `сообщение ${i}`, createdAtISO: `2026-09-10T09:0${i}:00Z` });
     }
     expect(listRecentFeedback(db, 2)).toHaveLength(2);
+  });
+});
+
+// Регрессия на жалобу в чате: изменение времени приёма пищи в Аккаунте не
+// доходило до сервера, если в текущей открытой сессии не было
+// свежесобранного плана (единственный путь раньше — saveUserPlan целиком,
+// вместе со всем планом). updateMealTimesForUser обновляет meal_time для
+// уже сохранённых слотов напрямую, без плана вообще.
+describe("updateMealTimesForUser", () => {
+  let db;
+  beforeEach(() => {
+    db = openDb(":memory:");
+    saveUserPlan(db, {
+      telegramUserId: 42, timezoneOffsetMinutes: 180, reminderLeadMinutes: 30,
+      mealSlots: [
+        { scheduledDate: "2026-09-10", mealType: "lunch", mealLabel: "Обед", mealTime: "13:00", recipeName: "Паста" },
+        { scheduledDate: "2026-09-10", mealType: "dinner", mealLabel: "Ужин", mealTime: "19:00", recipeName: "Суп" },
+        { scheduledDate: "2026-09-11", mealType: "lunch", mealLabel: "Обед", mealTime: "13:00", recipeName: "Салат" },
+      ],
+    });
+  });
+
+  it("обновляет meal_time для всех слотов указанного типа приёма пищи, не трогая остальные", () => {
+    updateMealTimesForUser(db, 42, { lunch: "14:30" });
+    const rows = findCandidateSlots(db, "2026-09-10", "2026-09-11");
+    const byType = Object.fromEntries(rows.map((r) => [`${r.scheduled_date}-${r.meal_type}`, r.meal_time]));
+    expect(byType["2026-09-10-lunch"]).toBe("14:30");
+    expect(byType["2026-09-11-lunch"]).toBe("14:30");
+    expect(byType["2026-09-10-dinner"]).toBe("19:00"); // не тронут
+  });
+
+  it("можно обновить несколько типов приёма пищи за один вызов", () => {
+    updateMealTimesForUser(db, 42, { lunch: "14:00", dinner: "20:00" });
+    const rows = findCandidateSlots(db, "2026-09-10", "2026-09-11");
+    const byType = Object.fromEntries(rows.map((r) => [`${r.scheduled_date}-${r.meal_type}`, r.meal_time]));
+    expect(byType["2026-09-10-lunch"]).toBe("14:00");
+    expect(byType["2026-09-10-dinner"]).toBe("20:00");
+  });
+
+  it("не падает и возвращает 0, если у пользователя ещё нет сохранённого плана", () => {
+    const updated = updateMealTimesForUser(db, 999, { lunch: "14:00" });
+    expect(updated).toBe(0);
+  });
+
+  it("не путает время разных пользователей", () => {
+    saveUserPlan(db, {
+      telegramUserId: 7, timezoneOffsetMinutes: 180, reminderLeadMinutes: 30,
+      mealSlots: [{ scheduledDate: "2026-09-10", mealType: "lunch", mealLabel: "Обед", mealTime: "13:00", recipeName: "План юзера 7" }],
+    });
+    updateMealTimesForUser(db, 42, { lunch: "15:00" });
+    const rows = findCandidateSlots(db, "2026-09-10", "2026-09-11");
+    const user7Row = rows.find((r) => r.telegram_user_id === 7);
+    expect(user7Row.meal_time).toBe("13:00"); // не тронут
   });
 });

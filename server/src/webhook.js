@@ -1,12 +1,13 @@
 // Входящие сообщения от Telegram (раньше бот умел только ОТПРАВЛЯТЬ —
 // напоминания/дайджест/бэкап, но никогда не получал и не отвечал на то, что
-// пишут ему). Три сценария: приветствие новым пользователям на /start
-// ("нажмите Открыть, чтобы запустить приложение"), команда /report для
-// админа — посмотреть отчёт по событиям прямо сейчас, и — то, что просили
-// в чате — любое другое сообщение сохраняется как обращение в поддержку
-// (кнопка "Написать в поддержку" в приложении ведёт в чат с самим ботом, не
-// на личный аккаунт разработчика), плюс /feedback для админа — посмотреть
-// накопленные обращения.
+// пишут ему). Сценарии: приветствие новым пользователям на /start
+// ("нажмите Открыть, чтобы запустить приложение"), /report для админа —
+// посмотреть отчёт по событиям прямо сейчас, /feedback — посмотреть
+// накопленные обращения, /backup — получить свежий снимок БД прямо сейчас,
+// не дожидаясь следующего интервала (см. BACKUP_INTERVAL_HOURS), и — то, что
+// просили в чате — любое другое сообщение сохраняется как обращение в
+// поддержку (кнопка "Написать в поддержку" в приложении ведёт в чат с самим
+// ботом, не на личный аккаунт разработчика).
 //
 // planReplyForUpdate — чистая функция без побочных эффектов (не шлёт
 // сообщения сама, не трогает БД): разбирает Update от Telegram и решает,
@@ -40,7 +41,7 @@ export function buildFeedbackListText(items) {
 /**
  * @param {object} update — Update от Telegram (см. core.telegram.org/bots/api#update)
  * @param {{ adminTelegramId?: number|null }} [opts]
- * @returns {{ chatId: number, kind: "start" | "report" | "list_feedback" } |
+ * @returns {{ chatId: number, kind: "start" | "report" | "list_feedback" | "backup" } |
  *           { chatId: number, kind: "feedback", telegramUserId: number, text: string } | null}
  */
 export function planReplyForUpdate(update, { adminTelegramId = null } = {}) {
@@ -55,13 +56,16 @@ export function planReplyForUpdate(update, { adminTelegramId = null } = {}) {
     return { chatId, kind: "start" };
   }
 
-  // Обе команды — только сам админ, иначе любой пользователь мог бы
-  // выдёргивать внутреннюю статистику или чужие обращения командой.
+  // Все три — только сам админ, иначе любой пользователь мог бы выдёргивать
+  // внутреннюю статистику, чужие обращения или сам файл базы командой.
   if (text === "/report") {
     return adminTelegramId && chatId === adminTelegramId ? { chatId, kind: "report" } : null;
   }
   if (text === "/feedback") {
     return adminTelegramId && chatId === adminTelegramId ? { chatId, kind: "list_feedback" } : null;
+  }
+  if (text === "/backup") {
+    return adminTelegramId && chatId === adminTelegramId ? { chatId, kind: "backup" } : null;
   }
 
   // Сам админ, тестируя бота командами не по назначению (например, опечатка

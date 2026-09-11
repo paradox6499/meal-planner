@@ -60,6 +60,15 @@ describe("planReplyForUpdate", () => {
     expect(planReplyForUpdate(mkUpdate("/feedback", { chatId: 999 }), { adminTelegramId: 777 })).toBeNull();
   });
 
+  it("/backup от админа -> kind:backup", () => {
+    const reply = planReplyForUpdate(mkUpdate("/backup", { chatId: 777 }), { adminTelegramId: 777 });
+    expect(reply).toEqual({ chatId: 777, kind: "backup" });
+  });
+
+  it("/backup от НЕ админа -> null", () => {
+    expect(planReplyForUpdate(mkUpdate("/backup", { chatId: 999 }), { adminTelegramId: 777 })).toBeNull();
+  });
+
   it("произвольный текст от обычного пользователя -> kind:feedback с текстом и telegramUserId (кнопка «Написать в поддержку» ведёт в чат с ботом)", () => {
     const reply = planReplyForUpdate(mkUpdate("Не находит цены на творог", { chatId: 42 }), { adminTelegramId: 777 });
     expect(reply).toEqual({ chatId: 42, kind: "feedback", telegramUserId: 42, text: "Не находит цены на творог" });

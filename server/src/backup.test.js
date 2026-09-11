@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { openDb, saveUserPlan, getLastBackupAt } from "./db.js";
-import { shouldRunBackup, runBackup } from "./backup.js";
+import { shouldRunBackup, runBackup, sendBackupNow } from "./backup.js";
 
 describe("shouldRunBackup", () => {
   it("true, если бэкапа ещё не было", () => {
@@ -63,5 +63,39 @@ describe("runBackup", () => {
     expect(result.reason).toMatch(/network down/);
     // время бэкапа не должно обновиться при неудаче — иначе следующая попытка отложится напрасно
     expect(getLastBackupAt(db)).toBeNull();
+  });
+});
+
+describe("sendBackupNow", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("не шлёт и объясняет причину без ADMIN_TELEGRAM_ID", async () => {
+    const db = openDb(":memory:");
+    const result = await sendBackupNow(db, { botToken: "x", adminTelegramId: null });
+    expect(result.sent).toBe(false);
+    expect(result.reason).toMatch(/ADMIN_TELEGRAM_ID/);
+  });
+
+  it("шлёт НЕЗАВИСИМО от того, отправлялся ли уже бэкап недавно (для команды /backup)", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({ ok: true, result: {} }) }));
+    const db = openDb(":memory:");
+
+    const first = await sendBackupNow(db, { botToken: "TOKEN", adminTelegramId: 777 }, new Date("2026-09-10T09:00:00Z"));
+    expect(first.sent).toBe(true);
+
+    // сразу второй раз — runBackup бы отказал (интервал не прошёл), а sendBackupNow шлёт всегда
+    const second = await sendBackupNow(db, { botToken: "TOKEN", adminTelegramId: 777 }, new Date("2026-09-10T09:05:00Z"));
+    expect(second.sent).toBe(true);
+  });
+
+  it("обновляет last_backup_at — последующий автоматический runBackup не задваивает в тот же интервал", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({ ok: true, result: {} }) }));
+    const db = openDb(":memory:");
+
+    await sendBackupNow(db, { botToken: "TOKEN", adminTelegramId: 777 }, new Date("2026-09-10T09:00:00Z"));
+    expect(getLastBackupAt(db)).toBe("2026-09-10T09:00:00.000Z");
+
+    const autoRun = await runBackup(db, { botToken: "TOKEN", adminTelegramId: 777, intervalHours: 24 }, new Date("2026-09-10T15:00:00Z"));
+    expect(autoRun.sent).toBe(false); // интервал не прошёл с ручной отправки
   });
 });

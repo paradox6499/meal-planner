@@ -141,6 +141,26 @@ export function markReminderSent(db, slotId, sentAtISO) {
   db.prepare("UPDATE meal_slots SET reminder_sent_at = ? WHERE id = ?").run(sentAtISO, slotId);
 }
 
+/** Время приёмов пищи раньше долетало до сервера ТОЛЬКО вместе с целым
+ * планом (saveUserPlan выше) — то есть только если в текущей открытой
+ * сессии есть свежесобранный план (см. useEffect в App.jsx, который зовёт
+ * submitPlanToBackend). Если человек просто открыл Аккаунт поменять время
+ * приёма пищи, не пересобирая план заново — новое время никогда не попадало
+ * на сервер, и напоминания продолжали приходить (или не приходить) по
+ * старому времени. Здесь — обновление meal_time для уже сохранённых слотов
+ * НАПРЯМУЮ, без пересборки всего плана; mealTimesByType — {mealType: "HH:MM"},
+ * не обязательно все 4 сразу. Если сохранённого плана ещё нет вообще —
+ * просто ничего не находит и не обновляет, это не ошибка. */
+export function updateMealTimesForUser(db, telegramUserId, mealTimesByType) {
+  const stmt = db.prepare("UPDATE meal_slots SET meal_time = ? WHERE telegram_user_id = ? AND meal_type = ?");
+  let updated = 0;
+  for (const [mealType, mealTime] of Object.entries(mealTimesByType)) {
+    const result = stmt.run(mealTime, telegramUserId, mealType);
+    updated += result.changes;
+  }
+  return updated;
+}
+
 /** props сериализуются в JSON-строку прямо тут — вызывающему коду (app.js)
  * достаточно передать обычный объект, ему не нужно знать про формат хранения. */
 export function insertEvent(db, { telegramUserId, eventName, props, createdAtISO }) {
