@@ -96,6 +96,31 @@ export async function fetchPlanHistory() {
   }
 }
 
+/** Обновляет время приёмов пищи для УЖЕ сохранённого на сервере плана,
+ * напрямую, без пересборки всего плана (см. server/src/db.js:
+ * updateMealTimesForUser). Раньше время долетало до сервера только вместе
+ * с целым планом — если человек открывал Аккаунт поменять время, не
+ * пересобирая план заново (например, зашёл в свежей сессии только за этим),
+ * новое время никогда не сохранялось, и напоминания продолжали приходить
+ * по старому времени (или не приходить вовсе, если плана ещё не было).
+ * best-effort, как и всё остальное здесь — если сохранённого плана ещё нет,
+ * сервер просто ничего не найдёт и не обновит, это не ошибка. */
+export async function updateMealTimes(mealTimes) {
+  const backendUrl = import.meta.env.VITE_BACKEND_URL;
+  const initData = currentInitData();
+  if (!backendUrl || !initData) return;
+
+  try {
+    await fetch(`${backendUrl}/api/meal-times`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ initData, mealTimes }),
+    });
+  } catch (err) {
+    console.warn("Не удалось обновить время приёмов пищи на сервере:", err.message);
+  }
+}
+
 export async function submitPlanToBackend(planView, mealTimes) {
   const backendUrl = import.meta.env.VITE_BACKEND_URL;
   if (!backendUrl) return; // бэкенд ещё не задеплоен — молча ничего не делаем, это ок

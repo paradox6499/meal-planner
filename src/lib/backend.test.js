@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { buildMealSlots, todayPlusDays, checkPlanStatus, savePlanToHistory, fetchPlanHistory } from "./backend.js";
+import { buildMealSlots, todayPlusDays, checkPlanStatus, savePlanToHistory, fetchPlanHistory, updateMealTimes } from "./backend.js";
 
 function stubTelegram(initData) {
   vi.stubGlobal("window", { Telegram: initData !== undefined ? { WebApp: { initData } } : undefined });
@@ -117,6 +117,42 @@ describe("savePlanToHistory", () => {
     stubTelegram("x");
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("boom")));
     await expect(savePlanToHistory({ storeId: "vv", storeName: "В", budget: 1, family: 1, plan: {} })).resolves.toBeUndefined();
+  });
+});
+
+describe("updateMealTimes", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+  });
+
+  it("ничего не делает без бэкенда/вне Telegram", async () => {
+    vi.stubEnv("VITE_BACKEND_URL", "");
+    stubTelegram("x");
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    await updateMealTimes({ lunch: "13:00" });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("шлёт POST /api/meal-times с initData и временем", async () => {
+    vi.stubEnv("VITE_BACKEND_URL", "https://api.example.com");
+    stubTelegram("initdata-blob");
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await updateMealTimes({ lunch: "13:00", dinner: "20:00" });
+
+    expect(fetchMock).toHaveBeenCalledWith("https://api.example.com/api/meal-times", expect.objectContaining({ method: "POST" }));
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body).toEqual({ initData: "initdata-blob", mealTimes: { lunch: "13:00", dinner: "20:00" } });
+  });
+
+  it("не бросает исключение при сетевой ошибке", async () => {
+    vi.stubEnv("VITE_BACKEND_URL", "https://api.example.com");
+    stubTelegram("x");
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("boom")));
+    await expect(updateMealTimes({ lunch: "13:00" })).resolves.toBeUndefined();
   });
 });
 

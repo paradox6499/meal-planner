@@ -29,11 +29,31 @@ describe("vkusvillIngredientToTriple", () => {
     expect(vkusvillIngredientToTriple({ name: "Гречка", quantity: "400 г" })).toEqual(["Гречка", 400, "г"]);
   });
 
-  it("регрессия: '1 ст. л.' не матчит голую точку перед 'л' (раньше [\\d.,]+ был слишком жадным -> NaN)", () => {
-    expect(vkusvillIngredientToTriple({ name: "Масло растительное", quantity: "1 ст. л." })).toBeNull();
+  it("регрессия: '1 ст. л.' не путается с целым литром (раньше [\\d.,]+ был слишком жадным -> NaN, или того хуже — 'л')", () => {
+    const result = vkusvillIngredientToTriple({ name: "Масло растительное", quantity: "1 ст. л." });
+    expect(result[2]).not.toBe("л");
+    expect(Number.isNaN(result[1])).toBe(false);
   });
 
-  it("возвращает null для неизмеримых количеств вместо NaN", () => {
+  // Регрессия на жалобу в чате: "блюдо стоит 116 ₽, но все его ингредиенты
+  // явно не могут столько стоить" — причина была именно здесь: ложки,
+  // зубчики и щепотки раньше возвращали null и полностью выпадали из
+  // расчёта цены и из списка покупок, а не только "по вкусу" (у которого
+  // действительно нет осмысленного числа).
+  it("переводит столовые/чайные ложки и зубчики в граммы вместо null", () => {
+    expect(vkusvillIngredientToTriple({ name: "Масло растительное", quantity: "1 ст. л." })).toEqual(["Масло растительное", 15, "г"]);
+    expect(vkusvillIngredientToTriple({ name: "Сахар", quantity: "2 ст.л." })).toEqual(["Сахар", 30, "г"]);
+    expect(vkusvillIngredientToTriple({ name: "Соль", quantity: "1 ч. л." })).toEqual(["Соль", 5, "г"]);
+    expect(vkusvillIngredientToTriple({ name: "Уксус", quantity: "0.5 чайной ложки" })).toEqual(["Уксус", 2.5, "г"]);
+    expect(vkusvillIngredientToTriple({ name: "Чеснок", quantity: "2 зубчика" })).toEqual(["Чеснок", 10, "г"]);
+  });
+
+  it("переводит щепотку в 1 г вместо null", () => {
+    expect(vkusvillIngredientToTriple({ name: "Соль", quantity: "щепотка" })).toEqual(["Соль", 1, "г"]);
+    expect(vkusvillIngredientToTriple({ name: "Перец", quantity: "щепотку" })).toEqual(["Перец", 1, "г"]);
+  });
+
+  it("возвращает null только для действительно неизмеримых количеств", () => {
     expect(vkusvillIngredientToTriple({ name: "Соль", quantity: "по вкусу" })).toBeNull();
     expect(vkusvillIngredientToTriple({ name: "Перец", quantity: "" })).toBeNull();
     expect(vkusvillIngredientToTriple({ name: "Специи" })).toBeNull(); // quantity вообще отсутствует

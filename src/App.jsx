@@ -4,8 +4,8 @@ import { ALLERGENS } from "./data/recipes.js";
 import { buildCartFromShoppingList, toVkusvillQuantity, clearMcpCache } from "./lib/vkusvillMcp.js";
 import { fetchVkusvillPools, getSubstituteOptions, attachRealCosts } from "./lib/vkusvillRecipes.js";
 import { loadProfile, saveProfile, clearProfile, loadTheme, saveTheme } from "./lib/profile.js";
-import { buildPools, buildInitialPlan, buildPlanView } from "./lib/planLogic.js";
-import { submitPlanToBackend, checkPlanStatus, savePlanToHistory, fetchPlanHistory } from "./lib/backend.js";
+import { buildPools, buildInitialPlan, buildPlanView, interleaveGroups } from "./lib/planLogic.js";
+import { submitPlanToBackend, checkPlanStatus, savePlanToHistory, fetchPlanHistory, updateMealTimes } from "./lib/backend.js";
 import { trackEvent } from "./lib/analytics.js";
 import logoUrl from "./assets/logo.svg";
 import { hapticSelect, hapticImpact, hapticNotify } from "./lib/haptics.js";
@@ -419,6 +419,14 @@ export default function MealPlanner() {
   const handleSaveProfile = () => {
     hapticNotify("success");
     saveProfile({ family, meals, diet, allergies, cuisines, devices, displayName, mealTimes, maxCookTime });
+    // Раньше время приёмов пищи долетало до сервера напоминаний ТОЛЬКО вместе
+    // с целым планом (см. useEffect ниже на submitPlanToBackend) — если
+    // открыть Аккаунт и поменять время, не пересобирая план заново в этой же
+    // сессии, новое время никогда не сохранялось на сервере, и напоминания
+    // продолжали приходить по старому времени. Обновляем его отдельно и
+    // сразу же, best-effort — как и всё остальное здесь, без бэкенда просто
+    // ничего не произойдёт.
+    updateMealTimes(mealTimes);
   };
   const handleClearProfile = () => {
     clearProfile();
@@ -1379,7 +1387,7 @@ function ResultView({ plan, storeId, storeName, budget, family, mealsCount, diet
       // Товары с выбранной заменой идут в корзину СВОИМ xml_id/ценой
       // (уже знаем их из getSubstituteOptions) — без повторного поиска по
       // названию исходного ингредиента, см. комментарий в resolvePrices.
-      const items = plan.grouped.flatMap((g) => g.items).map((it) => {
+      const items = interleaveGroups(plan.grouped).map((it) => {
         const sub = subs[it.name];
         return sub
           ? { name: sub.name, amount: it.amount, unit: it.unit, xmlId: sub.xmlId, knownPrice: sub.price, knownUnit: sub.productUnit }

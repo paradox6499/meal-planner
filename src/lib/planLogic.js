@@ -237,3 +237,31 @@ export function buildPlanView(planState, pools, family, priceByName) {
     anyEstimated, anyUnpriced: itemized && unpricedCount > 0, mostlyUnpriced,
   };
 }
+
+/** plan.grouped идёт по отделам (см. DEPARTMENTS в data/recipes.js) — "Овощи
+ * и фрукты" всегда первый. При сборке настоящей корзины (buildCartFromShoppingList
+ * в vkusvillMcp.js) товары ищутся в ЭТОМ ЖЕ порядке с ограниченным
+ * параллелизмом (см. mapWithConcurrency) — если ВкусВилл начинает лимитировать
+ * запросы посреди сборки, страдают непропорционально ПОЗДНИЕ по порядку
+ * товары. Жалоба в чате: "в корзине 10 позиций, и то все овощи, без бакалеи"
+ * — овощи просто были первым отделом и успели пройти ДО того, как лимит
+ * включился, а бакалея/мясо/молочное шли следом и не успели вообще.
+ * interleaveGroups превращает [овощи...][молочное...][мясо...] в
+ * [овощ, молочное, мясо, овощ, молочное, мясо, ...] — если лимит всё же
+ * наступит на середине списка, потери размажутся по всем отделам примерно
+ * поровну, а не выкосят всё "после овощей" целиком. */
+export function interleaveGroups(groups) {
+  const queues = groups.map((g) => [...g.items]);
+  const result = [];
+  let anyLeft = true;
+  while (anyLeft) {
+    anyLeft = false;
+    for (const q of queues) {
+      if (q.length > 0) {
+        result.push(q.shift());
+        anyLeft = true;
+      }
+    }
+  }
+  return result;
+}

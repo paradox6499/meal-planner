@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildPools, buildInitialPlan, buildPlanView } from "./planLogic.js";
+import { buildPools, buildInitialPlan, buildPlanView, interleaveGroups } from "./planLogic.js";
 import { ALLERGENS } from "../data/recipes.js";
 
 const DIETS = ["any", "pp", "veg", "vegan", "gf"];
@@ -279,5 +279,48 @@ describe("buildPlanView", () => {
   it("mostlyUnpriced=false вне итемизированного режима (не-ВкусВилл — там своя, старая логика)", () => {
     const view = buildPlanView(planState, pools, 2, null);
     expect(view.mostlyUnpriced).toBe(false);
+  });
+});
+
+// Регрессия на жалобу в чате: "в корзине 10 позиций, и то все овощи, без
+// бакалеи" — сборка настоящей корзины идёт по plan.grouped ПОСЛЕДОВАТЕЛЬНО
+// отдел за отделом; если ВкусВилл лимитирует запросы посреди сборки,
+// непропорционально страдают отделы, которые шли позже. interleaveGroups
+// перемешивает так, чтобы соседние товары в списке принадлежали разным
+// отделам — частичная потеря размазывается ровно, а не выкашивает "всё после
+// овощей" целиком.
+describe("interleaveGroups", () => {
+  it("чередует товары из разных групп вместо порядка 'группа за группой'", () => {
+    const groups = [
+      { name: "Овощи и фрукты", items: [{ name: "морковь" }, { name: "лук" }, { name: "перец" }] },
+      { name: "Молочное и яйца", items: [{ name: "молоко" }, { name: "яйцо" }] },
+      { name: "Бакалея", items: [{ name: "мука" }] },
+    ];
+    const result = interleaveGroups(groups);
+    expect(result.map((it) => it.name)).toEqual(["морковь", "молоко", "мука", "лук", "яйцо", "перец"]);
+  });
+
+  it("не теряет ни одного товара и не путает их порядок внутри своей группы", () => {
+    const groups = [
+      { name: "A", items: [{ name: "a1" }, { name: "a2" }, { name: "a3" }, { name: "a4" }] },
+      { name: "B", items: [{ name: "b1" }] },
+    ];
+    const result = interleaveGroups(groups);
+    expect(result).toHaveLength(5);
+    // "a1" всегда раньше "a2" и т.д. — порядок внутри группы не переставлен, только чередование между группами
+    const aOrder = result.filter((it) => it.name.startsWith("a")).map((it) => it.name);
+    expect(aOrder).toEqual(["a1", "a2", "a3", "a4"]);
+  });
+
+  it("пустой список групп -> пустой результат, не падает", () => {
+    expect(interleaveGroups([])).toEqual([]);
+  });
+
+  it("группа с пустым items не мешает остальным", () => {
+    const groups = [
+      { name: "Пусто", items: [] },
+      { name: "Овощи", items: [{ name: "морковь" }] },
+    ];
+    expect(interleaveGroups(groups).map((it) => it.name)).toEqual(["морковь"]);
   });
 });
