@@ -444,7 +444,11 @@ export default function MealPlanner() {
           --glass-rgb: 255,255,255;
           --text-primary: #1c1c1e;
           --text-secondary: #6e6e73;
-          --text-tertiary: #8e8e93;
+          /* Было #8e8e93 — 2.88:1 на фоне страницы, ниже минимума WCAG AA
+             (4.5:1 для обычного текста). Этим цветом подписаны хинты/подписи/
+             футер по всему приложению, не мелочь. #6c6c70 даёт 4.61:1 с
+             запасом на самом светлом реальном фоне (голая --page-bg). */
+          --text-tertiary: #6c6c70;
           --accent: #0A84FF;
           --accent-2: #64D2FF;
           --danger: #FF3B30;
@@ -474,6 +478,14 @@ export default function MealPlanner() {
             --text-primary: #f2f2f7;
             --text-secondary: #b6b6bb;
             --text-tertiary: #8e8e93;
+            /* Раньше --warning-text вообще не переопределялся для тёмной
+               темы — оставался #8a5a1e (тёмно-коричневый, задуман для
+               светлого --warning-soft фона). На тёмном фоне это 2.69-3.34:1 —
+               заметно ниже AA, а этим цветом написано предупреждение "не
+               удалось получить цены" и хинт "сначала выберите рацион" —
+               сообщения, которые реально нужно прочитать. #ffc466 даёт
+               ~10-12:1 на тёмных фонах, остаётся в той же "тёплой" палитре. */
+            --warning-text: #ffc466;
             --hairline: rgba(255,255,255,0.1);
             --hairline-2: rgba(255,255,255,0.08);
             --card-shadow: 0 24px 60px rgba(0,0,0,0.55), inset 0 1px 0 rgba(255,255,255,0.06);
@@ -490,6 +502,7 @@ export default function MealPlanner() {
           --text-primary: #f2f2f7;
           --text-secondary: #b6b6bb;
           --text-tertiary: #8e8e93;
+          --warning-text: #ffc466;
           --hairline: rgba(255,255,255,0.1);
           --hairline-2: rgba(255,255,255,0.08);
           --card-shadow: 0 24px 60px rgba(0,0,0,0.55), inset 0 1px 0 rgba(255,255,255,0.06);
@@ -517,6 +530,20 @@ export default function MealPlanner() {
         @keyframes shimmer { 0% { background-position: 100% 50%; } 100% { background-position: 0 50%; } }
         .spin { animation: spin 1s linear infinite; }
         @keyframes spin { to { transform: rotate(360deg); } }
+        /* Раньше все анимации (переходы шагов, модалки, шиммер скелетона,
+           даже crutch-вращение спиннера) играли безусловно — ни одна не
+           уважала системную настройку "уменьшить движение" (укачивание,
+           вестибулярные нарушения и т.п.). Спиннер оставляем — он несёт
+           смысл (идёт загрузка), просто без вращения был бы непонятен;
+           у него уже линейный минимальный keyframe. Остальное — либо
+           убираем движение полностью (только opacity), либо сокращаем
+           длительность почти до нуля. */
+        @media (prefers-reduced-motion: reduce) {
+          .fade-in-up, .modal-card-in { animation-duration: .01ms !important; animation-iteration-count: 1 !important; }
+          .greeting-fade { animation: none !important; opacity: 1; }
+          .skeleton-bar { animation-duration: 2.8s !important; }
+          .chip { transition: none !important; }
+        }
         /* На узких экранах (телефон, в т.ч. внутри Telegram Mini App) — не
            плавающая карточка на фоне с большими полями, а карточка во весь
            экран, как у нативных приложений. 100dvh, а не 100vh — динамическая
@@ -1919,7 +1946,10 @@ const styles = {
   dayTag: { fontSize: 11, fontWeight: 700, color: ACCENT, marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.02em" },
   recipeRow: { display: "flex", alignItems: "center", gap: 8, padding: "5px 0", fontSize: 14 },
   timeBadge: { display: "flex", alignItems: "center", gap: 3, color: "var(--text-tertiary)", fontSize: 11, flexShrink: 0 },
-  swapBtn: (canSwap) => ({ display: "flex", alignItems: "center", justifyContent: "center", background: "none", border: "none", padding: 2, flexShrink: 0, color: ACCENT, cursor: canSwap ? "pointer" : "default", opacity: canSwap ? 0.8 : 0.25 }),
+  // padding было 2 — вместе с иконкой 14px тап-зона выходила ~18×18,
+  // заметно ниже минимума WCAG 2.5.8 AA (24×24) для часто используемого
+  // действия ("Заменить блюдо" на каждой строке рецепта). 9 даёт ~32×32.
+  swapBtn: (canSwap) => ({ display: "flex", alignItems: "center", justifyContent: "center", background: "none", border: "none", padding: 9, margin: -9, flexShrink: 0, color: ACCENT, cursor: canSwap ? "pointer" : "default", opacity: canSwap ? 0.8 : 0.25 }),
   deptLabelBtn: { display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%", background: "none", border: "none", padding: "4px 0", cursor: "pointer" },
   deptLabel: { fontSize: 12, fontWeight: 600, color: "var(--text-tertiary)", textTransform: "uppercase", letterSpacing: "0.02em" },
   listBox: { display: "flex", flexDirection: "column" },
