@@ -6,6 +6,12 @@ function stubTelegram(initData) {
 }
 
 describe("todayPlusDays", () => {
+  const originalTZ = process.env.TZ;
+  afterEach(() => {
+    vi.useRealTimers();
+    process.env.TZ = originalTZ;
+  });
+
   it("возвращает дату в формате YYYY-MM-DD", () => {
     expect(todayPlusDays(0)).toMatch(/^\d{4}-\d{2}-\d{2}$/);
   });
@@ -14,7 +20,29 @@ describe("todayPlusDays", () => {
     const start = new Date();
     const expected = new Date(start);
     expected.setDate(expected.getDate() + 10);
-    expect(todayPlusDays(10)).toBe(expected.toISOString().slice(0, 10));
+    const yyyy = expected.getFullYear();
+    const mm = String(expected.getMonth() + 1).padStart(2, "0");
+    const dd = String(expected.getDate()).padStart(2, "0");
+    expect(todayPlusDays(10)).toBe(`${yyyy}-${mm}-${dd}`);
+  });
+
+  // Регрессия на жалобу "напоминание вообще не приходит": раньше дата
+  // считалась через .toISOString() (UTC), а не локальные компоненты — для
+  // ЛЮБОГО пользователя с положительным смещением от UTC (вся Россия) это
+  // молча давало дату ВЧЕРА вместо СЕГОДНЯ, если открыть/собрать план в
+  // первые N часов локальных суток (N = смещение в часах: для Москвы, UTC+3,
+  // это полночь-3 утра; для Камчатки, UTC+12, — целых полсуток). Слот с
+  // "не той" датой никогда не попадал в today/tomorrow на сервере в нужный
+  // момент — напоминание просто никогда не отправлялось, без единой ошибки.
+  // Явно фиксируем TZ процесса на Europe/Moscow — иначе тест либо ничего не
+  // проверяет (если раннер и так в UTC, локальная и UTC-дата совпадут даже
+  // при старом баге), либо зависит от часового пояса машины, на которой
+  // запускается.
+  it("регрессия: 01:30 по Москве 13 сентября — локальная дата, а не предыдущий UTC-день (22:30 UTC 12 сентября)", () => {
+    process.env.TZ = "Europe/Moscow";
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 8, 13, 1, 30)); // месяцы в Date() — с 0, 8 = сентябрь; локальное время при TZ=Europe/Moscow
+    expect(todayPlusDays(0)).toBe("2026-09-13");
   });
 });
 
