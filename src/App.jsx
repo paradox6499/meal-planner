@@ -4,7 +4,7 @@ import { ALLERGENS } from "./data/recipes.js";
 import { buildCartFromShoppingList, toVkusvillQuantity, clearMcpCache } from "./lib/vkusvillMcp.js";
 import { fetchVkusvillPools, getSubstituteOptions, attachRealCosts } from "./lib/vkusvillRecipes.js";
 import { loadProfile, saveProfile, clearProfile, loadTheme, saveTheme } from "./lib/profile.js";
-import { buildPools, buildInitialPlan, buildPlanView, interleaveGroups } from "./lib/planLogic.js";
+import { buildPools, buildInitialPlan, buildPlanView, interleaveGroups, computeBudgetStreak, computeRecentSavings } from "./lib/planLogic.js";
 import { submitPlanToBackend, checkPlanStatus, savePlanToHistory, fetchPlanHistory, updateMealTimes } from "./lib/backend.js";
 import { trackEvent } from "./lib/analytics.js";
 import logoUrl from "./assets/logo.svg";
@@ -325,6 +325,23 @@ export default function MealPlanner() {
     setLimitBlocked(null);
 
     const selectedMeals = MEALS.filter((m) => meals.includes(m.id));
+    // Защита от пустого плана: у вернувшегося пользователя шаг "Приёмы пищи"
+    // в визарде пропускается (см. QUICK_STEP_KEYS) — meals берётся из
+    // состояния как есть. Кнопка "Сохранить как профиль" в Аккаунте теперь не
+    // даёт СОХРАНИТЬ meals: [], но само состояние meals общее на весь
+    // компонент и меняется сразу по клику на чекбоксы — если открыть Аккаунт,
+    // снять все галочки и закрыть БЕЗ сохранения (Назад), в live-состоянии
+    // meals всё равно останется [] до перезагрузки страницы. Без этой
+    // проверки buildInitialPlan тихо собрал бы "план" из 7 пустых дней (цикл
+    // по selectedMeals просто ни разу не выполнится, а warnings при этом
+    // остаются пустыми — сравните с реальной пустотой пула, которая warnings
+    // заполняет) — план выглядел бы "успешным", просто без единого блюда.
+    // Найдено при аудите комбинаций, не из жалобы в чате.
+    if (selectedMeals.length === 0) {
+      hapticNotify("error");
+      setShowAccount(true);
+      return;
+    }
     const neededCategories = [...new Set(selectedMeals.map((m) => m.category))];
     setAssembling(true);
 
@@ -791,6 +808,13 @@ export default function MealPlanner() {
             {currentStepKey === "devices" && (
               <StepShell icon={<Flame size={20} />} title="На чём будете готовить?" sub="Выберите доступную технику — рецепты подстроятся под неё">
                 <div style={styles.grid2}>
+                  <button
+                    className="chip"
+                    onClick={() => { hapticSelect(); setDevices(DEVICES.map((d) => d.id)); }}
+                    style={styles.storeChip(devices.length === DEVICES.length)}
+                  >
+                    <div style={{ fontWeight: 600 }}>Готовлю на всём</div>
+                  </button>
                   {DEVICES.map((d) => (
                     <button key={d.id} className="chip" onClick={() => toggleSimple(devices, setDevices, d.id)} style={styles.storeChip(devices.includes(d.id))}>
                       <div style={{ fontWeight: 600 }}>{d.label}</div>
@@ -1088,6 +1112,13 @@ function AccountView({
 
         <div style={{ ...styles.acctLabel, marginTop: 16 }}>Техника</div>
         <div style={styles.grid2}>
+          <button
+            className="chip"
+            onClick={() => { hapticSelect(); setDevices(DEVICES.map((d) => d.id)); }}
+            style={styles.storeChip(devices.length === DEVICES.length)}
+          >
+            <div style={{ fontWeight: 600 }}>Готовлю на всём</div>
+          </button>
           {DEVICES.map((d) => (
             <button key={d.id} className="chip" onClick={() => toggleSimple(devices, setDevices, d.id)} style={styles.storeChip(devices.includes(d.id))}>
               <div style={{ fontWeight: 600 }}>{d.label}</div>
@@ -1110,13 +1141,24 @@ function AccountView({
 
         <button
           onClick={handleSave}
-          disabled={!diet}
-          style={{ ...styles.navBtnPrimary, width: "100%", justifyContent: "center", marginTop: 18, opacity: diet ? 1 : 0.4 }}
+          disabled={!diet || meals.length === 0}
+          style={{ ...styles.navBtnPrimary, width: "100%", justifyContent: "center", marginTop: 18, opacity: diet && meals.length > 0 ? 1 : 0.4 }}
         >
           {saved ? <><Check size={16} /> Сохранено</> : "Сохранить как профиль"}
         </button>
         {!diet && (
           <p style={styles.acctWarnHint}>Сначала выберите рацион выше — без него план собрать не получится.</p>
+        )}
+        {/* Раньше тут не было никакой защиты: можно было снять все галочки в
+            "Приёмы пищи" выше и сохранить профиль с meals: [] — у вернувшегося
+            пользователя шаг "Приёмы пищи" в визарде пропускается (см.
+            QUICK_STEP_KEYS), поэтому это тихо давало каждую неделю "успешный"
+            план без единого блюда (buildInitialPlan просто ничего не делает
+            на пустом selectedMeals, warnings при этом тоже пустые — баннер
+            предупреждения не показывался вообще). Найдено при аудите
+            комбинаций, не из жалобы в чате. */}
+        {diet && meals.length === 0 && (
+          <p style={styles.acctWarnHint}>Выберите хотя бы один приём пищи выше — иначе план будет пустым.</p>
         )}
         {hasProfile && (
           <button onClick={onClear} style={styles.acctClearBtn}>
@@ -1126,6 +1168,7 @@ function AccountView({
       </div>
 
       <div style={styles.acctDivider} />
+      <ProgressSection planHistory={planHistory} />
       <AccountSubscriptionCard onOpenPro={onOpenPro} planStatus={planStatus} />
       <PlanHistorySection planHistory={planHistory} />
     </div>
@@ -1197,6 +1240,50 @@ function AccountSubscriptionCard({ onOpenPro, planStatus }) {
           <button onClick={() => { hapticImpact("light"); onOpenPro(); }} style={{ ...styles.orderBtn, marginTop: 4 }}>
             Перейти на Pro
           </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function pluralWeeks(n) {
+  const mod10 = n % 10, mod100 = n % 100;
+  if (mod10 === 1 && mod100 !== 11) return "неделю";
+  if ([2, 3, 4].includes(mod10) && ![12, 13, 14].includes(mod100)) return "недели";
+  return "недель";
+}
+
+// Геймификация — намеренно не очки/уровни/соревнование с другими (аудитория
+// здесь экономит, а не соревнуется, см. обсуждение в чате), а честное
+// отражение того, что человек и так делает: серия недель в рамках своего же
+// бюджета + сколько сэкономил. Считается на лету из уже загруженной истории
+// планов (computeBudgetStreak/computeRecentSavings в lib/planLogic.js) —
+// никакого нового сбора данных не понадобилось. Не рендерится вообще, если
+// показывать нечего (streak=0 и savings<=0) — молчаливое "у вас пока
+// нулевые достижения" не мотивирует, лучше просто не показывать блок, пока
+// не появится что-то реально положительное.
+function ProgressSection({ planHistory }) {
+  if (!planHistory || planHistory.length === 0) return null;
+  const streak = computeBudgetStreak(planHistory);
+  const savings = computeRecentSavings(planHistory);
+  if (streak === 0 && savings <= 0) return null;
+
+  return (
+    <div style={styles.acctSection}>
+      <div style={styles.progressCardsRow}>
+        {streak > 0 && (
+          <div style={styles.progressCard}>
+            <Flame size={18} color="#E8935A" />
+            <div style={styles.progressCardValue}>{streak}</div>
+            <div style={styles.progressCardLabel}>{pluralWeeks(streak)} подряд в бюджете</div>
+          </div>
+        )}
+        {savings > 0 && (
+          <div style={styles.progressCard}>
+            <Wallet size={18} color={ACCENT} />
+            <div style={styles.progressCardValue}>{savings.toLocaleString("ru-RU")} ₽</div>
+            <div style={styles.progressCardLabel}>сэкономлено за последние планы</div>
+          </div>
         )}
       </div>
     </div>
@@ -1853,6 +1940,10 @@ const styles = {
     color: active ? ACCENT : "var(--text-secondary)", fontSize: 11.5, fontWeight: 600,
   }),
   subCard: { border: "1px solid var(--hairline)", borderRadius: 20, padding: "16px 16px 18px", ...glass(0.5, 12) },
+  progressCardsRow: { display: "flex", gap: 10 },
+  progressCard: { flex: 1, minWidth: 0, border: "1px solid var(--hairline)", borderRadius: 16, padding: "14px 12px", ...glass(0.45, 10) },
+  progressCardValue: { fontSize: 20, fontWeight: 700, marginTop: 8, letterSpacing: "-0.01em" },
+  progressCardLabel: { fontSize: 11.5, color: "var(--text-tertiary)", marginTop: 2, lineHeight: 1.3 },
   freeBadge: { fontSize: 10.5, fontWeight: 700, color: "var(--text-tertiary)", background: "var(--track-bg)", padding: "2px 8px", borderRadius: 999, marginLeft: "auto" },
   proBadge: { fontSize: 10.5, fontWeight: 700, color: "#fff", background: ACCENT, padding: "2px 8px", borderRadius: 999, marginLeft: "auto" },
   historyDetail: { padding: "10px 14px", display: "flex", flexDirection: "column", gap: 6 },

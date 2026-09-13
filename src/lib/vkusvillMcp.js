@@ -45,9 +45,13 @@ export function clearMcpCache() {
   cache.clear();
 }
 
-// RATE_LIMIT_RETRY_DELAYS_MS — только для http_status 429 (см. callToolOnce
-// ниже). Раньше единичный 429 сразу превращался в "не нашли цену" для этого
-// товара — пауза и повтор часто успевают проскочить, не заставляя
+// RATE_LIMIT_RETRY_DELAYS_MS — для 429 И для err.retryable (таймаут/сеть/5xx,
+// см. callToolOnce ниже). Раньше повторялся только 429 — но живой прогон
+// показал, что часть неудач при сборке плана были вовсе не rate-limit'ом, а
+// таймаутом/сетевым сбоем/5xx от перегруженного сервера — они не имели
+// httpStatus вообще, поэтому ВСЕГДА проваливались с первой попытки, без
+// единого повтора. Раньше единичный 429 сразу превращался в "не нашли цену"
+// для этого товара — пауза и повтор часто успевают проскочить, не заставляя
 // пользователя вручную пересобирать весь план. Один повтор добавлен (было
 // 2 попытки, стало 3) — жалоба в чате "опять не нашли цены" повторилась и
 // после первой версии ретрая, часть burst'а из ~40-80 запросов всё равно не
@@ -60,7 +64,7 @@ async function callTool(name, args, opts = {}) {
     try {
       return await callToolOnce(name, args, opts);
     } catch (err) {
-      if (err.httpStatus === 429 && attempt < RATE_LIMIT_RETRY_DELAYS_MS.length) {
+      if ((err.httpStatus === 429 || err.retryable) && attempt < RATE_LIMIT_RETRY_DELAYS_MS.length) {
         // + случайный джиттер до 30% сверху: без него десятки запросов,
         // отклонённых одним и тем же burst-лимитом одновременно, ждали бы
         // РОВНО одинаковое время и повторялись бы снова ВСЕ ВМЕСТЕ — то
@@ -100,16 +104,30 @@ async function callToolOnce(name, args, { timeoutMs = DEFAULT_TIMEOUT_MS } = {})
       signal: controller.signal,
     });
   } catch (err) {
+    // retryable — таймаут и сетевой сбой почти всегда временные (перегрузка
+    // на секунду-две, моргнувшее соединение), а не "этого товара не
+    // существует" — прежде они проваливались с первой же попытки, без
+    // единого повтора (только 429 ретраился, см. callTool выше).
     if (err.name === "AbortError") {
-      throw new Error(`VkusVill MCP: таймаут (${timeoutMs}мс) при вызове ${name}`);
+      const e = new Error(`VkusVill MCP: таймаут (${timeoutMs}мс) при вызове ${name}`);
+      e.retryable = true;
+      throw e;
     }
-    throw new Error(`VkusVill MCP: сеть недоступна (${err.message})`);
+    const e = new Error(`VkusVill MCP: сеть недоступна (${err.message})`);
+    e.retryable = true;
+    throw e;
   } finally {
     clearTimeout(timer);
   }
 
   if (!res.ok) {
-    throw new Error(`VkusVill MCP: HTTP ${res.status} при вызове ${name}`);
+    const e = new Error(`VkusVill MCP: HTTP ${res.status} при вызове ${name}`);
+    e.httpStatus = res.status;
+    // 5xx — сервер сам признаёт, что ему сейчас плохо, есть смысл повторить;
+    // 4xx кроме 429 (неверный запрос и т.п.) — стабильно провалится и в
+    // следующий раз, повторять незачем.
+    if (res.status >= 500) e.retryable = true;
+    throw e;
   }
 
   const outer = await res.json();

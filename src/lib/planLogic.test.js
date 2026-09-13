@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildPools, buildInitialPlan, buildPlanView, interleaveGroups } from "./planLogic.js";
+import { buildPools, buildInitialPlan, buildPlanView, interleaveGroups, computeBudgetStreak, computeRecentSavings } from "./planLogic.js";
 import { ALLERGENS } from "../data/recipes.js";
 
 const DIETS = ["any", "pp", "veg", "vegan", "gf"];
@@ -322,5 +322,74 @@ describe("interleaveGroups", () => {
       { name: "Овощи", items: [{ name: "морковь" }] },
     ];
     expect(interleaveGroups(groups).map((it) => it.name)).toEqual(["морковь"]);
+  });
+});
+
+describe("computeBudgetStreak", () => {
+  it("считает подряд идущие планы в рамках бюджета от самого нового", () => {
+    const history = [
+      { budget: 4000, totalCost: 3800 },
+      { budget: 4000, totalCost: 4000 }, // ровно в бюджет — тоже засчитывается
+      { budget: 3000, totalCost: 2500 },
+      { budget: 3000, totalCost: 3500 }, // тут превысили — серия обрывается здесь
+      { budget: 3000, totalCost: 2000 }, // не считается, серия уже оборвана раньше
+    ];
+    expect(computeBudgetStreak(history)).toBe(3);
+  });
+
+  it("0, если самый свежий план уже превысил бюджет", () => {
+    expect(computeBudgetStreak([{ budget: 3000, totalCost: 3500 }])).toBe(0);
+  });
+
+  it("запись без totalCost (цены не удалось получить) обрывает серию, не пропускается молча", () => {
+    const history = [
+      { budget: 4000, totalCost: 3800 },
+      { budget: 4000, totalCost: null },
+      { budget: 4000, totalCost: 3000 }, // не должно засчитаться — серия уже оборвана
+    ];
+    expect(computeBudgetStreak(history)).toBe(1);
+  });
+
+  it("пустая история -> 0", () => {
+    expect(computeBudgetStreak([])).toBe(0);
+  });
+
+  it("все планы в бюджете -> длина серии равна всей истории", () => {
+    const history = Array.from({ length: 5 }, () => ({ budget: 3000, totalCost: 2900 }));
+    expect(computeBudgetStreak(history)).toBe(5);
+  });
+});
+
+describe("computeRecentSavings", () => {
+  it("суммирует (бюджет - потрачено) по последним N планам", () => {
+    const history = [
+      { budget: 4000, totalCost: 3800 }, // +200
+      { budget: 3000, totalCost: 3200 }, // -200
+      { budget: 3000, totalCost: 2500 }, // +500 — не входит при count=2
+    ];
+    expect(computeRecentSavings(history, 2)).toBe(0); // 200 + (-200)
+    expect(computeRecentSavings(history, 3)).toBe(500);
+  });
+
+  it("не прячет перерасход — итог может быть отрицательным", () => {
+    const history = [{ budget: 3000, totalCost: 4000 }];
+    expect(computeRecentSavings(history)).toBe(-1000);
+  });
+
+  it("записи без totalCost игнорируются, не портят сумму", () => {
+    const history = [
+      { budget: 4000, totalCost: 3800 }, // +200
+      { budget: 4000, totalCost: null },
+    ];
+    expect(computeRecentSavings(history)).toBe(200);
+  });
+
+  it("пустая история -> 0", () => {
+    expect(computeRecentSavings([])).toBe(0);
+  });
+
+  it("count по умолчанию — 4", () => {
+    const history = Array.from({ length: 6 }, () => ({ budget: 1000, totalCost: 900 })); // +100 каждый
+    expect(computeRecentSavings(history)).toBe(400); // только первые 4
   });
 });

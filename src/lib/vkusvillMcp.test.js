@@ -84,7 +84,10 @@ describe("кэширование read-only вызовов", () => {
   });
 
   it("неудачный вызов не попадает в кэш — следующий такой же запрос повторяет попытку", async () => {
-    fetch.mockResolvedValueOnce({ ok: false, status: 500 });
+    // 400, не 500/429/таймаут — специально НЕ retryable-ошибка здесь, иначе
+    // сам вызов внутренне ретраил бы несколько раз (см. отдельный describe
+    // ниже про повтор на 5xx/таймаут/сеть) и сбивал бы счётчик fetch.
+    fetch.mockResolvedValueOnce({ ok: false, status: 400 });
     await expect(searchProducts({ q: "молоко" })).rejects.toThrow();
     fetch.mockResolvedValueOnce(mockMcpResponse({ items: [] }));
     await expect(searchProducts({ q: "молоко" })).resolves.toEqual({ items: [] });
@@ -154,6 +157,60 @@ describe("повтор запроса при 429 (rate limit) — регресс
   it("не ретраит ошибки, отличные от 429 (например, некорректный запрос)", async () => {
     fetch.mockResolvedValue(mockMcpError({ code: "invalid_input", message: "Некорректный id товара", http_status: 400, retryable: false }));
     await expect(searchProducts({ q: "молоко" })).rejects.toThrow(/Некорректный id товара/);
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+});
+
+// Регрессия: раньше повторялся ТОЛЬКО 429 — таймаут/сетевой сбой/5xx
+// проваливались с первой же попытки без единого ретрая, хотя эти ошибки
+// обычно временные (перегрузка на секунду-две, моргнувшее соединение) не
+// меньше, чем rate-limit.
+describe("повтор запроса при таймауте/сетевом сбое/5xx — те же причины, что и 429, раньше не ретраились вовсе", () => {
+  beforeEach(() => {
+    clearMcpCache();
+    vi.stubGlobal("fetch", vi.fn());
+    vi.spyOn(Math, "random").mockReturnValue(0);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+    Math.random.mockRestore();
+  });
+
+  it("повторяет попытку после таймаута (AbortError) и получает успешный ответ", async () => {
+    vi.useFakeTimers();
+    const abortErr = Object.assign(new Error("This operation was aborted"), { name: "AbortError" });
+    fetch.mockRejectedValueOnce(abortErr).mockResolvedValueOnce(mockMcpResponse({ items: [{ xml_id: 1, name: "Молоко" }] }));
+    const promise = searchProducts({ q: "молоко" });
+    await vi.advanceTimersByTimeAsync(700);
+    const result = await promise;
+    expect(result.items[0].name).toBe("Молоко");
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("повторяет попытку после сетевой ошибки (не AbortError) и получает успешный ответ", async () => {
+    vi.useFakeTimers();
+    fetch.mockRejectedValueOnce(new TypeError("Failed to fetch")).mockResolvedValueOnce(mockMcpResponse({ items: [{ xml_id: 1, name: "Молоко" }] }));
+    const promise = searchProducts({ q: "молоко" });
+    await vi.advanceTimersByTimeAsync(700);
+    const result = await promise;
+    expect(result.items[0].name).toBe("Молоко");
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("повторяет попытку после HTTP 503 и получает успешный ответ", async () => {
+    vi.useFakeTimers();
+    fetch.mockResolvedValueOnce({ ok: false, status: 503 }).mockResolvedValueOnce(mockMcpResponse({ items: [{ xml_id: 1, name: "Молоко" }] }));
+    const promise = searchProducts({ q: "молоко" });
+    await vi.advanceTimersByTimeAsync(700);
+    const result = await promise;
+    expect(result.items[0].name).toBe("Молоко");
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("НЕ повторяет попытку после HTTP 400/404 (клиентская ошибка, не временная)", async () => {
+    fetch.mockResolvedValue({ ok: false, status: 404 });
+    await expect(searchProducts({ q: "молоко" })).rejects.toThrow(/HTTP 404/);
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 });

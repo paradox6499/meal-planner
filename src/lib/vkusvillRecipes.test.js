@@ -2,9 +2,9 @@ import { describe, it, expect, vi } from "vitest";
 
 vi.mock("./vkusvillMcp.js", async (importOriginal) => {
   const actual = await importOriginal();
-  return { ...actual, searchRecipes: vi.fn() };
+  return { ...actual, searchRecipes: vi.fn(), resolvePrices: vi.fn() };
 });
-import { searchRecipes } from "./vkusvillMcp.js";
+import { searchRecipes, resolvePrices } from "./vkusvillMcp.js";
 import {
   vkusvillIngredientToTriple,
   parseCookingTimeMinutes,
@@ -13,6 +13,8 @@ import {
   isWeightOrVolumeUnit,
   pricePerBaseUnit,
   searchRawRecipes,
+  attachRealCosts,
+  fetchVkusvillPools,
 } from "./vkusvillRecipes.js";
 
 describe("vkusvillIngredientToTriple", () => {
@@ -171,5 +173,160 @@ describe("searchRawRecipes — бюджет времени готовки", () =
     );
     const items = await searchRawRecipes({ ...baseArgs, maxCookTime: 40 });
     expect(items).toEqual([{ id: 1 }]);
+  });
+});
+
+// Регрессия на жалобу в чате: "куриная печень с черносливом за 16 ₽" — этому
+// блюду выставлялась цена, даже когда нашёлся только один (дешёвый)
+// ингредиент из нескольких, а самый дорогой молча выпадал из суммы.
+describe("attachRealCosts — цена блюда не выставляется по частичному совпадению ингредиентов", () => {
+  const mkPool = (ingr) => ({
+    breakfast: [], snack: [],
+    main: [{ id: "vv-1", name: "Куриная печень с черносливом", cost: 0, isRealPrice: false, ingr }],
+  });
+
+  it("не выставляет цену блюда, если совпал только дешёвый ингредиент из двух (печень не нашлась)", async () => {
+    resolvePrices.mockResolvedValue([
+      { matched: false, name: "Куриная печень" },
+      { matched: true, name: "Чернослив", price: 2, productUnit: "г" },
+    ]);
+    const pools = mkPool([["Куриная печень", 400, "г"], ["Чернослив", 30, "г"]]);
+    await attachRealCosts(pools);
+    const recipe = pools.main[0];
+    expect(recipe.cost).toBe(0); // не выставлена по одному дешёвому совпадению
+    expect(recipe.isRealPrice).toBe(false);
+  });
+
+  it("выставляет цену, если совпало большинство ингредиентов (строго больше половины)", async () => {
+    resolvePrices.mockResolvedValue([
+      { matched: true, name: "Куриная печень", price: 3, productUnit: "г" },
+      { matched: true, name: "Чернослив", price: 2, productUnit: "г" },
+    ]);
+    const pools = mkPool([["Куриная печень", 400, "г"], ["Чернослив", 30, "г"]]);
+    await attachRealCosts(pools);
+    const recipe = pools.main[0];
+    expect(recipe.cost).toBe(400 * 3 + 30 * 2); // 1260
+    expect(recipe.isRealPrice).toBe(true); // совпали оба — можно доверять полностью
+  });
+
+  it("3 ингредиента, совпали 2 из 3 — цена выставляется, но isRealPrice=false (не всё совпало)", async () => {
+    resolvePrices.mockResolvedValue([
+      { matched: true, name: "Печень", price: 3, productUnit: "г" },
+      { matched: true, name: "Чернослив", price: 2, productUnit: "г" },
+      { matched: false, name: "Лук" },
+    ]);
+    const pools = mkPool([["Печень", 400, "г"], ["Чернослив", 30, "г"], ["Лук", 50, "г"]]);
+    await attachRealCosts(pools);
+    const recipe = pools.main[0];
+    expect(recipe.cost).toBe(400 * 3 + 30 * 2);
+    expect(recipe.isRealPrice).toBe(false);
+  });
+
+  it("3 ингредиента, совпал только 1 из 3 — цена не выставляется", async () => {
+    resolvePrices.mockResolvedValue([
+      { matched: false, name: "Печень" },
+      { matched: true, name: "Чернослив", price: 2, productUnit: "г" },
+      { matched: false, name: "Лук" },
+    ]);
+    const pools = mkPool([["Печень", 400, "г"], ["Чернослив", 30, "г"], ["Лук", 50, "г"]]);
+    await attachRealCosts(pools);
+    expect(pools.main[0].cost).toBe(0);
+  });
+
+  it("несовпадение рода единиц (вес/объём vs штучно) не считается совпадением", async () => {
+    resolvePrices.mockResolvedValue([
+      { matched: true, name: "Печень", price: 3, productUnit: "г" },
+      { matched: true, name: "Яйцо", price: 8, productUnit: "шт" }, // товар штучный, а в рецепте — граммы
+    ]);
+    const pools = mkPool([["Печень", 400, "г"], ["Яйцо", 100, "г"]]);
+    await attachRealCosts(pools);
+    // Яйцо не засчиталось (разный род единиц) — совпал только 1 из 2, не строго больше половины
+    expect(pools.main[0].cost).toBe(0);
+  });
+});
+
+// Найдено при разборе этого же аудита (не из жалобы в чате): ВкусВилл отдаёт
+// состав рецепта НА ВСЕ raw.portions порций, а не на 1 человека — живой
+// вызов vkusvill_recipes подтвердил (id 5799226 "Итальянские фрикадельки из
+// индейки", portions:6, "Фарш из индейки 500 г" — то есть ~83 г на едока, не
+// 500 г). Весь остальной код (data/recipes.js, planLogic.js:buildPlanView)
+// считает recipe.ingr величиной "на 1 человека" — без деления на portions
+// здесь каждый рецепт с portions>1 (подавляющее большинство живых данных)
+// получал бы цену и позиции списка покупок, завышенные ровно в portions раз.
+describe("fetchVkusvillPools — количество ингредиентов делится на portions рецепта", () => {
+  const rawRecipe = (overrides) => ({
+    id: 1, name: "Тест", cooking_time: { name: "до 40 минут" }, steps: [],
+    ingredients: [{ name: "Фарш из индейки", quantity: "500 г" }],
+    portions: 6,
+    ...overrides,
+  });
+
+  it("делит количество ингредиента на portions (500 г / 6 порций = ~83.3 г на человека)", async () => {
+    searchRecipes.mockResolvedValue({ items: [rawRecipe()] });
+    resolvePrices.mockResolvedValue([]);
+    const { pools } = await fetchVkusvillPools({
+      diet: "any", cuisines: [], devices: [], allergies: [], categories: ["main"], maxCookTime: null,
+    });
+    expect(pools.main).toHaveLength(1);
+    const [name, amount, unit] = pools.main[0].ingr[0];
+    expect(name).toBe("Фарш из индейки");
+    expect(amount).toBeCloseTo(500 / 6, 5);
+    expect(unit).toBe("г");
+  });
+
+  it("portions отсутствует или 0 -> считаем как 1 порцию (количество не делится)", async () => {
+    searchRecipes.mockResolvedValue({ items: [rawRecipe({ portions: 0, id: 2 })] });
+    resolvePrices.mockResolvedValue([]);
+    const { pools } = await fetchVkusvillPools({
+      diet: "any", cuisines: [], devices: [], allergies: [], categories: ["main"], maxCookTime: null,
+    });
+    expect(pools.main[0].ingr[0][1]).toBe(500);
+  });
+
+  it("итоговая цена блюда — за 1 порцию, а не за все portions сразу", async () => {
+    searchRecipes.mockResolvedValue({ items: [rawRecipe({ id: 3 })] }); // 500 г / 6 порций
+    resolvePrices.mockResolvedValue([{ matched: true, name: "Фарш из индейки", price: 0.6, productUnit: "г" }]);
+    const { pools } = await fetchVkusvillPools({
+      diet: "any", cuisines: [], devices: [], allergies: [], categories: ["main"], maxCookTime: null,
+    });
+    // Правильно: (500/6) г * 0.6 ₽/г = 50 ₽ на человека.
+    // Баг (без деления на portions) посчитал бы 500 * 0.6 = 300 ₽ — в 6 раз больше.
+    expect(pools.main[0].cost).toBe(50);
+  });
+});
+
+// Найдено при этом же аудите: ВкусВилл принимает только ОДИН
+// id_cooking_method_filter за запрос. При 2+ выбранных устройствах раньше
+// брался "первый попавшийся" (порядок выбора пользователя), а остальные
+// молча отбрасывались — включая кейс кнопки "Готовлю на всём" (все 7
+// устройств сразу), где "первым" оказывается Плита: кнопка, которая должна
+// СНИМАТЬ ограничение по технике, вместо этого сужала ВкусВилл до плиты.
+describe("fetchVkusvillPools — id_cooking_method_filter при нескольких выбранных устройствах", () => {
+  const call = async (devices) => {
+    searchRecipes.mockResolvedValue({ items: [] });
+    resolvePrices.mockResolvedValue([]);
+    await fetchVkusvillPools({ diet: "any", cuisines: [], devices, allergies: [], categories: ["main"], maxCookTime: null });
+    return searchRecipes.mock.calls[0][0].id_cooking_method_filter;
+  };
+
+  it("одно устройство — фильтр применяется как раньше", async () => {
+    expect(await call(["stove"])).toBe(305758); // id ВкусВилл для "Плита"
+  });
+
+  it("несколько устройств с ОДИНАКОВЫМ способом готовки ВкусВилл — фильтр применяется", async () => {
+    // grill и air у ВкусВилл — один и тот же способ ("В духовке или на гриле")
+    expect(await call(["grill", "air"])).toBe(305759);
+  });
+
+  it("несколько устройств с РАЗНЫМИ способами готовки — фильтр не применяется (0), а не 'первое попавшееся'", async () => {
+    expect(await call(["grill", "stove"])).toBe(0);
+  });
+
+  it("регрессия 'Готовлю на всём': выбраны ВСЕ устройства — фильтр снят полностью, а не сведён к плите", async () => {
+    expect(await call(["stove", "oven", "micro", "multi", "air", "grill", "blender"])).toBe(0);
+  });
+
+  it("устройства не выбраны — фильтр не применяется (как и раньше)", async () => {
+    expect(await call([])).toBe(0);
   });
 });

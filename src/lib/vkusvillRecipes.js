@@ -131,8 +131,27 @@ export function vkusvillIngredientToTriple(ingredient) {
   return [ingredient.name, amount, unit];
 }
 
+// ВкусВилл отдаёт состав НА ВЕСЬ РЕЦЕПТ (raw.portions порций), не на одну
+// порцию — проверено вживую (vkusvill_recipes): "Итальянские фрикадельки из
+// индейки" при portions:6 несёт "Фарш из индейки 500 г" на все 6 порций
+// (~83 г на человека), а не на одного едока. Весь остальной код (recipe.ingr
+// в data/recipes.js, buildPlanView в planLogic.js — там total += cost*family
+// и amount*family) считает recipe.ingr ВСЕГДА величиной "на 1 человека" —
+// раньше это несоответствие никак не гасилось, и любой рецепт с portions>1
+// (подавляющее большинство: от 1 до 16 порций на живых данных) получал и
+// цену, и позиции списка покупок, завышенные ровно в `portions` раз. Именно
+// это, а не только частичное совпадение ингредиентов (см. attachRealCosts
+// выше), стоит за жалобами на "неправдоподобную" цену блюда в чате — просто
+// в другую сторону (переплата, а не заниженная цена). Делим здесь же, один
+// раз, чтобы дальше по цепочке (attachRealCosts, buildPlanView) recipe.ingr
+// уже было в тех же единицах "на человека", что и у data/recipes.js — без
+// такого пересчёта в двух местах.
 function normalizeVkusvillRecipe(raw, category) {
-  const ingr = (raw.ingredients || []).map(vkusvillIngredientToTriple).filter(Boolean);
+  const portions = raw.portions > 0 ? raw.portions : 1;
+  const ingr = (raw.ingredients || [])
+    .map(vkusvillIngredientToTriple)
+    .filter(Boolean)
+    .map(([name, amount, unit]) => [name, amount / portions, unit]);
   return {
     id: `vv-${raw.id}`,
     name: raw.name,
@@ -233,21 +252,31 @@ export async function attachRealCosts(pools) {
     recipes.forEach((recipe) => {
       if (recipe.ingr.length === 0) return;
       let total = 0;
-      let allMatched = true;
+      let matchedCount = 0;
       for (const [name, amount, unit] of recipe.ingr) {
         const info = priceByName.get(name);
         // единица нашего ингредиента и товара должны быть одного "рода"
         // (вес/объём vs штучно) — иначе почти наверняка посчитаем неверно,
         // лучше отказаться от точной цены для этого рецепта, чем соврать
-        if (!info || isWeightOrVolumeUnit(unit) !== isWeightOrVolumeUnit(info.productUnit)) {
-          allMatched = false;
-          continue;
-        }
+        if (!info || isWeightOrVolumeUnit(unit) !== isWeightOrVolumeUnit(info.productUnit)) continue;
         total += pricePerBaseUnit(info.price, info.productUnit) * amount;
+        matchedCount++;
       }
-      if (total > 0) {
+      // РАНЬШЕ: total>0 (хотя бы ОДИН ингредиент нашёлся) считалось
+      // достаточным, чтобы выставить recipe.cost всему блюду. Жалоба в чате:
+      // "куриная печень с черносливом за 16 ₽" — это блюдо буквально из 2
+      // ингредиентов: нашёлся только дешёвый чернослив, сама печень (самый
+      // дорогой) не нашлась в каталоге и молча выпала из суммы. Порог "не
+      // меньше половины" (>=) для ровно 2 ингредиентов пропустил бы этот же
+      // случай (1 из 2 — уже "половина") — поэтому строго БОЛЬШЕ половины
+      // (>), для 2 ингредиентов это требует совпадения обоих. Не идеальная
+      // защита (не спасёт, если не найдётся именно дорогой ингредиент при,
+      // например, 3 из 4), но отсекает самый частый и самый вредный случай:
+      // 1 дешёвая находка выдаётся за цену всего блюда.
+      const matchedEnough = matchedCount > recipe.ingr.length / 2;
+      if (total > 0 && matchedEnough) {
         recipe.cost = Math.round(total);
-        recipe.isRealPrice = allMatched;
+        recipe.isRealPrice = matchedCount === recipe.ingr.length;
       }
     });
   });
@@ -313,7 +342,24 @@ export async function searchRawRecipes({ q, categoryId, cookingMethod, excludeAl
 export async function fetchVkusvillPools({ diet, cuisines, devices, allergies, categories, maxCookTime }) {
   const effectiveAllergies = diet === "gf" && !allergies.includes("gluten") ? [...allergies, "gluten"] : allergies;
   const excludeAllergens = [...new Set(effectiveAllergies.map((a) => ALLERGEN_EXCLUDE_ID[a]).filter(Boolean))];
-  const cookingMethod = devices.map((d) => COOKING_METHOD_BY_DEVICE[d]).find(Boolean) || 0;
+  // ВкусВилл принимает ОДИН id_cooking_method_filter за запрос (см. комментарий
+  // у COOKING_METHOD_BY_DEVICE выше) — не список. Раньше при 2+ выбранных
+  // устройствах брали "первое совпадение" (devices.map(...).find(Boolean)) —
+  // то есть просто первый элемент ПОРЯДКА ВЫБОРА пользователя, который есть в
+  // карте, а остальные выбранные устройства молча игнорировались как будто их
+  // не выбирали вообще. Найдено при этом же аудите на кнопке "Готовлю на
+  // всём" (App.jsx): она выставляет ВСЕ 7 устройств сразу, а "первым
+  // совпадением" в порядке DEVICES оказывается stove — то есть кнопка,
+  // которая должна снимать ограничение по технике, для ВкусВилл вместо этого
+  // тихо сужала выдачу до "только на плите", ровно наоборот замыслу. Честный
+  // фильтр возможен только когда ВСЕ выбранные устройства ведут к ОДНОМУ и
+  // тому же способу готовки ВкусВилл (например только "Гриль"+"Аэрогриль" —
+  // у них общий id) — тогда применяем его. Если способов несколько
+  // (разнородный выбор ИЛИ "выбрано всё") — не фильтруем совсем: молча
+  // применить "любой один" из них ввело бы в заблуждение сильнее, чем честно
+  // показать более широкую выдачу.
+  const cookingMethodIds = new Set(devices.map((d) => COOKING_METHOD_BY_DEVICE[d]).filter(Boolean));
+  const cookingMethod = cookingMethodIds.size === 1 ? [...cookingMethodIds][0] : 0;
   const specificCuisines = cuisines.filter((c) => c !== "any");
   const q = specificCuisines.length === 1 ? CUISINE_HINT[specificCuisines[0]] || "" : "";
 
