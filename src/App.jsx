@@ -4,6 +4,7 @@ import { ALLERGENS } from "./data/recipes.js";
 import { buildCartFromShoppingList, toVkusvillQuantity, clearMcpCache } from "./lib/vkusvillMcp.js";
 import { fetchVkusvillPools, getSubstituteOptions, attachRealCosts } from "./lib/vkusvillRecipes.js";
 import { loadProfile, saveProfile, clearProfile, loadTheme, saveTheme } from "./lib/profile.js";
+import { loadActivePlan, saveActivePlan, clearActivePlan } from "./lib/activePlan.js";
 import { buildPools, buildInitialPlan, buildPlanView, interleaveGroups, computeBudgetStreak, computeRecentSavings } from "./lib/planLogic.js";
 import { submitPlanToBackend, checkPlanStatus, savePlanToHistory, fetchPlanHistory, updateMealTimes } from "./lib/backend.js";
 import { trackEvent } from "./lib/analytics.js";
@@ -134,19 +135,28 @@ export default function MealPlanner() {
   const [savedProfile] = useState(loadProfile);
   const hasProfile = !!savedProfile;
 
+  // Раньше собранный план жил только в React-состоянии — исчезал при каждом
+  // перемонтировании (вышли из Telegram и зашли снова, перезапуск WebView),
+  // и единственным способом снова его увидеть было пройти сборку заново
+  // (жалоба в чате: "как посмотреть старый план, который я уже собрал").
+  // Читаем один раз при монтировании, как и savedProfile выше — если план
+  // есть, сразу открываем ResultView, минуя визард целиком; "Заново"
+  // (см. reset ниже) явно стирает запись.
+  const [savedActivePlan] = useState(loadActivePlan);
+
   const [step, setStep] = useState(0);
-  const [store, setStore] = useState(null);
+  const [store, setStore] = useState(savedActivePlan?.store ?? null);
   const [family, setFamily] = useState(savedProfile?.family ?? 2);
   const [meals, setMeals] = useState(savedProfile?.meals ?? ["lunch", "dinner"]);
-  const [budget, setBudget] = useState(4000);
+  const [budget, setBudget] = useState(savedActivePlan?.budget ?? 4000);
   const [diet, setDiet] = useState(savedProfile?.diet ?? null);
   const [allergies, setAllergies] = useState(savedProfile?.allergies ?? []);
   const [cuisines, setCuisines] = useState(savedProfile?.cuisines ?? []);
   const [devices, setDevices] = useState(savedProfile?.devices ?? []);
   const [maxCookTime, setMaxCookTime] = useState(savedProfile?.maxCookTime ?? null);
-  const [done, setDone] = useState(false);
+  const [done, setDone] = useState(!!savedActivePlan);
   const [assembling, setAssembling] = useState(false);
-  const [planState, setPlanState] = useState(null);
+  const [planState, setPlanState] = useState(savedActivePlan?.planState ?? null);
   const [openRecipe, setOpenRecipe] = useState(null);
   const [showProModal, setShowProModal] = useState(false);
   const [showAccount, setShowAccount] = useState(false);
@@ -256,10 +266,10 @@ export default function MealPlanner() {
   // считаются один раз, в момент "Собрать список" (handleFinish), а не
   // реактивно по ходу визарда. До первого нажатия — null, и это ок:
   // planView ниже явно проверяет planState на null раньше, чем тронуть pools.
-  const [pools, setPools] = useState(null);
+  const [pools, setPools] = useState(savedActivePlan?.pools ?? null);
   // Карта ингредиент->цена товара (ВкусВилл) — null для остальных сетей или
   // если реальные рецепты не подтянулись (см. комментарий у buildPlanView).
-  const [priceByName, setPriceByName] = useState(null);
+  const [priceByName, setPriceByName] = useState(savedActivePlan?.priceByName ?? null);
   const [retryingPrices, setRetryingPrices] = useState(false);
   const [priceRetryFailed, setPriceRetryFailed] = useState(false);
 
@@ -311,6 +321,19 @@ export default function MealPlanner() {
   useEffect(() => {
     if (done && planView) submitPlanToBackend(planView, mealTimes);
   }, [done, planView, mealTimes]);
+
+  // Локальное сохранение ТЕКУЩЕГО плана (см. lib/activePlan.js) — отдельно
+  // от бэкенда выше: это не про напоминания, а про то, чтобы при следующем
+  // открытии приложения (вышли из Telegram и зашли снова) сразу увидеть свой
+  // план, а не визард "собрать новый" (жалоба в чате). Срабатывает на каждое
+  // изменение плана — в том числе "Заменить блюдо" и повтор получения цен,
+  // чтобы восстановленный план был тем же, что видели последним, а не тем,
+  // что было в момент самой первой сборки.
+  useEffect(() => {
+    if (done && planState) {
+      saveActivePlan({ store, budget, planState, pools, priceByName });
+    }
+  }, [done, planState, pools, priceByName, store, budget]);
 
   const handleFinish = async () => {
     // Бесплатный лимит — только если есть у кого спросить (бэкенд задеплоен
@@ -425,6 +448,7 @@ export default function MealPlanner() {
   // специфично для конкретной прошлой сборки: магазин, бюджет и сам план.
   const reset = () => {
     hapticImpact("light");
+    clearActivePlan();
     setStep(0); setStore(null); setBudget(4000); setDone(false); setPlanState(null);
     setOpenRecipe(null); setAssembling(false); setPools(null); setPriceByName(null);
     if (!hasProfile) {
@@ -447,6 +471,11 @@ export default function MealPlanner() {
   };
   const handleClearProfile = () => {
     clearProfile();
+    // Текущий план тоже завязан на профиль (техника/аллергии/рацион, под
+    // которые он собирался) — оставлять его при полном сбросе профиля
+    // значило бы после сброса всё равно увидеть старый план, будто ничего
+    // не изменилось.
+    clearActivePlan();
     // после сброса про профиль приложение узнает заново только при перезагрузке
     // (hasProfile вычислен один раз при монтировании) — это ок, простое и
     // предсказуемое поведение, не тянет за собой сложную ре-синхронизацию стейта
