@@ -1001,7 +1001,18 @@ function AccountView({
   return (
     <div className="fade-in-up mp-account-body" style={styles.stepBody}>
       <div style={styles.accountHeaderRow}>
-        <button onClick={onClose} style={styles.navBtn}>
+        {/* Раньше — тот же styles.navBtn, что у пары "Назад"/"Далее" в
+            визарде: тот padding (11px 18px) рассчитан на пару пилюль РЯДОМ
+            друг с другом, где обе тянут взгляд к центру ряда. Здесь кнопка
+            одна, слева, без пары — с тем же padding пилюля выглядела
+            непропорционально широкой для короткого "‹ Назад" внутри, будто
+            текст и иконка потерялись в пустом пространстве (жалоба в чате:
+            "надпись далеко от знака, будто не отцентровано" — сама пара
+            иконка+текст была центрирована корректно, просто пилюля вокруг
+            была ощутимо больше своего содержимого). Своя, более плотная
+            пилюля — той же геометрии (lineHeight:1, gap), что не потеряла
+            фикс вертикального выравнивания. */}
+        <button onClick={onClose} style={styles.acctBackBtn}>
           <ChevronLeft size={16} /><span>Назад</span>
         </button>
       </div>
@@ -2143,6 +2154,14 @@ const styles = {
     color: "var(--text-secondary)", fontSize: 13.5, fontWeight: 500, cursor: "pointer", padding: "11px 18px", borderRadius: 999,
   },
   navBtnPrimary: { display: "flex", alignItems: "center", gap: 4, lineHeight: 1, background: `linear-gradient(180deg, ${ACCENT}, #0066DB)`, border: "none", color: "#fff", fontSize: 13.5, fontWeight: 600, cursor: "pointer", padding: "11px 18px", borderRadius: 999, marginLeft: "auto", boxShadow: "0 6px 16px rgba(10,132,255,0.35)" },
+  // Только для "Назад" в шапке Аккаунта (см. AccountView) — та же геометрия,
+  // что у navBtn (display/alignItems/gap/lineHeight), но плотнее по padding:
+  // navBtn рассчитан на пару с navBtnPrimary в одном ряду, эта кнопка стоит
+  // одна, без пары, и с тем же padding выглядела непропорционально широкой.
+  acctBackBtn: {
+    display: "flex", alignItems: "center", gap: 4, lineHeight: 1, ...glass(0.4, 8), border: "1px solid var(--hairline)",
+    color: "var(--text-secondary)", fontSize: 13.5, fontWeight: 500, cursor: "pointer", padding: "8px 13px", borderRadius: 999,
+  },
   resultHeader: { marginBottom: 14 },
   warningBox: { display: "flex", gap: 8, alignItems: "flex-start", background: "var(--warning-soft)", border: "1px solid var(--warning-border)", borderRadius: 16, padding: "12px 14px", fontSize: 12.5, color: "var(--warning-text)", marginBottom: 14, lineHeight: 1.4 },
   // --warning-text (#8a5a1e, тёмно-коричневый) не переопределяется в тёмной
