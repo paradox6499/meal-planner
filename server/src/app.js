@@ -10,6 +10,7 @@ import {
   getUserPro, countPlanGenerationsSince, savePlanHistory, listPlanHistory,
   saveFeedback, listRecentFeedback, updateMealTimesForUser,
   createPendingPayment, getPaymentByYookassaId, updatePaymentStatus, extendUserPro,
+  countRewardedReferrals,
 } from "./db.js";
 import { planReplyForUpdate, buildWelcomeText, buildFeedbackAckText, buildFeedbackListText } from "./webhook.js";
 import { sendTelegramMessage } from "./telegram.js";
@@ -17,6 +18,7 @@ import { sendDigestNow } from "./digest.js";
 import { sendBackupNow } from "./backup.js";
 import { resolveIngredientPricesWithCache } from "./vkusvillPrices.js";
 import { createPayment, fetchPaymentStatus } from "./yookassa.js";
+import { claimReferral, maybeRewardReferral, REFERRAL_REWARD_DAYS } from "./referrals.js";
 
 const MEAL_TYPES = new Set(["breakfast", "lunch", "dinner", "snack"]);
 const MAX_EVENT_NAME_LENGTH = 64;
@@ -222,6 +224,17 @@ export function parseYookassaWebhookBody(body) {
   return { ok: true, value: { paymentId } };
 }
 
+/** {referrerTelegramId: number} — сам referredTelegramId берётся из
+ * initData (см. readAuthenticatedBody), не из тела: доверять чужому
+ * заявлению "я — пользователь X" нельзя, а initData уже подписана Telegram. */
+export function parseReferralClaimRequest(body) {
+  const { referrerTelegramId } = body;
+  if (typeof referrerTelegramId !== "number" || !Number.isFinite(referrerTelegramId)) {
+    return { ok: false, error: "referrerTelegramId отсутствует или некорректен" };
+  }
+  return { ok: true, value: { referrerTelegramId } };
+}
+
 export function createApp(db, { botToken, adminTelegramId = null, webhookSecret = null, yookassa = null }) {
   return createServer(async (req, res) => {
     if (req.method === "OPTIONS") {
@@ -259,6 +272,18 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
       } catch (err) {
         console.error("[api/plan] ошибка сохранения:", err);
         sendJson(res, 500, { ok: false, error: "не удалось сохранить план" });
+        return;
+      }
+      // Реальная сборка плана — это и есть "приглашённый активировался" (см.
+      // referrals.js) — если у него есть ожидающий реферал, начисляет
+      // награду обеим сторонам. Идемпотентно (проверено внутри), безопасно
+      // звать на каждую сборку, не только первую. Ответ 200 пользователю уже
+      // ушёл выше — сбой здесь (например Telegram не даёт написать
+      // пригласившему) не должен выглядеть как сбой сохранения плана.
+      try {
+        await maybeRewardReferral(db, auth.user.id, { botToken });
+      } catch (err) {
+        console.error("[api/plan] ошибка начисления реферальной награды:", err.message);
       }
       return;
     }
@@ -353,6 +378,51 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
       } catch (err) {
         console.error("[api/plans/list] ошибка чтения:", err);
         sendJson(res, 500, { ok: false, error: "не удалось получить историю" });
+      }
+      return;
+    }
+
+    // Регистрирует "меня пригласил такой-то" — фронтенд зовёт это один раз
+    // при открытии по реферальной ссылке (?startapp=ref_<id>), см.
+    // referrals.js за всей логикой отказов (самоприглашение, уже
+    // существующий пользователь, уже был приглашён кем-то другим). Все эти
+    // отказы — не ошибка HTTP, а нормальный, ожидаемый исход бизнес-логики
+    // (claimed:false), фронтенд их просто тихо игнорирует.
+    if (req.method === "POST" && req.url === "/api/referral/claim") {
+      const auth = await readAuthenticatedBody(req, botToken);
+      if (!auth.ok) return sendJson(res, auth.status, { ok: false, error: auth.error });
+
+      const parsed = parseReferralClaimRequest(auth.body);
+      if (!parsed.ok) return sendJson(res, 400, { ok: false, error: parsed.error });
+
+      try {
+        const result = claimReferral(db, {
+          referrerTelegramId: parsed.value.referrerTelegramId,
+          referredTelegramId: auth.telegramUserId,
+          nowISO: new Date().toISOString(),
+        });
+        sendJson(res, 200, { ok: true, claimed: result.ok, reason: result.ok ? undefined : result.reason });
+      } catch (err) {
+        console.error("[api/referral/claim] ошибка:", err);
+        sendJson(res, 500, { ok: false, error: "не удалось зарегистрировать реферала" });
+      }
+      return;
+    }
+
+    // Сколько человек пригласил этот пользователь (уже вознаграждённых) —
+    // для отображения прогресса в Аккаунте, тот же принцип, что и у
+    // streak/экономии на клиенте (planLogic.js:computeBudgetStreak): честно
+    // показывать реальное состояние, не гадать.
+    if (req.method === "POST" && req.url === "/api/referral/status") {
+      const auth = await readAuthenticatedBody(req, botToken);
+      if (!auth.ok) return sendJson(res, auth.status, { ok: false, error: auth.error });
+
+      try {
+        const rewardedCount = countRewardedReferrals(db, auth.telegramUserId);
+        sendJson(res, 200, { ok: true, rewardedCount, daysEarned: rewardedCount * REFERRAL_REWARD_DAYS });
+      } catch (err) {
+        console.error("[api/referral/status] ошибка:", err);
+        sendJson(res, 500, { ok: false, error: "не удалось получить статус рефералов" });
       }
       return;
     }

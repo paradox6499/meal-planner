@@ -6,7 +6,7 @@ import { fetchVkusvillPools, getSubstituteOptions, attachRealCosts } from "./lib
 import { loadProfile, saveProfile, clearProfile, loadTheme, saveTheme } from "./lib/profile.js";
 import { loadActivePlan, saveActivePlan, clearActivePlan } from "./lib/activePlan.js";
 import { buildPools, buildInitialPlan, buildPlanView, interleaveGroups, computeBudgetStreak, computeRecentSavings } from "./lib/planLogic.js";
-import { submitPlanToBackend, checkPlanStatus, savePlanToHistory, fetchPlanHistory, updateMealTimes, createProPayment } from "./lib/backend.js";
+import { submitPlanToBackend, checkPlanStatus, savePlanToHistory, fetchPlanHistory, updateMealTimes, createProPayment, claimReferral, fetchReferralStatus } from "./lib/backend.js";
 import { trackEvent } from "./lib/analytics.js";
 import logoUrl from "./assets/logo.svg";
 import { hapticSelect, hapticImpact, hapticNotify } from "./lib/haptics.js";
@@ -168,10 +168,12 @@ export default function MealPlanner() {
   // Аккаунта, не на каждый рендер — это единственное место, где они видны.
   const [planStatus, setPlanStatus] = useState(null);
   const [planHistory, setPlanHistory] = useState(null);
+  const [referralStatus, setReferralStatus] = useState(null);
   useEffect(() => {
     if (!showAccount) return;
     checkPlanStatus().then(setPlanStatus);
     fetchPlanHistory().then(setPlanHistory);
+    fetchReferralStatus().then(setReferralStatus);
   }, [showAccount]);
 
   // Блокировка "бесплатный лимит исчерпан" — знаем об этом только после
@@ -197,6 +199,20 @@ export default function MealPlanner() {
   useEffect(() => {
     trackEvent("app_opened", { has_profile: hasProfile });
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Реферальная ссылка — t.me/s_edim_bot?startapp=ref_<id> (см. AccountView
+  // ниже, "Пригласить друга"). start_param — официальный механизм Telegram
+  // Mini Apps для передачи параметра при открытии ИМЕННО приложения (не
+  // чата с ботом, это другой сценарий — см. server/src/webhook.js). Шлём
+  // регистрацию один раз при монтировании, best-effort — сервер сам решит,
+  // засчитывать ли (самоприглашение/уже существующий пользователь/уже был
+  // приглашён кем-то другим, см. server/src/referrals.js), фронтенду
+  // результат не нужен.
+  useEffect(() => {
+    const startParam = window.Telegram?.WebApp?.initDataUnsafe?.start_param;
+    const match = /^ref_(\d+)$/.exec(startParam || "");
+    if (match) claimReferral(Number(match[1]));
   }, []);
 
   // Известный баг части Android-WebView (в т.ч. внутри Telegram Mini App) —
@@ -697,6 +713,7 @@ export default function MealPlanner() {
             onAddToHomeScreen={() => { hapticImpact("light"); trackEvent("home_screen_prompted"); promptAddToHomeScreen(); }}
             planStatus={planStatus}
             planHistory={planHistory}
+            referralStatus={referralStatus}
           />
         )}
 
@@ -972,7 +989,7 @@ function AccountView({
   mealTimes, setMealTimes,
   toggleSimple, toggleCuisine, hasProfile, onSave, onClear, onClose, onOpenPro,
   homeScreenStatus, onAddToHomeScreen,
-  planStatus, planHistory,
+  planStatus, planHistory, referralStatus,
 }) {
   const [saved, setSaved] = useState(false);
   const handleSave = () => {
@@ -1199,6 +1216,7 @@ function AccountView({
       <div style={styles.acctDivider} />
       <ProgressSection planHistory={planHistory} />
       <AccountSubscriptionCard onOpenPro={onOpenPro} planStatus={planStatus} />
+      <ReferralSection referralStatus={referralStatus} />
       <PlanHistorySection planHistory={planHistory} />
     </div>
   );
@@ -1270,6 +1288,58 @@ function AccountSubscriptionCard({ onOpenPro, planStatus }) {
       </div>
     </div>
   );
+}
+
+// Реферальная программа (см. server/src/referrals.js) — "и тебе, и другу":
+// награда начисляется не за переход по ссылке (легко накрутить), а когда
+// приглашённый реально соберёт свой первый план. 7 — дублирует
+// REFERRAL_REWARD_DAYS на сервере (тот же принцип, что и у 299 ₽/30 дней в
+// ProModal ниже: цифра, которую видит пользователь ДО того, как что-то
+// произошло, неизбежно живёт на фронтенде отдельной строкой от источника
+// истины на сервере — держите их в синхроне вручную, если поменяются).
+const REFERRAL_REWARD_DAYS_LABEL = 7;
+
+function ReferralSection({ referralStatus }) {
+  // Вне Telegram (обычный браузер) initDataUnsafe.user не существует —
+  // ссылка вида "?startapp=ref_undefined" никуда не привела бы осмысленно,
+  // честнее не показывать блок вообще, чем показать нерабочую кнопку.
+  const myTelegramId = window.Telegram?.WebApp?.initDataUnsafe?.user?.id;
+  if (!myTelegramId) return null;
+
+  const referralLink = `${BOT_SHARE_URL}?startapp=ref_${myTelegramId}`;
+  const shareText = "Я планирую меню и список покупок с реальными ценами в «Съедим» — присоединяйся, соберёшь первый план, и мы оба получим неделю Pro бесплатно! 🎁";
+
+  return (
+    <div style={styles.acctSection}>
+      <div style={styles.subCard}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+          <Users size={16} color={ACCENT} />
+          <span style={{ fontWeight: 700, fontSize: 15 }}>Пригласить друга</span>
+        </div>
+        <p style={styles.acctSectionHint}>
+          Друг соберёт свой первый план — и вы оба получите {REFERRAL_REWARD_DAYS_LABEL} дней Pro бесплатно.
+        </p>
+        {referralStatus?.rewardedCount > 0 && (
+          <p style={{ ...styles.acctSectionHint, fontWeight: 600 }}>
+            Уже пригласили: {referralStatus.rewardedCount} · начислено {referralStatus.daysEarned} {pluralDaysRu(referralStatus.daysEarned)} Pro
+          </p>
+        )}
+        <button
+          onClick={() => { hapticImpact("light"); trackEvent("referral_share_clicked"); shareViaTelegram(shareText, referralLink); }}
+          style={{ ...styles.orderBtn, marginTop: 4, display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}
+        >
+          <Share2 size={15} /> Поделиться ссылкой
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function pluralDaysRu(n) {
+  const mod10 = n % 10, mod100 = n % 100;
+  if (mod10 === 1 && mod100 !== 11) return "день";
+  if ([2, 3, 4].includes(mod10) && ![12, 13, 14].includes(mod100)) return "дня";
+  return "дней";
 }
 
 function pluralWeeks(n) {

@@ -273,3 +273,48 @@ export async function submitPlanToBackend(planView, mealTimes) {
     console.warn("Не удалось отправить план на сервер напоминаний:", err.message);
   }
 }
+
+/** Регистрирует "меня пригласил referrerTelegramId" — вызывается один раз
+ * при открытии по реферальной ссылке (?startapp=ref_<id>, см. App.jsx).
+ * Тихо ничего не делает без бэкенда/вне Telegram, как и остальные функции
+ * здесь; результат ("claimed" или отказ — самоприглашение, уже существующий
+ * пользователь и т.п., см. server/src/referrals.js) не нужен вызывающему
+ * коду — это best-effort фоновая регистрация, не блокирующая ничего в UI. */
+export async function claimReferral(referrerTelegramId) {
+  const backendUrl = import.meta.env.VITE_BACKEND_URL;
+  const initData = currentInitData();
+  if (!backendUrl || !initData) return;
+
+  try {
+    await fetch(`${backendUrl}/api/referral/claim`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ initData, referrerTelegramId }),
+    });
+  } catch (err) {
+    console.warn("Не удалось зарегистрировать реферала:", err.message);
+  }
+}
+
+/** {rewardedCount, daysEarned} — сколько людей пригласил пользователь (уже
+ * получивших награду) и сколько дней Pro это принесло; null — нечем
+ * спросить/не получилось (см. AccountView в App.jsx: раздел "Пригласить
+ * друга" рендерится и без этого — просто без строки прогресса). */
+export async function fetchReferralStatus() {
+  const backendUrl = import.meta.env.VITE_BACKEND_URL;
+  const initData = currentInitData();
+  if (!backendUrl || !initData) return null;
+
+  try {
+    const res = await fetch(`${backendUrl}/api/referral/status`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ initData }),
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (err) {
+    console.warn("Не удалось получить статус рефералов:", err.message);
+    return null;
+  }
+}

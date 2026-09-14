@@ -170,6 +170,8 @@ node scripts/set-pro.js <telegram_user_id> on
 | `POST /api/prices` | `{names: string[]}` → `{prices: [{name, matched, price, productUnit, xmlId}]}` — общий кэш цен ВкусВилл по названию ингредиента (см. `vkusvillPrices.js`), один на всех пользователей; фронтенд (`attachRealCosts`) пробует его первым и откатывается на прямой запрос к ВкусВилл, если он недоступен |
 | `POST /api/pay/create` | создаёт платёж в ЮKassa на 299 ₽/30 дней, возвращает `{confirmationUrl}` — фронтенд открывает её через `Telegram.WebApp.openLink`; 503, если `YOOKASSA_SHOP_ID`/`YOOKASSA_SECRET_KEY` не заданы |
 | `POST /yookassa/webhook` | уведомление ЮKassa о смене статуса платежа — **без** проверки `initData` (это не Telegram, а сама ЮKassa) и **без** доверия статусу из тела запроса: сервер перепроверяет реальный статус отдельным запросом к ЮKassa своими учётными данными, только тогда продлевает Pro |
+| `POST /api/referral/claim` | `{referrerTelegramId}` → регистрирует "меня пригласил такой-то" (см. `referrals.js`) — награда начислится позже, когда приглашённый реально соберёт первый план (см. `POST /api/plan`) |
+| `POST /api/referral/status` | `{rewardedCount, daysEarned}` — сколько людей пригласил пользователь и сколько дней Pro это принесло |
 | `POST /telegram/webhook` | входящие сообщения от Telegram: `/start` → приветствие, свободный текст → сохраняется как обращение в поддержку, `/report`/`/feedback`/`/backup` от админа → отчёт/список обращений/снимок БД сейчас же — требует заголовок `X-Telegram-Bot-Api-Secret-Token`, см. `TELEGRAM_WEBHOOK_SECRET` и шаг 9 деплоя |
 
 ## Файлы
@@ -197,6 +199,9 @@ node scripts/set-pro.js <telegram_user_id> on
   его реальный статус напрямую (см. `POST /yookassa/webhook`).
 - `src/proRenewal.js` — напоминание "подписка скоро закончится" (обещано в
   `public/terms.html`), по расписанию, тем же ботом.
+- `src/referrals.js` — реферальная программа: и пригласивший, и приглашённый
+  получают дни Pro, награда — по факту первого собранного плана приглашённым
+  (см. `POST /api/referral/claim`, `POST /api/plan`).
 - `src/index.js` — точка входа, читает переменные окружения, запускает
   сервер и все таймеры (напоминания + дайджест/бэкап/напоминание о продлении).
 - `scripts/set-pro.js` — ручная выдача Pro, см. выше.

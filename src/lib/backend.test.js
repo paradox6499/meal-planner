@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { buildMealSlots, todayPlusDays, checkPlanStatus, savePlanToHistory, fetchPlanHistory, updateMealTimes, resolvePricesViaBackend, createProPayment } from "./backend.js";
+import { buildMealSlots, todayPlusDays, checkPlanStatus, savePlanToHistory, fetchPlanHistory, updateMealTimes, resolvePricesViaBackend, createProPayment, claimReferral, fetchReferralStatus } from "./backend.js";
 
 function stubTelegram(initData) {
   vi.stubGlobal("window", { Telegram: initData !== undefined ? { WebApp: { initData } } : undefined });
@@ -296,5 +296,69 @@ describe("createProPayment", () => {
 
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({ ok: true }) }));
     expect(await createProPayment()).toBeNull();
+  });
+});
+
+describe("claimReferral", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+  });
+
+  it("без бэкенда/вне Telegram — ничего не запрашивает", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubEnv("VITE_BACKEND_URL", "");
+    stubTelegram("x");
+    await claimReferral(1);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("шлёт POST /api/referral/claim с initData и referrerTelegramId", async () => {
+    vi.stubEnv("VITE_BACKEND_URL", "https://api.example.com");
+    stubTelegram("initdata-blob");
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ ok: true, claimed: true }) });
+    vi.stubGlobal("fetch", fetchMock);
+    await claimReferral(1);
+    const [url, opts] = fetchMock.mock.calls[0];
+    expect(url).toBe("https://api.example.com/api/referral/claim");
+    expect(JSON.parse(opts.body)).toEqual({ initData: "initdata-blob", referrerTelegramId: 1 });
+  });
+
+  it("не бросает исключение при сетевой ошибке", async () => {
+    vi.stubEnv("VITE_BACKEND_URL", "https://api.example.com");
+    stubTelegram("x");
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("boom")));
+    await expect(claimReferral(1)).resolves.toBeUndefined();
+  });
+});
+
+describe("fetchReferralStatus", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+  });
+
+  it("null без бэкенда/вне Telegram", async () => {
+    vi.stubEnv("VITE_BACKEND_URL", "");
+    stubTelegram("x");
+    expect(await fetchReferralStatus()).toBeNull();
+  });
+
+  it("возвращает распарсенный JSON-ответ бэкенда", async () => {
+    vi.stubEnv("VITE_BACKEND_URL", "https://api.example.com");
+    stubTelegram("x");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({ ok: true, rewardedCount: 2, daysEarned: 14 }) }));
+    expect(await fetchReferralStatus()).toEqual({ ok: true, rewardedCount: 2, daysEarned: 14 });
+  });
+
+  it("null при сетевой ошибке или не-200 ответе", async () => {
+    vi.stubEnv("VITE_BACKEND_URL", "https://api.example.com");
+    stubTelegram("x");
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("boom")));
+    expect(await fetchReferralStatus()).toBeNull();
+
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 500 }));
+    expect(await fetchReferralStatus()).toBeNull();
   });
 });

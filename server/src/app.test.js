@@ -381,6 +381,113 @@ describe("HTTP-сервер", () => {
   });
 });
 
+describe("POST /api/referral/claim и /api/referral/status", () => {
+  let db, server, baseUrl;
+
+  beforeEach(async () => {
+    db = openDb(":memory:");
+    server = createApp(db, { botToken: BOT_TOKEN });
+    await new Promise((resolve) => server.listen(0, resolve));
+    baseUrl = `http://127.0.0.1:${server.address().port}`;
+  });
+  afterEach(() => new Promise((resolve) => server.close(resolve)));
+
+  it("claim с валидной initData регистрирует реферала", async () => {
+    const res = await fetch(`${baseUrl}/api/referral/claim`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ initData: validInitData(2), referrerTelegramId: 1 }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toEqual({ ok: true, claimed: true });
+  });
+
+  it("claim без initData -> 401", async () => {
+    const res = await fetch(`${baseUrl}/api/referral/claim`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ referrerTelegramId: 1 }),
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it("claim без referrerTelegramId -> 400", async () => {
+    const res = await fetch(`${baseUrl}/api/referral/claim`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ initData: validInitData(2) }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("claim самого себя -> 200, но claimed:false (не ошибка HTTP, обычный бизнес-исход)", async () => {
+    const res = await fetch(`${baseUrl}/api/referral/claim`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ initData: validInitData(1), referrerTelegramId: 1 }),
+    });
+    expect(res.status).toBe(200);
+    expect((await res.json()).claimed).toBe(false);
+  });
+
+  it("status без рефералов -> {rewardedCount: 0, daysEarned: 0}", async () => {
+    const res = await fetch(`${baseUrl}/api/referral/status`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ initData: validInitData(1) }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, rewardedCount: 0, daysEarned: 0 });
+  });
+
+  it("status без initData -> 401", async () => {
+    const res = await fetch(`${baseUrl}/api/referral/status`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) });
+    expect(res.status).toBe(401);
+  });
+});
+
+// Отдельный describe — реальная сборка плана приглашённым должна начислить
+// награду ОБЕИМ сторонам (см. referrals.js) — тут нужен замоканный вызов к
+// Telegram (уведомление пригласившему), поэтому не в "HTTP-сервер" выше, тот
+// же приём, что и у /api/pay/create и /yookassa/webhook: стаб fetch
+// разделяет api.telegram.org (подменяется) и baseUrl (настоящий fetch).
+describe("POST /api/plan — начисление реферальной награды по факту сборки плана", () => {
+  let db, server, baseUrl;
+  const realFetch = globalThis.fetch;
+
+  beforeEach(async () => {
+    db = openDb(":memory:");
+    server = createApp(db, { botToken: BOT_TOKEN });
+    await new Promise((resolve) => server.listen(0, resolve));
+    baseUrl = `http://127.0.0.1:${server.address().port}`;
+    vi.stubGlobal("fetch", vi.fn((url, opts) => (String(url).includes("api.telegram.org") ? Promise.resolve({ ok: true, json: async () => ({ ok: true, result: {} }) }) : realFetch(url, opts))));
+  });
+  afterEach(async () => {
+    await new Promise((resolve) => server.close(resolve));
+    vi.unstubAllGlobals();
+  });
+
+  it("приглашённый собирает первый план -> и он, и пригласивший получают Pro", async () => {
+    await fetch(`${baseUrl}/api/referral/claim`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ initData: validInitData(2), referrerTelegramId: 1 }),
+    });
+
+    const res = await fetch(`${baseUrl}/api/plan`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ initData: validInitData(2), timezoneOffsetMinutes: 180, mealSlots: [validSlot] }),
+    });
+    expect(res.status).toBe(200);
+
+    const soon = new Date(Date.now() + 3 * 24 * 3_600_000).toISOString();
+    expect(getUserPro(db, 1, soon)).toBe(true); // пригласивший
+    expect(getUserPro(db, 2, soon)).toBe(true); // приглашённый
+  });
+
+  it("без ожидающего реферала — сборка плана работает как обычно, никому Pro не начисляется", async () => {
+    const res = await fetch(`${baseUrl}/api/plan`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ initData: validInitData(42), timezoneOffsetMinutes: 180, mealSlots: [validSlot] }),
+    });
+    expect(res.status).toBe(200);
+    expect(getUserPro(db, 42, new Date().toISOString())).toBe(false);
+  });
+});
+
 // Отдельный describe — не в "HTTP-сервер" выше — потому что этому маршруту
 // внутри нужен ЖИВОЙ (замоканный) внешний вызов к ВкусВилл (см.
 // vkusvillPrices.js), а не только к нашему же тестовому серверу. Стаб fetch

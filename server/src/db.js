@@ -133,6 +133,22 @@ export function openDb(path) {
       confirmed_at TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_payments_created ON payments (created_at DESC);
+
+    -- Кто кого пригласил (см. referrals.js) — referred_telegram_id UNIQUE:
+    -- у одного приглашённого может быть только ОДИН пригласивший, первая
+    -- заявка на реферала побеждает, повторный claim того же приглашённого
+    -- (в том числе по другой ссылке) не создаёт вторую запись. rewarded_at
+    -- NULL, пока приглашённый не собрал свой первый план (см.
+    -- maybeRewardReferral) — до этого момента реферал "висит", наградные дни
+    -- ещё не начислены никому.
+    CREATE TABLE IF NOT EXISTS referrals (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      referrer_telegram_id INTEGER NOT NULL,
+      referred_telegram_id INTEGER NOT NULL UNIQUE,
+      created_at TEXT NOT NULL,
+      rewarded_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_referrals_referrer ON referrals (referrer_telegram_id, rewarded_at);
   `);
 
   // pro_until — платная подписка ТЕПЕРЬ ограничена по времени (одноразовый
@@ -412,6 +428,41 @@ export function summarizePaymentsSince(db, sinceISO) {
     .prepare("SELECT COUNT(*) AS count, COALESCE(SUM(amount_rub), 0) AS totalRub FROM payments WHERE status = 'succeeded' AND confirmed_at >= ?")
     .get(sinceISO);
   return { count: row.count, totalRub: row.totalRub };
+}
+
+/** "Уже существует" = хоть раз появился в users — не обязательно с планом,
+ * достаточно строки (её создаёт, например, updateMealTimesForUser не
+ * создаёт — а вот saveUserPlan/setUserPro создают). Используется, чтобы
+ * реферальную заявку мог создать только ДЕЙСТВИТЕЛЬНО новый человек, а не
+ * существующий пользователь под видом нового (см. referrals.js). */
+export function userExists(db, telegramUserId) {
+  return !!db.prepare("SELECT 1 FROM users WHERE telegram_user_id = ?").get(telegramUserId);
+}
+
+/** referred_telegram_id UNIQUE — если заявка на этого приглашённого уже
+ * была (в том числе от другого пригласившего), INSERT бросит исключение;
+ * вызывающий код (referrals.js) ловит это и считает "уже приглашён", не
+ * падает. */
+export function claimReferral(db, { referrerTelegramId, referredTelegramId, createdAtISO }) {
+  db.prepare("INSERT INTO referrals (referrer_telegram_id, referred_telegram_id, created_at) VALUES (?, ?, ?)").run(
+    referrerTelegramId, referredTelegramId, createdAtISO
+  );
+}
+
+export function getPendingReferral(db, referredTelegramId) {
+  return db.prepare("SELECT * FROM referrals WHERE referred_telegram_id = ? AND rewarded_at IS NULL").get(referredTelegramId) ?? null;
+}
+
+export function markReferralRewarded(db, referredTelegramId, rewardedAtISO) {
+  db.prepare("UPDATE referrals SET rewarded_at = ? WHERE referred_telegram_id = ?").run(rewardedAtISO, referredTelegramId);
+}
+
+/** Сколько раз этот пригласивший УЖЕ получил награду — для потолка (см.
+ * MAX_REFERRAL_REWARDS в referrals.js), чтобы не разбогатеть на днях Pro
+ * бесконечно, создавая (или уговаривая создать) новые аккаунты. */
+export function countRewardedReferrals(db, referrerTelegramId) {
+  const row = db.prepare("SELECT COUNT(*) AS count FROM referrals WHERE referrer_telegram_id = ? AND rewarded_at IS NOT NULL").get(referrerTelegramId);
+  return row.count;
 }
 
 /** Считаем через events, а не отдельный счётчик — событие "plan_generated"
