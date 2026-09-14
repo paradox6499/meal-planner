@@ -302,7 +302,13 @@ export async function resolvePrices(items) {
       q: toVkusvillQuantity(item.amount, item.unit, match.unit),
     };
   });
-  return settled.map((r) => (r.status === "fulfilled" ? r.value : { matched: false, name: "?" }));
+  // Найдено при разборе живой жалобы "все равно не получаются цены": имя
+  // проваленного запроса терялось (захардкоженное "?" вместо item.name) —
+  // на итоговую сумму это не влияло (priceByName.get(realName) и так вернул
+  // бы undefined), но диагностировать, КАКОЙ именно ингредиент не
+  // зарезолвился (429/таймаут после исчерпания ретраев — см. callTool выше),
+  // было невозможно ни в логах, ни при отладке вживую.
+  return settled.map((r, i) => (r.status === "fulfilled" ? r.value : { matched: false, name: items[i].name }));
 }
 
 /** Берёт плоский список покупок ([{name, amount, unit}], как в App.jsx

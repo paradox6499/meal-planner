@@ -247,4 +247,18 @@ describe("resolvePrices — ограничение параллелизма (р�
     const resolved = await resolvePrices(items);
     expect(resolved.map((r) => r.name)).toEqual(items.map((it) => it.name));
   });
+
+  // Регрессия: раньше проваленный (после исчерпания ретраев) запрос терял
+  // имя ингредиента — падал в результат как {matched:false, name:"?"},
+  // хотя на итоговую сумму это и не влияло, диагностировать "какой именно
+  // ингредиент не нашёлся" по логам было невозможно.
+  it("проваленный запрос сохраняет исходное имя ингредиента, а не '?'", async () => {
+    fetch.mockResolvedValue({ ok: false, status: 400 }); // не retryable (не 429/5xx) — падает сразу, без ожидания ретраев
+    const items = [{ name: "Куриное филе", amount: 1, unit: "шт" }, { name: "Гречка", amount: 1, unit: "шт" }];
+    const resolved = await resolvePrices(items);
+    expect(resolved).toEqual([
+      { matched: false, name: "Куриное филе" },
+      { matched: false, name: "Гречка" },
+    ]);
+  });
 });

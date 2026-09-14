@@ -4,7 +4,7 @@
 // функции без React/DOM тестируются напрямую в Vitest, без jsdom и рендера
 // компонентов — см. planLogic.test.js рядом.
 import { RECIPES, RECIPES_BY_ID, DEPARTMENTS, departmentOf, forbiddenIngredientsFor, recipeHasAllergen, effectiveRecipeCost } from "../data/recipes.js";
-import { pricePerBaseUnit, isWeightOrVolumeUnit } from "./vkusvillRecipes.js";
+import { resolveIngredientCost } from "./vkusvillRecipes.js";
 
 // пул подходящих рецептов на категорию: рацион/кухня/техника — мягкие предпочтения
 // (при пустом пуле смягчаются), аллергии — жёсткое исключение (не смягчается никогда)
@@ -196,11 +196,13 @@ export function buildPlanView(planState, pools, family, priceByName) {
     const roundedAmount = Math.round(amount);
     let cost = null;
     if (priceByName) {
-      const info = priceByName.get(name);
-      // тот же "род единиц" (вес/объём vs штучно), что и в attachRealCosts —
-      // иначе можно случайно посчитать цену по совсем другому товару
-      if (info && isWeightOrVolumeUnit(unit) === isWeightOrVolumeUnit(info.productUnit)) {
-        cost = Math.round(pricePerBaseUnit(info.price, info.productUnit) * roundedAmount);
+      // Единая логика с attachRealCosts (та же функция) — включая оценку
+      // "поштучных" овощей/фруктов по среднему весу (AVG_PIECE_GRAMS), без
+      // которой список покупок и цена блюда расходились бы в том, что
+      // считается "совпадением".
+      const itemCost = resolveIngredientCost(name, roundedAmount, unit, priceByName.get(name));
+      if (itemCost != null) {
+        cost = Math.round(itemCost);
       } else {
         unpricedCount++;
       }

@@ -227,6 +227,65 @@ export function pricePerBaseUnit(price, productUnit) {
   return price; // уже за г/мл/шт — как есть
 }
 
+// Найдено при разборе жалобы "все равно не получаются цены" (после фикса
+// "печень за 16₽" выше): рецепты ВкусВилл ОЧЕНЬ часто указывают овощи
+// поштучно ("0.5 шт лука", "1 помидор"), а тот же товар в каталоге продаётся
+// на вес (кг) — до этой таблицы такой ингредиент считался "разным родом
+// единиц" и НИКОГДА не засчитывался совпадением (см. matchedEnough ниже),
+// хотя цену вполне можно оценить по среднему весу одного экземпляра — та же
+// идея, что и HOUSEHOLD_UNIT_GRAMS выше (ложка/зубчик/щепотка), только для
+// овощей/фруктов. Это не догадка "на глаз": на живом прогоне с фильтрами
+// "рацион как обычно, техника вся, аллергий нет" 4 из 5 ингредиентов
+// случайного рецепта нашли цену в каталоге, но 2 из них (лук, помидоры)
+// отсеивались именно так — из-за этого у БОЛЬШИНСТВА рецептов не набиралось
+// строгого большинства совпадений, и цена не показывалась вообще ни для
+// чего, хотя priceByName внутри был вполне наполнен. Значения — усреднённые
+// "магазинные" веса одного экземпляра, точность тут принципиально
+// "плюс-минус", как и у ложек/зубчиков.
+const AVG_PIECE_GRAMS = [
+  { re: /лук/i, grams: 100 },
+  { re: /помидор|томат/i, grams: 120 },
+  { re: /огурец|огурц/i, grams: 100 },
+  { re: /картофел/i, grams: 120 },
+  { re: /морков/i, grams: 90 },
+  { re: /перец сладк/i, grams: 150 },
+  { re: /кабачок|цукини/i, grams: 300 },
+  { re: /баклажан/i, grams: 250 },
+  { re: /лимон/i, grams: 100 },
+  { re: /яблок/i, grams: 150 },
+  { re: /банан/i, grams: 130 },
+  { re: /авокадо/i, grams: 200 },
+  { re: /апельсин/i, grams: 180 },
+];
+
+function estimatePieceGrams(name) {
+  const hit = AVG_PIECE_GRAMS.find(({ re }) => re.test(name));
+  return hit ? hit.grams : null;
+}
+
+/** Стоимость одного ингредиента рецепта/строки списка покупок по данным
+ * каталога (priceByName-запись), либо null, если посчитать нельзя — единая
+ * точка для attachRealCosts (цена блюда) и buildPlanView (список покупок,
+ * planLogic.js), чтобы правило "когда доверяем совпадению" не разъезжалось
+ * между ними на два независимых места. */
+export function resolveIngredientCost(name, amount, unit, info) {
+  if (!info) return null;
+  if (isWeightOrVolumeUnit(unit) === isWeightOrVolumeUnit(info.productUnit)) {
+    return pricePerBaseUnit(info.price, info.productUnit) * amount;
+  }
+  // Рецепт — поштучно, товар — на вес: пробуем честную оценку по названию
+  // (см. AVG_PIECE_GRAMS выше). Обратный случай (рецепт — в граммах, товар —
+  // поштучно, например "22.5 г майонеза" при товаре "банка") оставляем
+  // непосчитанным, как и раньше — размер "штуки" там куда менее предсказуем
+  // (майонез бывает 100 г и 800 г банкой), рискованная оценка хуже честного "не знаем".
+  if (unit === "шт" && isWeightOrVolumeUnit(info.productUnit)) {
+    const gramsPerPiece = estimatePieceGrams(name);
+    if (gramsPerPiece == null) return null;
+    return pricePerBaseUnit(info.price, info.productUnit) * amount * gramsPerPiece;
+  }
+  return null;
+}
+
 // Один параллельный проход по ВСЕМ уникальным ингредиентам сразу по всем
 // пулам (не по каждому рецепту отдельно) — иначе "яйцо"/"соль" искались бы
 // в каталоге по многу раз впустую. Мутирует recipe.cost/isRealPrice на месте
@@ -255,11 +314,9 @@ export async function attachRealCosts(pools) {
       let matchedCount = 0;
       for (const [name, amount, unit] of recipe.ingr) {
         const info = priceByName.get(name);
-        // единица нашего ингредиента и товара должны быть одного "рода"
-        // (вес/объём vs штучно) — иначе почти наверняка посчитаем неверно,
-        // лучше отказаться от точной цены для этого рецепта, чем соврать
-        if (!info || isWeightOrVolumeUnit(unit) !== isWeightOrVolumeUnit(info.productUnit)) continue;
-        total += pricePerBaseUnit(info.price, info.productUnit) * amount;
+        const itemCost = resolveIngredientCost(name, amount, unit, info);
+        if (itemCost == null) continue;
+        total += itemCost;
         matchedCount++;
       }
       // РАНЬШЕ: total>0 (хотя бы ОДИН ингредиент нашёлся) считалось

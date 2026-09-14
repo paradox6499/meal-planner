@@ -12,6 +12,7 @@ import {
   nameViolatesDiet,
   isWeightOrVolumeUnit,
   pricePerBaseUnit,
+  resolveIngredientCost,
   searchRawRecipes,
   attachRealCosts,
   fetchVkusvillPools,
@@ -126,6 +127,39 @@ describe("pricePerBaseUnit / isWeightOrVolumeUnit", () => {
     expect(isWeightOrVolumeUnit("кг")).toBe(true);
     expect(isWeightOrVolumeUnit("л")).toBe(true);
     expect(isWeightOrVolumeUnit("шт")).toBe(false);
+  });
+});
+
+// Регрессия на жалобу "все равно не получаются цены" (уже после фикса
+// "печень за 16₽"): рецепты ВкусВилл очень часто указывают овощи поштучно
+// ("0.5 шт лука"), а тот же товар в каталоге продаётся на вес (кг) — без
+// оценки по среднему весу такой ингредиент никогда не засчитывался
+// совпадением, и у БОЛЬШИНСТВА рецептов не набиралось строгого большинства
+// (см. attachRealCosts) — цена не показывалась вообще ни для чего, хотя
+// сами цены на самом деле были найдены.
+describe("resolveIngredientCost — оценка поштучных овощей/фруктов по среднему весу", () => {
+  it("нет info -> null", () => {
+    expect(resolveIngredientCost("Лук репчатый", 0.5, "шт", null)).toBeNull();
+  });
+
+  it("совпадающий род единиц (вес-вес) считается как раньше, без оценки", () => {
+    expect(resolveIngredientCost("Свинина шея", 110, "г", { price: 795, productUnit: "кг" })).toBeCloseTo(0.795 * 110, 5);
+  });
+
+  it("рецепт поштучно, товар на вес, овощ из таблицы — оценивает по среднему весу", () => {
+    // 0.5 шт лука ~= 50 г (100 г — средний вес одной луковицы), 58₽/кг = 0.058₽/г
+    const cost = resolveIngredientCost("Лук репчатый", 0.5, "шт", { price: 58, productUnit: "кг" });
+    expect(cost).toBeCloseTo(0.058 * 0.5 * 100, 5);
+  });
+
+  it("рецепт поштучно, товар на вес, но овощ НЕ из таблицы — не рискует, null", () => {
+    expect(resolveIngredientCost("Экзотический корнеплод", 1, "шт", { price: 300, productUnit: "кг" })).toBeNull();
+  });
+
+  it("обратный случай (рецепт в граммах, товар поштучно) — по-прежнему не оценивается", () => {
+    // майонез 22.5 г, товар продаётся банкой ("шт") — размер банки непредсказуем,
+    // рискованная оценка тут хуже честного "не знаем"
+    expect(resolveIngredientCost("Майонез", 22.5, "г", { price: 118, productUnit: "шт" })).toBeNull();
   });
 });
 
