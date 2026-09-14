@@ -23,6 +23,7 @@
 // они не гарантированно вечны.
 
 import { searchRecipes, resolvePrices, searchProducts, getProductAnalogs } from "./vkusvillMcp.js";
+import { resolvePricesViaBackend } from "./backend.js";
 
 const CATEGORY_BY_MEAL = { breakfast: 339, main: 332, snack: 335 };
 
@@ -302,7 +303,16 @@ export async function attachRealCosts(pools) {
   const priceByName = new Map();
   if (allNames.size === 0) return priceByName;
 
-  const resolved = await resolvePrices([...allNames].map((name) => ({ name, amount: 1, unit: "шт" })));
+  // Сначала — общий серверный кэш (см. resolvePricesViaBackend в
+  // backend.js): быстрее и не создаёт новую нагрузку на ВкусВилл, если
+  // названия уже спрашивал кто-то другой недавно. Откат на прямой запрос
+  // из браузера (resolvePrices, свой in-memory кэш) — если бэкенда нет,
+  // приложение открыто не в Telegram, или сервер почему-то не ответил:
+  // поведение остаётся ровно тем же, что было ДО этого кэша, просто без
+  // его преимуществ, а не ломается.
+  const names = [...allNames];
+  const viaBackend = await resolvePricesViaBackend(names);
+  const resolved = viaBackend ?? (await resolvePrices(names.map((name) => ({ name, amount: 1, unit: "шт" }))));
   resolved.forEach((r) => {
     if (r.matched && r.price != null) priceByName.set(r.name, { price: r.price, productUnit: r.productUnit });
   });

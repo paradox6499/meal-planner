@@ -1,10 +1,12 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 
 vi.mock("./vkusvillMcp.js", async (importOriginal) => {
   const actual = await importOriginal();
   return { ...actual, searchRecipes: vi.fn(), resolvePrices: vi.fn() };
 });
+vi.mock("./backend.js", () => ({ resolvePricesViaBackend: vi.fn() }));
 import { searchRecipes, resolvePrices } from "./vkusvillMcp.js";
+import { resolvePricesViaBackend } from "./backend.js";
 import {
   vkusvillIngredientToTriple,
   parseCookingTimeMinutes,
@@ -276,6 +278,45 @@ describe("attachRealCosts — цена блюда не выставляется 
     await attachRealCosts(pools);
     // Яйцо не засчиталось (разный род единиц) — совпал только 1 из 2, не строго больше половины
     expect(pools.main[0].cost).toBe(0);
+  });
+});
+
+// Серверный кэш цен (server/src/vkusvillPrices.js, POST /api/prices) —
+// общий на всех пользователей, должен реже упираться в rate-limit ВкусВилл,
+// чем клиентский in-memory кэш (per-браузер). attachRealCosts пробует его
+// первым, direct-to-ВкусВилл (resolvePrices) — только откат, если бэкенда
+// нет/не в Telegram/запрос не удался, поведение должно остаться ровно тем
+// же, что было раньше.
+describe("attachRealCosts — приоритет серверного кэша цен над прямыми запросами к ВкусВилл", () => {
+  const mkPool = (ingr) => ({ breakfast: [], snack: [], main: [{ id: "vv-1", name: "Тест", cost: 0, isRealPrice: false, ingr }] });
+
+  beforeEach(() => {
+    resolvePricesViaBackend.mockReset();
+    resolvePrices.mockReset();
+  });
+
+  it("серверный кэш ответил — resolvePrices (прямой запрос к ВкусВилл) вообще не зовётся", async () => {
+    resolvePricesViaBackend.mockResolvedValue([{ matched: true, name: "Курица", price: 5, productUnit: "г" }]);
+    const pools = mkPool([["Курица", 100, "г"]]);
+    await attachRealCosts(pools);
+    expect(pools.main[0].cost).toBe(500);
+    expect(resolvePrices).not.toHaveBeenCalled();
+  });
+
+  it("серверный кэш недоступен (null) — откатывается на прямой запрос к ВкусВилл, результат тот же", async () => {
+    resolvePricesViaBackend.mockResolvedValue(null);
+    resolvePrices.mockResolvedValue([{ matched: true, name: "Курица", price: 5, productUnit: "г" }]);
+    const pools = mkPool([["Курица", 100, "г"]]);
+    await attachRealCosts(pools);
+    expect(pools.main[0].cost).toBe(500);
+    expect(resolvePrices).toHaveBeenCalledTimes(1);
+  });
+
+  it("серверный кэш не настроен вообще (мок без реализации, как в остальных тестах файла) — тоже откат, ничего не падает", async () => {
+    resolvePrices.mockResolvedValue([{ matched: true, name: "Курица", price: 5, productUnit: "г" }]);
+    const pools = mkPool([["Курица", 100, "г"]]);
+    await attachRealCosts(pools);
+    expect(pools.main[0].cost).toBe(500);
   });
 });
 

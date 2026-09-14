@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { buildMealSlots, todayPlusDays, checkPlanStatus, savePlanToHistory, fetchPlanHistory, updateMealTimes } from "./backend.js";
+import { buildMealSlots, todayPlusDays, checkPlanStatus, savePlanToHistory, fetchPlanHistory, updateMealTimes, resolvePricesViaBackend } from "./backend.js";
 
 function stubTelegram(initData) {
   vi.stubGlobal("window", { Telegram: initData !== undefined ? { WebApp: { initData } } : undefined });
@@ -208,5 +208,50 @@ describe("fetchPlanHistory", () => {
     stubTelegram("x");
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("boom")));
     expect(await fetchPlanHistory()).toBeNull();
+  });
+});
+
+// Общий серверный кэш цен ВкусВилл (server/src/vkusvillPrices.js) —
+// attachRealCosts (vkusvillRecipes.js) пробует его первым, откатывается на
+// прямые запросы к ВкусВилл, если тут вернулось null (см. её же тесты).
+describe("resolvePricesViaBackend", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+  });
+
+  it("null без бэкенда/вне Telegram/с пустым списком имён — ничего не запрашивает", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    vi.stubEnv("VITE_BACKEND_URL", "");
+    stubTelegram("x");
+    expect(await resolvePricesViaBackend(["Лук"])).toBeNull();
+
+    vi.stubEnv("VITE_BACKEND_URL", "https://api.example.com");
+    stubTelegram(undefined);
+    expect(await resolvePricesViaBackend(["Лук"])).toBeNull();
+
+    stubTelegram("x");
+    expect(await resolvePricesViaBackend([])).toBeNull();
+
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("возвращает data.prices при успехе", async () => {
+    vi.stubEnv("VITE_BACKEND_URL", "https://api.example.com");
+    stubTelegram("x");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({ ok: true, prices: [{ name: "Лук", matched: true, price: 58 }] }) }));
+    expect(await resolvePricesViaBackend(["Лук"])).toEqual([{ name: "Лук", matched: true, price: 58 }]);
+  });
+
+  it("null при сетевой ошибке или не-200 ответе — не бросает исключение", async () => {
+    vi.stubEnv("VITE_BACKEND_URL", "https://api.example.com");
+    stubTelegram("x");
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("boom")));
+    expect(await resolvePricesViaBackend(["Лук"])).toBeNull();
+
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 500 }));
+    expect(await resolvePricesViaBackend(["Лук"])).toBeNull();
   });
 });

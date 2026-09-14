@@ -13,9 +13,17 @@ import { planReplyForUpdate, buildWelcomeText, buildFeedbackAckText, buildFeedba
 import { sendTelegramMessage } from "./telegram.js";
 import { sendDigestNow } from "./digest.js";
 import { sendBackupNow } from "./backup.js";
+import { resolveIngredientPricesWithCache } from "./vkusvillPrices.js";
 
 const MEAL_TYPES = new Set(["breakfast", "lunch", "dinner", "snack"]);
 const MAX_EVENT_NAME_LENGTH = 64;
+// Разумный потолок на список названий ингредиентов за один запрос — целая
+// неделя (3-4 приёма пищи × 7 дней) даёт от силы 60-100 УНИКАЛЬНЫХ названий
+// (см. attachRealCosts в src/lib/vkusvillRecipes.js — как раз он и будет
+// главным вызывающим). 300 — с большим запасом на будущее, без открытой
+// двери для "прислать 100000 строк и утопить сервер в живых запросах к
+// ВкусВилл на каждый промах кэша".
+const MAX_INGREDIENT_NAMES = 300;
 // props — небольшой контекст к событию (например, шаг визарда или сообщение
 // ошибки), не произвольная полезная нагрузка. Ограничение размера — не
 // столько защита от злоупотребления (initData и так подписан Telegram-ом),
@@ -179,6 +187,20 @@ export function parseMealTimesRequest(body, telegramUserId) {
   return { ok: true, value: { telegramUserId, mealTimes } };
 }
 
+/** {names: string[]} — уникальные имена не требуются на входе (резолвер сам
+ * дедуплицирует, см. vkusvillPrices.js), но пустые/не-строковые элементы
+ * отклоняем сразу, а не тихо пропускаем — не тот код, где стоит гадать, что
+ * имелось в виду. */
+export function parsePricesRequest(body) {
+  const { names } = body;
+  if (!Array.isArray(names) || names.length === 0) return { ok: false, error: "names отсутствует или пуст" };
+  if (names.length > MAX_INGREDIENT_NAMES) return { ok: false, error: `names слишком длинный (максимум ${MAX_INGREDIENT_NAMES})` };
+  if (!names.every((n) => typeof n === "string" && n.trim().length > 0)) {
+    return { ok: false, error: "names должен состоять из непустых строк" };
+  }
+  return { ok: true, value: { names } };
+}
+
 export function createApp(db, { botToken, adminTelegramId = null, webhookSecret = null }) {
   return createServer(async (req, res) => {
     if (req.method === "OPTIONS") {
@@ -310,6 +332,30 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
       } catch (err) {
         console.error("[api/plans/list] ошибка чтения:", err);
         sendJson(res, 500, { ok: false, error: "не удалось получить историю" });
+      }
+      return;
+    }
+
+    // Общий кэш цен ВкусВилл (см. vkusvillPrices.js) — не привязан к
+    // конкретному плану/пользователю, просто "по этим названиям — вот что
+    // знаем", поэтому отдельная auth-обвязка (readAuthenticatedBody), а не
+    // parsePlanRequest-подобное. Требуем initData наравне со всеми
+    // остальными эндпоинтами — не столько ради telegram_user_id (он тут не
+    // используется), сколько чтобы не открывать эндпоинт как публичный
+    // бесплатный прокси в обход rate-limit ВкусВилл кому угодно в интернете.
+    if (req.method === "POST" && req.url === "/api/prices") {
+      const auth = await readAuthenticatedBody(req, botToken);
+      if (!auth.ok) return sendJson(res, auth.status, { ok: false, error: auth.error });
+
+      const parsed = parsePricesRequest(auth.body);
+      if (!parsed.ok) return sendJson(res, 400, { ok: false, error: parsed.error });
+
+      try {
+        const resolved = await resolveIngredientPricesWithCache(db, parsed.value.names);
+        sendJson(res, 200, { ok: true, prices: [...resolved.entries()].map(([name, v]) => ({ name, ...v })) });
+      } catch (err) {
+        console.error("[api/prices] ошибка резолвинга:", err);
+        sendJson(res, 500, { ok: false, error: "не удалось получить цены" });
       }
       return;
     }

@@ -42,7 +42,17 @@ export function buildMealSlots(planView, mealTimes) {
   );
 }
 
+// typeof-проверка первой (а не просто window?.Telegram...) — раньше во всех
+// функциях этого файла молча подразумевалось, что глобальный window вообще
+// существует (правда в браузере, но не в тестах Node-окружения без jsdom, см.
+// vitest.config.js). Пока это was безопасно — каждый тест, которому нужен
+// window, сам стабил его через vi.stubGlobal. Стало важно с приходом
+// resolvePricesViaBackend: её теперь зовёт attachRealCosts (vkusvillRecipes.js),
+// а его тесты никогда не стабили window — без этой проверки простое
+// обращение к самому идентификатору window бросало бы ReferenceError ДО
+// того, как успело бы сработать опциональное сцепление ?. дальше по цепочке.
 function currentInitData() {
+  if (typeof window === "undefined") return null;
   return window.Telegram?.WebApp?.initData || null;
 }
 
@@ -65,6 +75,37 @@ export async function checkPlanStatus() {
     return await res.json();
   } catch (err) {
     console.warn("Не удалось получить статус тарифа:", err.message);
+    return null;
+  }
+}
+
+/** Как resolvePrices (vkusvillMcp.js), но через ОБЩИЙ серверный кэш цен
+ * (server/src/vkusvillPrices.js, POST /api/prices) вместо прямого похода в
+ * ВкусВилл из браузера каждый раз заново. Одинаковые названия ингредиентов
+ * повторяются у разных пользователей (курица, лук, молоко — почти в каждом
+ * плане) — общий кэш должен заметно реже упираться в rate-limit ВкусВилл,
+ * чем клиентский in-memory кэш (per-браузер, ничего не переживает и ни с
+ * кем не делится). null означает "нечем спросить или не получилось" (нет
+ * бэкенда, не в Telegram, сеть, отклонено сервером) — вызывающий код
+ * (attachRealCosts в vkusvillRecipes.js) в этом случае откатывается на
+ * resolvePrices напрямую, тот же принцип "бэкенд опционален", что и везде
+ * в этом файле. names — БЕЗ дублей не обязательно, сервер сам дедуплицирует. */
+export async function resolvePricesViaBackend(names) {
+  const backendUrl = import.meta.env.VITE_BACKEND_URL;
+  const initData = currentInitData();
+  if (!backendUrl || !initData || names.length === 0) return null;
+
+  try {
+    const res = await fetch(`${backendUrl}/api/prices`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ initData, names }),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return Array.isArray(data.prices) ? data.prices : null;
+  } catch (err) {
+    console.warn("Не удалось получить цены через серверный кэш, откат на прямые запросы к ВкусВилл:", err.message);
     return null;
   }
 }

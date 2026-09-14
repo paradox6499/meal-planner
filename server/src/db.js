@@ -85,8 +85,67 @@ export function openDb(path) {
       created_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_feedback_created ON feedback (created_at DESC);
+
+    -- Общий кэш цен ВкусВилл по названию ингредиента, ОДИН на всех
+    -- пользователей — раньше каждая сборка плана заново спрашивала цену
+    -- каждого ингредиента у ВкусВилл живьём (см. src/lib/vkusvillMcp.js:
+    -- resolvePrices — у него есть кэш, но in-memory и per-браузер, ничего не
+    -- переживает и ни с кем не делится). Реальные названия сильно
+    -- пересекаются между разными пользователями (курица, лук, молоко — почти
+    -- в каждом плане) — общий кэш на сервере должен заметно снизить число
+    -- живых запросов к ВкусВилл и, соответственно, как часто вообще упираемся
+    -- в их rate-limit (см. vkusvillPrices.js). matched=0 кэшируется тоже
+    -- (короче TTL, см. INGREDIENT_PRICE_TTL_MS в vkusvillPrices.js) — чтобы
+    -- не переспрашивать про заведомо не находящиеся позиции ("специи" и т.п.)
+    -- на каждый чих.
+    CREATE TABLE IF NOT EXISTS ingredient_prices (
+      name TEXT PRIMARY KEY,
+      matched INTEGER NOT NULL,
+      price REAL,
+      product_unit TEXT,
+      xml_id TEXT,
+      updated_at TEXT NOT NULL
+    );
   `);
   return db;
+}
+
+/** Сырые строки кэша по именам, БЕЗ фильтра свежести — что считать
+ * "устаревшим" решает вызывающий код (vkusvillPrices.js: разный TTL для
+ * matched и не-matched записей), это не забота слоя хранения. */
+export function getIngredientPricesByName(db, names) {
+  if (names.length === 0) return new Map();
+  const placeholders = names.map(() => "?").join(",");
+  const rows = db
+    .prepare(`SELECT name, matched, price, product_unit, xml_id, updated_at FROM ingredient_prices WHERE name IN (${placeholders})`)
+    .all(...names);
+  return new Map(
+    rows.map((r) => [r.name, { matched: !!r.matched, price: r.price, productUnit: r.product_unit, xmlId: r.xml_id, updatedAt: r.updated_at }])
+  );
+}
+
+/** entries: [{name, matched, price, productUnit, xmlId}] — одной транзакцией,
+ * чтобы большой список ингредиентов одного плана не оставлял БД в частично
+ * обновлённом состоянии при сбое посреди записи. */
+export function upsertIngredientPrices(db, entries, updatedAtISO) {
+  if (entries.length === 0) return;
+  const stmt = db.prepare(
+    `INSERT INTO ingredient_prices (name, matched, price, product_unit, xml_id, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(name) DO UPDATE SET
+       matched = excluded.matched, price = excluded.price,
+       product_unit = excluded.product_unit, xml_id = excluded.xml_id, updated_at = excluded.updated_at`
+  );
+  db.exec("BEGIN");
+  try {
+    for (const e of entries) {
+      stmt.run(e.name, e.matched ? 1 : 0, e.price ?? null, e.productUnit ?? null, e.xmlId ?? null, updatedAtISO);
+    }
+    db.exec("COMMIT");
+  } catch (err) {
+    db.exec("ROLLBACK");
+    throw err;
+  }
 }
 
 // Один активный план на пользователя: сохранение плана целиком заменяет

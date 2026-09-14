@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { createHmac } from "node:crypto";
 import { openDb, findCandidateSlots, summarizeEventsSince, setUserPro, insertEvent, listPlanHistory, listRecentFeedback } from "./db.js";
-import { createApp, parsePlanRequest, parseEventRequest, parseSavePlanRequest, parseMealTimesRequest, computePlanStatus, FREE_PLANS_PER_WEEK } from "./app.js";
+import { createApp, parsePlanRequest, parseEventRequest, parseSavePlanRequest, parseMealTimesRequest, parsePricesRequest, computePlanStatus, FREE_PLANS_PER_WEEK } from "./app.js";
 
 const BOT_TOKEN = "123456:TEST-TOKEN";
 
@@ -137,6 +137,28 @@ describe("parseMealTimesRequest", () => {
     expect(parseMealTimesRequest({ mealTimes: { brunch: "13:00" } }, 42).ok).toBe(false);
     expect(parseMealTimesRequest({ mealTimes: { lunch: "1:00" } }, 42).ok).toBe(false);
     expect(parseMealTimesRequest({ mealTimes: { lunch: "25:00" } }, 42).ok).toBe(true); // формат ЧЧ:ММ, разумность часа не проверяем — тот же уровень строгости, что и у parsePlanRequest
+  });
+});
+
+describe("parsePricesRequest", () => {
+  it("принимает список непустых строк", () => {
+    expect(parsePricesRequest({ names: ["Лук", "Морковь"] })).toEqual({ ok: true, value: { names: ["Лук", "Морковь"] } });
+  });
+
+  it("отклоняет отсутствующий/пустой/не-массив names", () => {
+    expect(parsePricesRequest({}).ok).toBe(false);
+    expect(parsePricesRequest({ names: [] }).ok).toBe(false);
+    expect(parsePricesRequest({ names: "Лук" }).ok).toBe(false);
+  });
+
+  it("отклоняет пустые строки/не-строки внутри names", () => {
+    expect(parsePricesRequest({ names: ["Лук", ""] }).ok).toBe(false);
+    expect(parsePricesRequest({ names: ["Лук", "   "] }).ok).toBe(false);
+    expect(parsePricesRequest({ names: ["Лук", 5] }).ok).toBe(false);
+  });
+
+  it("отклоняет слишком длинный список", () => {
+    expect(parsePricesRequest({ names: Array.from({ length: 301 }, (_, i) => `товар${i}`) }).ok).toBe(false);
   });
 });
 
@@ -351,6 +373,86 @@ describe("HTTP-сервер", () => {
 
   it("POST /api/meal-times с валидной initData, но без mealTimes -> 400", async () => {
     const res = await fetch(`${baseUrl}/api/meal-times`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ initData: validInitData(42) }),
+    });
+    expect(res.status).toBe(400);
+  });
+});
+
+// Отдельный describe — не в "HTTP-сервер" выше — потому что этому маршруту
+// внутри нужен ЖИВОЙ (замоканный) внешний вызов к ВкусВилл (см.
+// vkusvillPrices.js), а не только к нашему же тестовому серверу. Стаб fetch
+// разделяет два адресата по URL: запрос к mcp.vkusvill.ru подменяется, всё
+// остальное (включая собственный вызов теста к baseUrl) идёт настоящим
+// fetch — иначе пришлось бы городить реальный HTTP для одного и подменять
+// для другого через два разных клиента.
+describe("POST /api/prices", () => {
+  let db, server, baseUrl;
+  const realFetch = globalThis.fetch;
+
+  beforeEach(async () => {
+    db = openDb(":memory:");
+    server = createApp(db, { botToken: BOT_TOKEN });
+    await new Promise((resolve) => server.listen(0, resolve));
+    baseUrl = `http://127.0.0.1:${server.address().port}`;
+  });
+  afterEach(async () => {
+    await new Promise((resolve) => server.close(resolve));
+    vi.unstubAllGlobals();
+  });
+
+  function stubVkusvillFetch(mockImpl) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url, opts) => (String(url).includes("mcp.vkusvill.ru") ? mockImpl(url, opts) : realFetch(url, opts)))
+    );
+  }
+
+  it("с валидной initData резолвит цены и кэширует их для следующего запроса", async () => {
+    stubVkusvillFetch(async () => ({
+      ok: true,
+      json: async () => ({
+        jsonrpc: "2.0",
+        id: 1,
+        result: { content: [{ text: JSON.stringify({ ok: true, data: { items: [{ xml_id: "1", name: "Лук репчатый", price: { current: 58 }, unit: "кг" }] } }) }] },
+      }),
+    }));
+
+    const res = await fetch(`${baseUrl}/api/prices`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ initData: validInitData(42), names: ["Лук"] }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.prices).toEqual([{ name: "Лук", matched: true, price: 58, productUnit: "кг", xmlId: "1" }]);
+
+    // второй запрос с теми же именами — должен взять из кэша, без нового обращения к ВкусВилл
+    const calls = fetch.mock.calls.length;
+    const res2 = await fetch(`${baseUrl}/api/prices`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ initData: validInitData(42), names: ["Лук"] }),
+    });
+    expect(res2.status).toBe(200);
+    const vkusvillCallsAfter = fetch.mock.calls.filter(([u]) => String(u).includes("mcp.vkusvill.ru")).length;
+    const vkusvillCallsBefore = fetch.mock.calls.slice(0, calls).filter(([u]) => String(u).includes("mcp.vkusvill.ru")).length;
+    expect(vkusvillCallsAfter).toBe(vkusvillCallsBefore); // ни одного нового живого вызова к ВкусВилл
+  });
+
+  it("без initData -> 401", async () => {
+    const res = await fetch(`${baseUrl}/api/prices`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ names: ["Лук"] }),
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it("с валидной initData, но без names -> 400", async () => {
+    const res = await fetch(`${baseUrl}/api/prices`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ initData: validInitData(42) }),
