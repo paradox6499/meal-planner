@@ -7,6 +7,7 @@ import { createApp } from "./app.js";
 import { runReminderTick } from "./scheduler.js";
 import { runDigest } from "./digest.js";
 import { runBackup } from "./backup.js";
+import { runProRenewalTick } from "./proRenewal.js";
 
 const PORT = Number(process.env.PORT) || 3000;
 const DB_PATH = process.env.DB_PATH || "./data.db";
@@ -29,14 +30,27 @@ const BACKUP_CHECK_INTERVAL_MS = 60 * 60 * 1000;
 // (см. server/README.md). Без него POST /telegram/webhook отклоняет всё —
 // нет открытого до настройки состояния "доверяем всем подряд".
 const WEBHOOK_SECRET = process.env.TELEGRAM_WEBHOOK_SECRET || null;
+// shopId (1460694) не секретен сам по себе — но держим оба значения в одном
+// месте и одним и тем же путём (env var, никогда не в коде/чате), чтобы не
+// провоцировать "а вдруг можно просто одно из двух". Без обеих переменных
+// оплата просто отключена (createApp получит yookassa: null) — тот же
+// принцип "фича опциональна, пока не настроена", что и у ADMIN_TELEGRAM_ID
+// выше: сервис работает и без оплаты, просто без неё.
+const YOOKASSA_SHOP_ID = process.env.YOOKASSA_SHOP_ID || null;
+const YOOKASSA_SECRET_KEY = process.env.YOOKASSA_SECRET_KEY || null;
+const YOOKASSA = YOOKASSA_SHOP_ID && YOOKASSA_SECRET_KEY ? { shopId: YOOKASSA_SHOP_ID, secretKey: YOOKASSA_SECRET_KEY } : null;
+const PRO_RENEWAL_CHECK_INTERVAL_MS = 60 * 60 * 1000; // раз в час достаточно — окно напоминания (3 дня) намного шире
 
 if (!BOT_TOKEN) {
   console.error("TELEGRAM_BOT_TOKEN не задан — без него нельзя ни проверить initData, ни отправить напоминание. Задайте переменную окружения и перезапустите.");
   process.exit(1);
 }
+if (!YOOKASSA) {
+  console.log("[pay] YOOKASSA_SHOP_ID/YOOKASSA_SECRET_KEY не заданы — оплата Pro отключена (POST /api/pay/create и /yookassa/webhook вернут 503)");
+}
 
 const db = openDb(DB_PATH);
-const server = createApp(db, { botToken: BOT_TOKEN, adminTelegramId: ADMIN_TELEGRAM_ID, webhookSecret: WEBHOOK_SECRET });
+const server = createApp(db, { botToken: BOT_TOKEN, adminTelegramId: ADMIN_TELEGRAM_ID, webhookSecret: WEBHOOK_SECRET, yookassa: YOOKASSA });
 
 server.listen(PORT, () => {
   console.log(`meal-planner-server слушает порт ${PORT}, БД: ${DB_PATH}`);
@@ -87,3 +101,22 @@ if (ADMIN_TELEGRAM_ID) {
 } else {
   console.log("[backup] ADMIN_TELEGRAM_ID не задан — периодический бэкап отключён");
 }
+
+// Напоминание "подписка скоро закончится" (см. proRenewal.js) — не привязано
+// к ADMIN_TELEGRAM_ID (это НЕ отчёт админу, а сообщение реальным
+// пользователям с активной оплаченной подпиской), не привязано и к YOOKASSA:
+// если у кого-то уже есть pro_until из более раннего периода оплаты, а
+// оплату временно отключили — напоминание всё равно должно дойти.
+async function proRenewalTick() {
+  try {
+    const results = await runProRenewalTick(db, BOT_TOKEN);
+    if (results.length > 0) {
+      const sent = results.filter((r) => r.ok).length;
+      console.log(`[proRenewal] тик: ${sent}/${results.length} напоминаний о продлении отправлено`);
+    }
+  } catch (err) {
+    console.error("[proRenewal] ошибка тика:", err);
+  }
+}
+setInterval(proRenewalTick, PRO_RENEWAL_CHECK_INTERVAL_MS);
+proRenewalTick();

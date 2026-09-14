@@ -5,6 +5,7 @@ import {
   getLastBackupAt, setLastBackupAt,
   setUserPro, getUserPro, countPlanGenerationsSince, savePlanHistory, listPlanHistory,
   saveFeedback, listRecentFeedback, updateMealTimesForUser,
+  extendUserPro, createPendingPayment, updatePaymentStatus, summarizePaymentsSince,
 } from "./db.js";
 
 describe("db", () => {
@@ -148,6 +149,50 @@ describe("Pro-статус", () => {
     setUserPro(db, 42, true);
     setUserPro(db, 42, false);
     expect(getUserPro(db, 42)).toBe(false);
+  });
+
+  it("pro_until в будущем — Pro, в прошлом — не Pro (оплаченная, не ручная подписка)", () => {
+    extendUserPro(db, 42, { fromISO: "2026-09-10T09:00:00Z", addDays: 30 });
+    expect(getUserPro(db, 42, "2026-09-20T09:00:00Z")).toBe(true); // внутри оплаченного периода
+    expect(getUserPro(db, 42, "2026-10-20T09:00:00Z")).toBe(false); // уже истекло
+  });
+
+  it("is_pro=1 (ручной тумблер) и pro_until — независимы, любого из двух достаточно", () => {
+    setUserPro(db, 1, true); // только ручной тумблер, без pro_until
+    expect(getUserPro(db, 1, "2099-01-01T00:00:00Z")).toBe(true); // бессрочно, дата не важна
+
+    extendUserPro(db, 2, { fromISO: "2026-09-10T09:00:00Z", addDays: 30 }); // только оплата, is_pro=0
+    expect(getUserPro(db, 2, "2026-09-11T00:00:00Z")).toBe(true);
+  });
+
+  it("extendUserPro продлевает ОТ ДАТЫ ОКОНЧАНИЯ текущего периода, а не от now — повторная оплата до истечения не теряет уже оплаченные дни", () => {
+    extendUserPro(db, 42, { fromISO: "2026-09-10T09:00:00Z", addDays: 30 }); // до 2026-10-10
+    const until = extendUserPro(db, 42, { fromISO: "2026-09-15T09:00:00Z", addDays: 30 }); // оплатили ещё раз спустя 5 дней
+    expect(until).toBe("2026-11-09T09:00:00.000Z"); // 2026-10-10 + 30 дней, а не 2026-09-15 + 30
+  });
+});
+
+describe("платежи ЮKassa", () => {
+  let db;
+  beforeEach(() => {
+    db = openDb(":memory:");
+  });
+
+  it("summarizePaymentsSince считает только succeeded-платежи за период", () => {
+    createPendingPayment(db, { yookassaPaymentId: "p1", telegramUserId: 1, amountRub: 299, createdAtISO: "2026-09-10T09:00:00Z" });
+    createPendingPayment(db, { yookassaPaymentId: "p2", telegramUserId: 2, amountRub: 299, createdAtISO: "2026-09-10T09:00:00Z" });
+    createPendingPayment(db, { yookassaPaymentId: "p3", telegramUserId: 3, amountRub: 299, createdAtISO: "2026-09-08T09:00:00Z" }); // за пределами периода ниже
+
+    updatePaymentStatus(db, { yookassaPaymentId: "p1", status: "succeeded", confirmedAtISO: "2026-09-10T09:05:00Z" });
+    updatePaymentStatus(db, { yookassaPaymentId: "p2", status: "canceled", confirmedAtISO: null }); // не succeeded — не считается
+    updatePaymentStatus(db, { yookassaPaymentId: "p3", status: "succeeded", confirmedAtISO: "2026-09-08T09:05:00Z" }); // раньше sinceISO — не считается
+
+    const summary = summarizePaymentsSince(db, "2026-09-09T00:00:00Z");
+    expect(summary).toEqual({ count: 1, totalRub: 299 });
+  });
+
+  it("пустой период — {count:0, totalRub:0}, не null/undefined", () => {
+    expect(summarizePaymentsSince(db, "2020-01-01T00:00:00Z")).toEqual({ count: 0, totalRub: 0 });
   });
 });
 

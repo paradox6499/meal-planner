@@ -3,7 +3,7 @@
 // отдельный канал/сервис (Sentry и т.п.) не заводим ради этого. Специально
 // разделено на чистые функции (когда пора слать, что писать) и одну
 // оркестрирующую runDigest — первые тестируются без сети и без времени "как есть".
-import { summarizeEventsSince, getLastDigestAt, setLastDigestAt } from "./db.js";
+import { summarizeEventsSince, getLastDigestAt, setLastDigestAt, summarizePaymentsSince } from "./db.js";
 import { sendTelegramMessage } from "./telegram.js";
 
 /** Пора ли слать дайджест: раз в сутки, в первый тик после наступления
@@ -40,9 +40,18 @@ const EVENT_LABELS = {
   home_screen_added: "добавили на экран",
 };
 
-export function buildDigestText(summary, { sinceISO, now }) {
+// paymentsSummary — { count, totalRub } (см. db.js:summarizePaymentsSince).
+// Раньше отчёт целиком обрывался на "Событий не было", если totalEvents===0
+// — платежи (payments — отдельная таблица, не events) в этом случае вообще
+// не показывались бы, даже если за тот же день кто-то реально оплатил Pro.
+// Теперь блок с оплатами не зависит от того, были ли события.
+export function buildDigestText(summary, { sinceISO, now, paymentsSummary = { count: 0, totalRub: 0 } }) {
   const periodHours = Math.max(1, Math.round((now.getTime() - new Date(sinceISO).getTime()) / 3_600_000));
   const lines = [`📊 Съедим — отчёт за последние ${periodHours} ч`, ""];
+
+  if (paymentsSummary.count > 0) {
+    lines.push(`💳 Оплат Pro: ${paymentsSummary.count} на ${paymentsSummary.totalRub.toLocaleString("ru-RU")} ₽`, "");
+  }
 
   if (summary.totalEvents === 0) {
     lines.push("Событий не было.");
@@ -80,7 +89,8 @@ export async function sendDigestNow(db, { botToken, adminTelegramId }, now = new
   const lastDigestAt = getLastDigestAt(db);
   const sinceISO = lastDigestAt || new Date(now.getTime() - 24 * 3_600_000).toISOString();
   const summary = summarizeEventsSince(db, sinceISO);
-  const text = buildDigestText(summary, { sinceISO, now });
+  const paymentsSummary = summarizePaymentsSince(db, sinceISO);
+  const text = buildDigestText(summary, { sinceISO, now, paymentsSummary });
 
   try {
     await sendTelegramMessage(botToken, adminTelegramId, text, { parseMode: undefined });

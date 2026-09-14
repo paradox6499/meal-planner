@@ -2,6 +2,18 @@
 // нужна ни на разработке, ни на хостинге.
 import { DatabaseSync } from "node:sqlite";
 
+// ALTER TABLE ... ADD COLUMN IF NOT EXISTS не поддержан версией SQLite,
+// встроенной в node:sqlite (проверено вживую — синтаксическая ошибка) —
+// добавляем колонку в УЖЕ существующую (задеплоенную, с реальными данными)
+// таблицу users только если её там ещё нет. CREATE TABLE IF NOT EXISTS ниже
+// эту задачу не решает: он не трогает таблицу, которая уже была создана
+// раньше по старой схеме.
+function ensureColumn(db, table, column, definitionSql) {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all();
+  if (cols.some((c) => c.name === column)) return;
+  db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definitionSql}`);
+}
+
 export function openDb(path) {
   const db = new DatabaseSync(path);
   db.exec(`
@@ -106,7 +118,36 @@ export function openDb(path) {
       xml_id TEXT,
       updated_at TEXT NOT NULL
     );
+
+    -- Каждый платёж ЮKassa (см. yookassa.js) — не только последний статус
+    -- пользователя, а вся история: нужна и для "раз в день отчёт о купленных
+    -- подписках" (см. digest.js:summarizePaymentsSince), и на случай спора
+    -- по возврату (см. terms.html: "24 часа с момента оплаты").
+    CREATE TABLE IF NOT EXISTS payments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      yookassa_payment_id TEXT NOT NULL UNIQUE,
+      telegram_user_id INTEGER NOT NULL,
+      amount_rub REAL NOT NULL,
+      status TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      confirmed_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_payments_created ON payments (created_at DESC);
   `);
+
+  // pro_until — платная подписка ТЕПЕРЬ ограничена по времени (одноразовый
+  // платёж на срок, см. terms.html раздел 3 — "не продлевается
+  // автоматически"), в отличие от старого is_pro (бессрочный ручной
+  // переключатель, см. scripts/set-pro.js — им всё ещё удобно выдавать себе
+  // Pro для тестирования, не оплачивая). getUserPro ниже проверяет ОБА поля:
+  // is_pro=1 ИЛИ pro_until в будущем — ручной тумблер продолжает работать
+  // как раньше, реальная оплата просто добавляет второй, ограниченный по
+  // времени способ стать Pro. renewal_reminder_sent_at — чтобы не слать
+  // "подписка скоро закончится" каждый день подряд, пока не наступит день,
+  // когда она реально закончится (см. proRenewal.js).
+  ensureColumn(db, "users", "pro_until", "TEXT");
+  ensureColumn(db, "users", "renewal_reminder_sent_at", "TEXT");
+
   return db;
 }
 
@@ -274,9 +315,103 @@ export function setUserPro(db, telegramUserId, isPro) {
   ).run(telegramUserId, isPro ? 1 : 0);
 }
 
-export function getUserPro(db, telegramUserId) {
-  const row = db.prepare("SELECT is_pro FROM users WHERE telegram_user_id = ?").get(telegramUserId);
-  return !!row?.is_pro;
+/** nowISO обязателен (см. ensureColumn/pro_until выше и общий принцип файла —
+ * db.js не читает часы сам, только сравнивает переданные строки ISO). */
+export function getUserPro(db, telegramUserId, nowISO) {
+  const row = db.prepare("SELECT is_pro, pro_until FROM users WHERE telegram_user_id = ?").get(telegramUserId);
+  if (!row) return false;
+  return !!row.is_pro || (!!row.pro_until && row.pro_until > nowISO);
+}
+
+/** Продлевает/выставляет срок действия Pro по факту оплаты — НЕ трогает
+ * is_pro (ручной тумблер admin'а — отдельная, независимая причина быть Pro,
+ * см. комментарий у ensureColumn). Если у пользователя уже была активная
+ * (ещё не истёкшая) оплаченная подписка — продлеваем от даты ЕЁ окончания,
+ * а не от "сейчас", чтобы повторная оплата ДО истечения текущего периода не
+ * теряла уже оплаченные дни. Если не было или уже истекла — считаем от now. */
+export function extendUserPro(db, telegramUserId, { fromISO, addDays }) {
+  const row = db.prepare("SELECT pro_until FROM users WHERE telegram_user_id = ?").get(telegramUserId);
+  const base = row?.pro_until && row.pro_until > fromISO ? row.pro_until : fromISO;
+  const until = new Date(new Date(base).getTime() + addDays * 24 * 60 * 60 * 1000).toISOString();
+  db.prepare(
+    `INSERT INTO users (telegram_user_id, pro_until) VALUES (?, ?)
+     ON CONFLICT(telegram_user_id) DO UPDATE SET pro_until = excluded.pro_until`
+  ).run(telegramUserId, until);
+  return until;
+}
+
+/** Создаёт "ожидающую" запись сразу после создания платежа в ЮKassa (см.
+ * app.js: POST /api/pay/create) — до подтверждения вебхуком/повторной
+ * проверкой статуса (см. yookassa.js). Позволяет увидеть в БД даже те
+ * платежи, которые пользователь так и не завершил. */
+export function createPendingPayment(db, { yookassaPaymentId, telegramUserId, amountRub, createdAtISO }) {
+  db.prepare(
+    `INSERT INTO payments (yookassa_payment_id, telegram_user_id, amount_rub, status, created_at)
+     VALUES (?, ?, ?, 'pending', ?)`
+  ).run(yookassaPaymentId, telegramUserId, amountRub, createdAtISO);
+}
+
+export function getPaymentByYookassaId(db, yookassaPaymentId) {
+  return db.prepare("SELECT * FROM payments WHERE yookassa_payment_id = ?").get(yookassaPaymentId) ?? null;
+}
+
+/** Обновляет статус существующего платежа — вызывается ТОЛЬКО после того,
+ * как сам статус подтверждён прямым запросом к ЮKassa (см. yookassa.js:
+ * fetchPaymentStatus), никогда напрямую по телу вебхука: ЮKassa не подписывает
+ * уведомления, доверять их содержимому без перепроверки — значит позволить
+ * кому угодно в интернете "оплатить" подписку одним поддельным POST-запросом. */
+export function updatePaymentStatus(db, { yookassaPaymentId, status, confirmedAtISO }) {
+  db.prepare("UPDATE payments SET status = ?, confirmed_at = COALESCE(?, confirmed_at) WHERE yookassa_payment_id = ?").run(
+    status, confirmedAtISO ?? null, yookassaPaymentId
+  );
+}
+
+/** Пользователи, у которых оплаченный период (pro_until) заканчивается в
+ * ближайшие windowMs и кому ещё не слали напоминание О ЭТОМ ЖЕ истечении
+ * (renewal_reminder_sent_at либо не выставлен, либо старше pro_until самого
+ * предыдущего периода — сравниваем с pro_until - windowMs, а не просто "было
+ * ли когда-либо отправлено", иначе после реального продления подписки
+ * напоминание больше никогда не пришло бы снова). is_pro=1 (ручной тумблер)
+ * исключаем — у него нет даты истечения, слать "подписка скоро закончится"
+ * бессмысленно и вводит в заблуждение. */
+export function getUsersWithProExpiringSoon(db, { nowISO, windowMs }) {
+  const untilBefore = new Date(new Date(nowISO).getTime() + windowMs).toISOString();
+  const rows = db
+    .prepare(
+      `SELECT telegram_user_id, pro_until, renewal_reminder_sent_at FROM users
+       WHERE is_pro = 0 AND pro_until IS NOT NULL AND pro_until > ? AND pro_until <= ?`
+    )
+    .all(nowISO, untilBefore);
+  // "уже напоминали про ЭТО истечение" — не просто "когда-либо напоминали":
+  // сравниваем не абсолютное время последнего напоминания с текущим now (SQL
+  // не умеет вычитать миллисекунды из ISO-строки без хрупкой date-арифметики
+  // прямо в запросе), а РАССТОЯНИЕ между тем напоминанием и ТЕКУЩИМ pro_until.
+  // Если пользователь продлил подписку (pro_until стал заметно позже), это
+  // расстояние резко вырастет за пределы windowMs — и напоминание сможет
+  // прийти снова для нового периода, а не молчать до конца времён после
+  // первого же продления.
+  return rows
+    .filter((r) => {
+      if (!r.renewal_reminder_sent_at) return true;
+      const gapMs = new Date(r.pro_until).getTime() - new Date(r.renewal_reminder_sent_at).getTime();
+      return gapMs > windowMs;
+    })
+    .map((r) => ({ telegram_user_id: r.telegram_user_id, pro_until: r.pro_until }));
+}
+
+export function markRenewalReminderSent(db, telegramUserId, sentAtISO) {
+  db.prepare("UPDATE users SET renewal_reminder_sent_at = ? WHERE telegram_user_id = ?").run(sentAtISO, telegramUserId);
+}
+
+/** Для дневного отчёта админу (см. digest.js) — сколько платежей завершилось
+ * успехом за период и на какую сумму. Другие статусы (pending/canceled)
+ * сюда сознательно не идут — админу интересно "сколько купили", а не
+ * "сколько раз кто-то начал и передумал". */
+export function summarizePaymentsSince(db, sinceISO) {
+  const row = db
+    .prepare("SELECT COUNT(*) AS count, COALESCE(SUM(amount_rub), 0) AS totalRub FROM payments WHERE status = 'succeeded' AND confirmed_at >= ?")
+    .get(sinceISO);
+  return { count: row.count, totalRub: row.totalRub };
 }
 
 /** Считаем через events, а не отдельный счётчик — событие "plan_generated"

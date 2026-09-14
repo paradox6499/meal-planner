@@ -6,7 +6,7 @@ import { fetchVkusvillPools, getSubstituteOptions, attachRealCosts } from "./lib
 import { loadProfile, saveProfile, clearProfile, loadTheme, saveTheme } from "./lib/profile.js";
 import { loadActivePlan, saveActivePlan, clearActivePlan } from "./lib/activePlan.js";
 import { buildPools, buildInitialPlan, buildPlanView, interleaveGroups, computeBudgetStreak, computeRecentSavings } from "./lib/planLogic.js";
-import { submitPlanToBackend, checkPlanStatus, savePlanToHistory, fetchPlanHistory, updateMealTimes } from "./lib/backend.js";
+import { submitPlanToBackend, checkPlanStatus, savePlanToHistory, fetchPlanHistory, updateMealTimes, createProPayment } from "./lib/backend.js";
 import { trackEvent } from "./lib/analytics.js";
 import logoUrl from "./assets/logo.svg";
 import { hapticSelect, hapticImpact, hapticNotify } from "./lib/haptics.js";
@@ -1204,14 +1204,11 @@ function AccountView({
   );
 }
 
-// Реальной оплаты тут пока нет — ни один платёжный провайдер (Stars,
-// ЮKassa) не подключён, кнопка ничего не списывает. Это осознанно: платить
-// за то, чего нет, — обман пользователя. Как только появится бэкенд с
-// вебхуком от платёжного провайдера (см. docs/telegram-bot-architecture.md),
-// кнопка ниже превратится в реальный openLink на страницу оплаты. Само
-// разделение на бесплатный/платный тариф — уже реальное (см.
-// server/src/app.js: /api/plan-status), просто выдать Pro можно сейчас
-// только вручную (server/scripts/set-pro.js), а не по факту оплаты.
+// Реальная оплата подключена — ЮKassa (см. server/src/yookassa.js,
+// POST /api/pay/create). Одноразовый платёж на 30 дней, не автопродление
+// (см. public/terms.html раздел 3) — ручной переключатель
+// server/scripts/set-pro.js по-прежнему отдельно работает для тестирования,
+// оплата его не заменяет, а дополняет (см. db.js: getUserPro).
 // Раньше был один абзац текста — сухое перечисление без объяснения "зачем
 // мне это". Пользователь в чате прямо попросил: разворачивающиеся пункты,
 // чтобы понять пользу подробнее, а не просто прочитать список слов.
@@ -1378,12 +1375,35 @@ function PlanHistorySection({ planHistory }) {
 // оформления. Сама оплата пока никуда не ведёт по-настоящему — ни один
 // провайдер не подключён (см. комментарий у SUBSCRIPTION_BENEFITS выше) —
 // нажатие честно говорит "скоро", а не притворяется, что списало деньги.
+// paymentState: "idle" | "loading" | "error". Реальная оплата — ЮKassa
+// (POST /api/pay/create на бэкенде создаёт платёж, возвращает checkout-
+// ссылку); "error" отдельно от простого возврата к "idle" — пользователь
+// должен увидеть, что что-то пошло не так, а не просто снова увидеть
+// исходную кнопку без объяснений.
 function ProModal({ onClose }) {
-  const [pendingPayment, setPendingPayment] = useState(false);
-  const handleSubscribe = () => {
-    hapticNotify("warning");
+  const [paymentState, setPaymentState] = useState("idle");
+  const handleSubscribe = async () => {
+    hapticImpact("light");
     trackEvent("pro_subscribe_clicked");
-    setPendingPayment(true);
+    setPaymentState("loading");
+
+    const confirmationUrl = await createProPayment();
+    if (!confirmationUrl) {
+      hapticNotify("error");
+      setPaymentState("error");
+      return;
+    }
+
+    hapticNotify("success");
+    // openLink — официальный способ открыть внешнюю https-ссылку из Mini App
+    // (обычный window.open в некоторых клиентах может не сработать); ЮKassa
+    // не встраивается в WebView мини-приложения, оплата всегда идёт во
+    // внешнем браузере/системном окне, тот же принцип, что и у SUPPORT_URL
+    // чуть выше в файле. Статус подписки подтянется сам при следующем
+    // открытии Аккаунта (checkPlanStatus) — отдельный опрос "оплатили ли уже"
+    // не заводим, это и есть уже существующий механизм.
+    window.Telegram?.WebApp?.openLink ? window.Telegram.WebApp.openLink(confirmationUrl) : window.open(confirmationUrl, "_blank");
+    onClose();
   };
   return (
     <div style={styles.modalOverlay} className="modal-overlay-in" onClick={onClose}>
@@ -1418,13 +1438,16 @@ function ProModal({ onClose }) {
             <span style={styles.proPriceNew}>299 ₽</span>
             <span style={styles.proPricePeriod}>/ мес</span>
           </div>
-          {!pendingPayment ? (
-            <button onClick={handleSubscribe} style={{ ...styles.navBtnPrimary, width: "100%", justifyContent: "center", marginTop: 12 }}>
-              Оформить подписку
-            </button>
-          ) : (
+          <button
+            onClick={handleSubscribe}
+            disabled={paymentState === "loading"}
+            style={{ ...styles.navBtnPrimary, width: "100%", justifyContent: "center", marginTop: 12, opacity: paymentState === "loading" ? 0.6 : 1 }}
+          >
+            {paymentState === "loading" ? <><Loader2 size={16} className="spin" /> Готовим оплату…</> : "Оформить подписку"}
+          </button>
+          {paymentState === "error" && (
             <p style={{ ...styles.acctSectionHint, textAlign: "center", margin: "12px 0 0 0" }}>
-              Оплата пока не подключена — совсем скоро здесь появится настоящая кнопка оплаты картой. Мы напишем, когда будет готово.
+              Не удалось начать оплату. Попробуйте ещё раз через минуту — если не поможет, напишите в поддержку (Аккаунт → «Написать в поддержку»).
             </p>
           )}
         </div>

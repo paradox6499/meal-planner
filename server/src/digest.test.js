@@ -41,6 +41,28 @@ describe("buildDigestText", () => {
     expect(text).toContain("❗ ошибок в приложении: 2");
     expect(text).toContain("Cannot read properties of undefined");
   });
+
+  it("показывает блок оплат, если он есть", () => {
+    const text = buildDigestText(
+      { totalEvents: 0, byName: [], recentErrors: [] },
+      { sinceISO: "2026-09-09T09:00:00Z", now: new Date("2026-09-10T09:00:00Z"), paymentsSummary: { count: 2, totalRub: 598 } }
+    );
+    expect(text).toContain("Оплат Pro: 2 на 598 ₽");
+  });
+
+  it("регрессия: оплаты показываются, даже если событий вообще не было (раньше отчёт обрывался на 'Событий не было')", () => {
+    const text = buildDigestText(
+      { totalEvents: 0, byName: [], recentErrors: [] },
+      { sinceISO: "2026-09-09T09:00:00Z", now: new Date("2026-09-10T09:00:00Z"), paymentsSummary: { count: 1, totalRub: 299 } }
+    );
+    expect(text).toContain("Оплат Pro: 1 на 299 ₽");
+    expect(text).toContain("Событий не было");
+  });
+
+  it("без paymentsSummary (старый вызов без этого параметра) — просто не показывает блок оплат", () => {
+    const text = buildDigestText({ totalEvents: 0, byName: [], recentErrors: [] }, { sinceISO: "2026-09-09T09:00:00Z", now: new Date("2026-09-10T09:00:00Z") });
+    expect(text).not.toContain("Оплат Pro");
+  });
 });
 
 describe("runDigest", () => {

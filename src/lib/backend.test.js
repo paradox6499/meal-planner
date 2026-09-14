@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { buildMealSlots, todayPlusDays, checkPlanStatus, savePlanToHistory, fetchPlanHistory, updateMealTimes, resolvePricesViaBackend } from "./backend.js";
+import { buildMealSlots, todayPlusDays, checkPlanStatus, savePlanToHistory, fetchPlanHistory, updateMealTimes, resolvePricesViaBackend, createProPayment } from "./backend.js";
 
 function stubTelegram(initData) {
   vi.stubGlobal("window", { Telegram: initData !== undefined ? { WebApp: { initData } } : undefined });
@@ -253,5 +253,48 @@ describe("resolvePricesViaBackend", () => {
 
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 500 }));
     expect(await resolvePricesViaBackend(["Лук"])).toBeNull();
+  });
+});
+
+describe("createProPayment", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+  });
+
+  it("null без бэкенда/вне Telegram — ничего не запрашивает", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    vi.stubEnv("VITE_BACKEND_URL", "");
+    stubTelegram("x");
+    expect(await createProPayment()).toBeNull();
+
+    vi.stubEnv("VITE_BACKEND_URL", "https://api.example.com");
+    stubTelegram(undefined);
+    expect(await createProPayment()).toBeNull();
+
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("возвращает confirmationUrl при успехе", async () => {
+    vi.stubEnv("VITE_BACKEND_URL", "https://api.example.com");
+    stubTelegram("x");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({ ok: true, confirmationUrl: "https://yookassa.ru/checkout/pay-1" }) }));
+    expect(await createProPayment()).toBe("https://yookassa.ru/checkout/pay-1");
+  });
+
+  it("null при сетевой ошибке, отказе сервера (например оплата не настроена) или отсутствии confirmationUrl", async () => {
+    vi.stubEnv("VITE_BACKEND_URL", "https://api.example.com");
+    stubTelegram("x");
+
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("boom")));
+    expect(await createProPayment()).toBeNull();
+
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 503 }));
+    expect(await createProPayment()).toBeNull();
+
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({ ok: true }) }));
+    expect(await createProPayment()).toBeNull();
   });
 });

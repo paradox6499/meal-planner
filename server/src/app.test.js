@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { createHmac } from "node:crypto";
-import { openDb, findCandidateSlots, summarizeEventsSince, setUserPro, insertEvent, listPlanHistory, listRecentFeedback } from "./db.js";
+import { openDb, findCandidateSlots, summarizeEventsSince, setUserPro, insertEvent, listPlanHistory, listRecentFeedback, createPendingPayment, getPaymentByYookassaId, getUserPro } from "./db.js";
 import { createApp, parsePlanRequest, parseEventRequest, parseSavePlanRequest, parseMealTimesRequest, parsePricesRequest, computePlanStatus, FREE_PLANS_PER_WEEK } from "./app.js";
 
 const BOT_TOKEN = "123456:TEST-TOKEN";
@@ -458,6 +458,146 @@ describe("POST /api/prices", () => {
       body: JSON.stringify({ initData: validInitData(42) }),
     });
     expect(res.status).toBe(400);
+  });
+});
+
+const YOOKASSA_CREDS = { shopId: "1460694", secretKey: "test_secret" };
+
+describe("POST /api/pay/create", () => {
+  let db, server, baseUrl;
+  const realFetch = globalThis.fetch;
+
+  beforeEach(async () => {
+    db = openDb(":memory:");
+  });
+  afterEach(async () => {
+    await new Promise((resolve) => server.close(resolve));
+    vi.unstubAllGlobals();
+  });
+
+  function stubYookassaFetch(mockImpl) {
+    vi.stubGlobal("fetch", vi.fn((url, opts) => (String(url).includes("api.yookassa.ru") ? mockImpl(url, opts) : realFetch(url, opts))));
+  }
+  async function startServer(config) {
+    server = createApp(db, config);
+    await new Promise((resolve) => server.listen(0, resolve));
+    baseUrl = `http://127.0.0.1:${server.address().port}`;
+  }
+
+  it("создаёт платёж в ЮKassa, сохраняет pending-запись и возвращает confirmationUrl", async () => {
+    await startServer({ botToken: BOT_TOKEN, yookassa: YOOKASSA_CREDS });
+    stubYookassaFetch(async () => ({
+      ok: true,
+      json: async () => ({ id: "pay-1", status: "pending", confirmation: { confirmation_url: "https://yookassa.ru/checkout/pay-1" } }),
+    }));
+
+    const res = await fetch(`${baseUrl}/api/pay/create`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ initData: validInitData(42) }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toEqual({ ok: true, confirmationUrl: "https://yookassa.ru/checkout/pay-1" });
+
+    const payment = getPaymentByYookassaId(db, "pay-1");
+    expect(payment).toMatchObject({ telegram_user_id: 42, amount_rub: 299, status: "pending" });
+  });
+
+  it("без initData -> 401, платёж не создаётся", async () => {
+    await startServer({ botToken: BOT_TOKEN, yookassa: YOOKASSA_CREDS });
+    const res = await fetch(`${baseUrl}/api/pay/create`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) });
+    expect(res.status).toBe(401);
+  });
+
+  it("ЮKassa не настроена (yookassa не передан в конфиг) -> 503", async () => {
+    await startServer({ botToken: BOT_TOKEN });
+    const res = await fetch(`${baseUrl}/api/pay/create`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ initData: validInitData(42) }),
+    });
+    expect(res.status).toBe(503);
+  });
+});
+
+describe("POST /yookassa/webhook", () => {
+  let db, server, baseUrl;
+  const realFetch = globalThis.fetch;
+
+  beforeEach(async () => {
+    db = openDb(":memory:");
+    server = createApp(db, { botToken: BOT_TOKEN, yookassa: YOOKASSA_CREDS });
+    await new Promise((resolve) => server.listen(0, resolve));
+    baseUrl = `http://127.0.0.1:${server.address().port}`;
+  });
+  afterEach(async () => {
+    await new Promise((resolve) => server.close(resolve));
+    vi.unstubAllGlobals();
+  });
+
+  function stubYookassaFetch(mockImpl) {
+    vi.stubGlobal("fetch", vi.fn((url, opts) => (String(url).includes("api.yookassa.ru") ? mockImpl(url, opts) : realFetch(url, opts))));
+  }
+
+  it("succeeded (ПЕРЕПРОВЕРЕННЫЙ у ЮKassa, не из тела запроса) -> продлевает Pro и помечает платёж", async () => {
+    createPendingPayment(db, { yookassaPaymentId: "pay-1", telegramUserId: 42, amountRub: 299, createdAtISO: "2026-09-10T09:00:00.000Z" });
+    stubYookassaFetch(async () => ({
+      ok: true,
+      json: async () => ({ id: "pay-1", status: "succeeded", paid: true, amount: { value: "299.00" }, metadata: { telegram_user_id: "42" } }),
+    }));
+
+    // Тело запроса намеренно врёт про статус ("canceled") — сервер обязан
+    // перепроверить у ЮKassa напрямую и довериться ТОЛЬКО этому, не телу.
+    const res = await fetch(`${baseUrl}/yookassa/webhook`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ event: "payment.succeeded", object: { id: "pay-1", status: "canceled" } }),
+    });
+    expect(res.status).toBe(200);
+
+    expect(getPaymentByYookassaId(db, "pay-1")).toMatchObject({ status: "succeeded" });
+    expect(getUserPro(db, 42, "2026-09-10T09:00:01.000Z")).toBe(true);
+  });
+
+  it("повторное уведомление об УЖЕ succeeded платеже не продлевает Pro второй раз", async () => {
+    createPendingPayment(db, { yookassaPaymentId: "pay-1", telegramUserId: 42, amountRub: 299, createdAtISO: "2026-09-10T09:00:00.000Z" });
+    stubYookassaFetch(async () => ({
+      ok: true,
+      json: async () => ({ id: "pay-1", status: "succeeded", paid: true, amount: { value: "299.00" }, metadata: { telegram_user_id: "42" } }),
+    }));
+
+    await fetch(`${baseUrl}/yookassa/webhook`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ object: { id: "pay-1" } }) });
+    const firstUntil = getPaymentByYookassaId(db, "pay-1");
+
+    await fetch(`${baseUrl}/yookassa/webhook`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ object: { id: "pay-1" } }) });
+    const secondUntil = getPaymentByYookassaId(db, "pay-1");
+
+    expect(secondUntil.confirmed_at).toBe(firstUntil.confirmed_at); // не перезаписано вторым уведомлением
+  });
+
+  it("платёж, о котором мы не просили (нет pending-записи) -> 200, ничего не меняет", async () => {
+    stubYookassaFetch(async () => ({
+      ok: true,
+      json: async () => ({ id: "unknown-pay", status: "succeeded", paid: true, amount: { value: "299.00" }, metadata: { telegram_user_id: "999" } }),
+    }));
+    const res = await fetch(`${baseUrl}/yookassa/webhook`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ object: { id: "unknown-pay" } }),
+    });
+    expect(res.status).toBe(200);
+    expect(getUserPro(db, 999, "2026-09-10T09:00:00.000Z")).toBe(false);
+  });
+
+  it("битое тело (без object.id) -> 400", async () => {
+    const res = await fetch(`${baseUrl}/yookassa/webhook`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) });
+    expect(res.status).toBe(400);
+  });
+
+  it("ЮKassa API недоступна при перепроверке -> 500 (чтобы ЮKassa повторила уведомление позже)", async () => {
+    createPendingPayment(db, { yookassaPaymentId: "pay-1", telegramUserId: 42, amountRub: 299, createdAtISO: "2026-09-10T09:00:00.000Z" });
+    stubYookassaFetch(async () => ({ ok: false, json: async () => ({ code: "internal_server_error" }) }));
+    const res = await fetch(`${baseUrl}/yookassa/webhook`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ object: { id: "pay-1" } }) });
+    expect(res.status).toBe(500);
   });
 });
 

@@ -79,6 +79,34 @@ export async function checkPlanStatus() {
   }
 }
 
+/** Создаёт платёж в ЮKassa (POST /api/pay/create) и возвращает checkout-
+ * ссылку — открывается через Telegram.WebApp.openLink (см. App.jsx:
+ * ProModal), не встраивается в само мини-приложение: ЮKassa не поддерживает
+ * работу внутри Telegram WebView. null — нечем спросить (нет бэкенда, не в
+ * Telegram) или сервер отказал (оплата ещё не настроена — YOOKASSA_SHOP_ID/
+ * YOOKASSA_SECRET_KEY, см. server/README.md — или сбой ЮKassa) — вызывающий
+ * код показывает пользователю понятную причину вместо тихого "ничего не
+ * произошло". */
+export async function createProPayment() {
+  const backendUrl = import.meta.env.VITE_BACKEND_URL;
+  const initData = currentInitData();
+  if (!backendUrl || !initData) return null;
+
+  try {
+    const res = await fetch(`${backendUrl}/api/pay/create`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ initData }),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data.confirmationUrl || null;
+  } catch (err) {
+    console.warn("Не удалось создать платёж:", err.message);
+    return null;
+  }
+}
+
 /** Как resolvePrices (vkusvillMcp.js), но через ОБЩИЙ серверный кэш цен
  * (server/src/vkusvillPrices.js, POST /api/prices) вместо прямого похода в
  * ВкусВилл из браузера каждый раз заново. Одинаковые названия ингредиентов

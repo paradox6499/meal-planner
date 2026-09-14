@@ -4,16 +4,19 @@
 // поднятия реального процесса на реальном порту.
 import { createServer } from "node:http";
 import { validateInitData } from "./initData.js";
+import { randomUUID } from "node:crypto";
 import {
   saveUserPlan, insertEvent,
   getUserPro, countPlanGenerationsSince, savePlanHistory, listPlanHistory,
   saveFeedback, listRecentFeedback, updateMealTimesForUser,
+  createPendingPayment, getPaymentByYookassaId, updatePaymentStatus, extendUserPro,
 } from "./db.js";
 import { planReplyForUpdate, buildWelcomeText, buildFeedbackAckText, buildFeedbackListText } from "./webhook.js";
 import { sendTelegramMessage } from "./telegram.js";
 import { sendDigestNow } from "./digest.js";
 import { sendBackupNow } from "./backup.js";
 import { resolveIngredientPricesWithCache } from "./vkusvillPrices.js";
+import { createPayment, fetchPaymentStatus } from "./yookassa.js";
 
 const MEAL_TYPES = new Set(["breakfast", "lunch", "dinner", "snack"]);
 const MAX_EVENT_NAME_LENGTH = 64;
@@ -36,6 +39,14 @@ const MAX_PROPS_JSON_LENGTH = 4000;
 export const FREE_PLANS_PER_WEEK = 1;
 const FREE_WINDOW_MS = 7 * 24 * 3_600_000;
 const MAX_PLAN_JSON_LENGTH = 200_000; // с запасом на неделю рецептов+список покупок, но не резиновое
+
+// Цена и срок — те же 299 ₽/мес, что уже показаны на ProModal (src/App.jsx)
+// и в public/terms.html ("указанный на экране оплаты срок") задолго до того,
+// как оплата реально заработала технически. 30 дней, не "календарный месяц" —
+// проще и однозначнее (extendUserPro просто прибавляет дни, без вопроса
+// "а как быть с февралём").
+export const PRO_PRICE_RUB = 299;
+export const PRO_PERIOD_DAYS = 30;
 
 function readJsonBody(req) {
   return new Promise((resolve, reject) => {
@@ -201,7 +212,17 @@ export function parsePricesRequest(body) {
   return { ok: true, value: { names } };
 }
 
-export function createApp(db, { botToken, adminTelegramId = null, webhookSecret = null }) {
+/** Достаёт id платежа из тела уведомления ЮKassa — и НИЧЕГО больше оттуда не
+ * берёт на веру (см. комментарий у fetchPaymentStatus в yookassa.js: тело
+ * вебхука не подписано, статус из него использовать для решений нельзя).
+ * Форма реального уведомления: {event, object: {id, status, ...}}. */
+export function parseYookassaWebhookBody(body) {
+  const paymentId = body?.object?.id;
+  if (!paymentId || typeof paymentId !== "string") return { ok: false, error: "object.id отсутствует" };
+  return { ok: true, value: { paymentId } };
+}
+
+export function createApp(db, { botToken, adminTelegramId = null, webhookSecret = null, yookassa = null }) {
   return createServer(async (req, res) => {
     if (req.method === "OPTIONS") {
       sendJson(res, 204, {});
@@ -278,7 +299,7 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
       if (!auth.ok) return sendJson(res, auth.status, { ok: false, error: auth.error });
 
       try {
-        const isPro = getUserPro(db, auth.telegramUserId);
+        const isPro = getUserPro(db, auth.telegramUserId, new Date().toISOString());
         const sinceISO = new Date(Date.now() - FREE_WINDOW_MS).toISOString();
         const usedThisWeek = countPlanGenerationsSince(db, auth.telegramUserId, sinceISO);
         sendJson(res, 200, { ok: true, ...computePlanStatus(isPro, usedThisWeek, new Date()) });
@@ -356,6 +377,89 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
       } catch (err) {
         console.error("[api/prices] ошибка резолвинга:", err);
         sendJson(res, 500, { ok: false, error: "не удалось получить цены" });
+      }
+      return;
+    }
+
+    // Создаёт платёж в ЮKassa и возвращает checkout-ссылку — фронтенд
+    // открывает её через Telegram.WebApp.openLink (внешний браузер, ЮKassa
+    // не встраивается в WebView мини-приложения). yookassa — конфиг
+    // {shopId, secretKey}, может быть не задан (ещё не подключили/тестовое
+    // окружение без секрета) — тогда 503, а не падение процесса.
+    if (req.method === "POST" && req.url === "/api/pay/create") {
+      if (!yookassa) return sendJson(res, 503, { ok: false, error: "оплата ещё не настроена" });
+
+      const auth = await readAuthenticatedBody(req, botToken);
+      if (!auth.ok) return sendJson(res, auth.status, { ok: false, error: auth.error });
+
+      try {
+        const idempotenceKey = randomUUID();
+        const payment = await createPayment(yookassa, {
+          amountRub: PRO_PRICE_RUB,
+          description: `Съедим Pro — ${PRO_PERIOD_DAYS} дней`,
+          returnUrl: "https://t.me/s_edim_bot",
+          telegramUserId: auth.telegramUserId,
+          idempotenceKey,
+        });
+        createPendingPayment(db, {
+          yookassaPaymentId: payment.id, telegramUserId: auth.telegramUserId,
+          amountRub: PRO_PRICE_RUB, createdAtISO: new Date().toISOString(),
+        });
+        sendJson(res, 200, { ok: true, confirmationUrl: payment.confirmationUrl });
+      } catch (err) {
+        console.error("[api/pay/create] ошибка создания платежа:", err.message);
+        sendJson(res, 500, { ok: false, error: "не удалось создать платёж" });
+      }
+      return;
+    }
+
+    // Уведомление от ЮKassa о смене статуса платежа. НЕ проверяем initData —
+    // это не Telegram, а сам ЮKassa стучится сюда напрямую. И, что важнее,
+    // НЕ доверяем статусу из тела запроса вообще (см. parseYookassaWebhookBody
+    // и комментарий у fetchPaymentStatus в yookassa.js) — только id платежа,
+    // дальше сами перепроверяем его статус у ЮKassa своими же учётными
+    // данными. Отвечаем 200 почти всегда (кроме битого тела/не настроенной
+    // оплаты) — иначе ЮKassa будет бесконечно повторять то же уведомление.
+    if (req.method === "POST" && req.url === "/yookassa/webhook") {
+      if (!yookassa) return sendJson(res, 503, { ok: false, error: "оплата ещё не настроена" });
+
+      let body;
+      try {
+        body = await readJsonBody(req);
+      } catch (err) {
+        sendJson(res, 400, { ok: false, error: err.message });
+        return;
+      }
+      const parsed = parseYookassaWebhookBody(body);
+      if (!parsed.ok) return sendJson(res, 400, { ok: false, error: parsed.error });
+
+      try {
+        const status = await fetchPaymentStatus(yookassa, parsed.value.paymentId);
+        const existing = getPaymentByYookassaId(db, status.id);
+        // Платёж, о котором мы вообще не просили (не создавали через
+        // /api/pay/create) — не наш, игнорируем: отвечаем 200, чтобы ЮKassa
+        // не повторяла, но ничего не меняем.
+        if (!existing) {
+          sendJson(res, 200, { ok: true });
+          return;
+        }
+        // Идемпотентность: ЮKassa может прислать одно и то же уведомление
+        // несколько раз — если платёж УЖЕ отмечен успешным, не продлеваем
+        // Pro повторно на те же деньги.
+        if (status.status === "succeeded" && existing.status !== "succeeded") {
+          const nowISO = new Date().toISOString();
+          updatePaymentStatus(db, { yookassaPaymentId: status.id, status: "succeeded", confirmedAtISO: nowISO });
+          extendUserPro(db, existing.telegram_user_id, { fromISO: nowISO, addDays: PRO_PERIOD_DAYS });
+        } else if (status.status !== existing.status) {
+          updatePaymentStatus(db, { yookassaPaymentId: status.id, status: status.status, confirmedAtISO: null });
+        }
+        sendJson(res, 200, { ok: true });
+      } catch (err) {
+        console.error("[yookassa/webhook] ошибка обработки:", err.message);
+        // 500, а не 200 — на реальном сбое (например, сама ЮKassa API
+        // недоступна секунду) ХОТИМ, чтобы ЮKassa повторила уведомление позже,
+        // а не решила, что мы его успешно обработали.
+        sendJson(res, 500, { ok: false, error: "не удалось обработать уведомление" });
       }
       return;
     }

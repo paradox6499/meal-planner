@@ -22,4 +22,4 @@ if (!Number.isInteger(telegramUserId)) {
 
 const db = openDb(DB_PATH);
 setUserPro(db, telegramUserId, actionArg === "on");
-console.log(`Готово: пользователь ${telegramUserId} теперь ${getUserPro(db, telegramUserId) ? "Pro" : "Free"} (БД: ${DB_PATH})`);
+console.log(`Готово: пользователь ${telegramUserId} теперь ${getUserPro(db, telegramUserId, new Date().toISOString()) ? "Pro" : "Free"} (БД: ${DB_PATH})`);
