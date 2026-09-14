@@ -17,7 +17,17 @@ export function trackEvent(eventName, props = null) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ initData: tg.initData, eventName, props }),
-  }).catch((err) => {
-    console.warn(`Не удалось отправить событие "${eventName}":`, err.message);
-  });
+  })
+    .then((res) => {
+      // Тот же пробел, что был в backend.js (см. его комментарии): fetch()
+      // не бросает на HTTP 4xx/5xx, только на сетевой сбой — без этой
+      // проверки отклонённое сервером событие (например initData "устарела")
+      // выглядело бы как успех, а ежедневный отчёт админу ("/report") честно
+      // писал бы "Событий не было", хотя события на самом деле отправлялись,
+      // просто сервер их не принимал.
+      if (!res.ok) console.warn(`Сервер отклонил событие "${eventName}":`, res.status);
+    })
+    .catch((err) => {
+      console.warn(`Не удалось отправить событие "${eventName}":`, err.message);
+    });
 }

@@ -18,9 +18,17 @@ export function shouldRunDigest(now, lastDigestAt, digestHour) {
   return !lastIsSameDay;
 }
 
+// Найдено при разборе вопроса "какие вообще события отслеживаются" —
+// app_opened и wizard_step_completed реально шлются (см. trackEvent в
+// App.jsx), но тут не были подписаны — без этого отчёт показывал их сырым
+// именем события вместо человеческого текста. wizard_started, наоборот,
+// нигде в App.jsx не зовётся — оставлен на случай, если появится позже,
+// подписанное-но-не-используемое имя безвредно.
 const EVENT_LABELS = {
   app_error: "❗ ошибок в приложении",
+  app_opened: "открыли приложение",
   wizard_started: "визард начали",
+  wizard_step_completed: "шагов визарда пройдено",
   plan_generated: "планов собрано",
   pro_modal_opened: "открыли экран подписки",
   pro_subscribe_clicked: "нажали «Оформить подписку»",

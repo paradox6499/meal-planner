@@ -78,11 +78,21 @@ export async function savePlanToHistory({ storeId, storeName, budget, family, to
   if (!backendUrl || !initData) return;
 
   try {
-    await fetch(`${backendUrl}/api/plans`, {
+    const res = await fetch(`${backendUrl}/api/plans`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ initData, storeId, storeName, budget, family, totalCost, plan }),
     });
+    // Тот же пробел, что уже был в updateMealTimes/submitPlanToBackend (см.
+    // их комментарии) — без этой проверки отклонённая сервером запись
+    // (например initData "устарела") выглядела бы как успех, а история
+    // планов и геймификация (streak/экономия в Аккаунте — они считаются
+    // именно из этой истории, см. ProgressSection в App.jsx) молча
+    // оставались бы пустыми без единой видимой причины.
+    if (!res.ok) {
+      const body = await res.json().catch(() => null);
+      console.warn("Сервер отклонил сохранение плана в историю:", res.status, body?.error);
+    }
   } catch (err) {
     console.warn("Не удалось сохранить план в историю:", err.message);
   }
