@@ -90,7 +90,17 @@ export async function checkPlanStatus() {
 export async function createProPayment() {
   const backendUrl = import.meta.env.VITE_BACKEND_URL;
   const initData = currentInitData();
-  if (!backendUrl || !initData) return null;
+  // Раньше эти два случая (не дошли до бэкенда вообще / бэкенд дошёл и
+  // ответил ошибкой) были неотличимы друг от друга — ни один не оставлял ни
+  // следа в консоли, а на бэкенде при отказе авторизации тоже не было лога
+  // (см. app.js) — итог: "нажимаю оплатить — ничего не происходит и нигде
+  // ничего не видно" (жалоба в чате). console.warn тут не мешает обычным
+  // пользователям (DevTools никто не открывает), но даёт зацепку при
+  // диагностике через Telegram Desktop → Inspect или обычный браузер.
+  if (!backendUrl || !initData) {
+    console.warn("Не удалось создать платёж: нет backendUrl или initData", { hasBackendUrl: !!backendUrl, hasInitData: !!initData });
+    return null;
+  }
 
   try {
     const res = await fetch(`${backendUrl}/api/pay/create`, {
@@ -98,11 +108,15 @@ export async function createProPayment() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ initData }),
     });
-    if (!res.ok) return null;
+    if (!res.ok) {
+      const data = await res.json().catch(() => null);
+      console.warn("Не удалось создать платёж: сервер ответил ошибкой", res.status, data?.error);
+      return null;
+    }
     const data = await res.json();
     return data.confirmationUrl || null;
   } catch (err) {
-    console.warn("Не удалось создать платёж:", err.message);
+    console.warn("Не удалось создать платёж: сетевая ошибка", err.message);
     return null;
   }
 }

@@ -460,7 +460,18 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
       if (!yookassa) return sendJson(res, 503, { ok: false, error: "оплата ещё не настроена" });
 
       const auth = await readAuthenticatedBody(req, botToken);
-      if (!auth.ok) return sendJson(res, auth.status, { ok: false, error: auth.error });
+      // readAuthenticatedBody сама по себе ничего не логирует (общая для
+      // многих эндпоинтов, некоторые из них дёргаются часто и по мелочи —
+      // логировать там каждый отказ было бы шумом). Но именно здесь отказ
+      // авторизации — единственная причина, по которой фронтенд покажет
+      // "не удалось начать оплату", а бэкенд при этом не оставит НИ ОДНОЙ
+      // строки в логах (жалоба в чате: "нажимаю оплатить, логов вообще нет").
+      // 401/400 тут стоит видеть явно — иначе отличить "запрос не дошёл до
+      // сервера" от "дошёл, но не прошёл авторизацию" нечем вообще.
+      if (!auth.ok) {
+        console.warn(`[api/pay/create] отказ авторизации (${auth.status}):`, auth.error);
+        return sendJson(res, auth.status, { ok: false, error: auth.error });
+      }
 
       try {
         const idempotenceKey = randomUUID();
