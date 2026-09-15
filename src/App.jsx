@@ -7,6 +7,7 @@ import { loadProfile, saveProfile, clearProfile, loadTheme, saveTheme } from "./
 import { loadActivePlan, saveActivePlan, clearActivePlan } from "./lib/activePlan.js";
 import { buildPools, buildInitialPlan, buildPlanView, interleaveGroups, computeBudgetStreak, computeRecentSavings } from "./lib/planLogic.js";
 import { submitPlanToBackend, checkPlanStatus, savePlanToHistory, fetchPlanHistory, updateMealTimes, createProPayment, claimReferral, fetchReferralStatus } from "./lib/backend.js";
+import { loadPantryStaples, savePantryStaples } from "./lib/pantry.js";
 import { trackEvent } from "./lib/analytics.js";
 import logoUrl from "./assets/logo.svg";
 import { hapticSelect, hapticImpact, hapticNotify } from "./lib/haptics.js";
@@ -1595,6 +1596,25 @@ function ResultView({ plan, storeId, storeName, budget, family, mealsCount, diet
     });
   };
 
+  // "Уже есть дома" (см. lib/pantry.js) — единый набор названий, ПЕРЕЖИВАЕТ
+  // переход на следующую неделю (в отличие от subs/substitutions выше,
+  // которые относятся только к ЭТОМУ плану). Читаем один раз при монтировании
+  // ResultView — если ингредиент из набора снова попал в список покупок этой
+  // недели, он будет отмечен сразу; отметить/снять можно прямо в списке.
+  const [pantryStaples, setPantryStaples] = useState(loadPantryStaples);
+  useEffect(() => {
+    savePantryStaples(pantryStaples);
+  }, [pantryStaples]);
+  const toggleHaveAlready = (itemName) => {
+    hapticSelect();
+    setPantryStaples((prev) => {
+      const next = new Set(prev);
+      if (next.has(itemName)) next.delete(itemName);
+      else next.add(itemName);
+      return next;
+    });
+  };
+
   // name -> исходная позиция списка покупок (amount/unit/cost) — нужна и
   // для пересчёта итого при замене, и для сборки корзины выше.
   const itemsByName = useMemo(
@@ -1623,8 +1643,15 @@ function ResultView({ plan, storeId, storeName, budget, family, mealsCount, diet
       if (!item) continue;
       delta += substituteLineCost(item, sub) - (item.cost || 0);
     }
+    // "Уже есть дома" — эту позицию не нужно покупать, вычитаем её цену из
+    // итого. Замена и "уже есть" взаимоисключающие в UI (см. рендер списка
+    // ниже) — но на случай рассинхрона (например отметили "уже есть", пока
+    // была открыта панель замены) не даём вычесть дважды за одну и ту же строку.
+    for (const it of itemsByName.values()) {
+      if (pantryStaples.has(it.name) && !subs[it.name]) delta -= it.cost || 0;
+    }
     return plan.total + delta;
-  }, [plan, subs, itemsByName]);
+  }, [plan, subs, itemsByName, pantryStaples]);
   const over = adjustedTotal > budget;
 
   const handleOrder = async () => {
@@ -1793,6 +1820,7 @@ function ResultView({ plan, storeId, storeName, budget, family, mealsCount, diet
           <div style={styles.listBox}>
             {g.items.map((it) => {
               const sub = subs[it.name];
+              const already = pantryStaples.has(it.name);
               return (
                 <div key={it.name}>
                   <div style={styles.listRow}>
@@ -1802,6 +1830,8 @@ function ResultView({ plan, storeId, storeName, budget, family, mealsCount, diet
                           <span style={{ textDecoration: "line-through", color: "var(--text-tertiary)" }}>{it.name}</span>
                           {" → "}{sub.name}
                         </>
+                      ) : already ? (
+                        <span style={{ textDecoration: "line-through", color: "var(--text-tertiary)" }}>{it.name}</span>
                       ) : (
                         it.name
                       )}
@@ -1814,12 +1844,22 @@ function ResultView({ plan, storeId, storeName, budget, family, mealsCount, diet
                             <X size={13} />
                           </button>
                         </>
+                      ) : already ? (
+                        <>
+                          <span style={{ color: "var(--text-tertiary)" }}>не нужно покупать</span>
+                          <button onClick={() => toggleHaveAlready(it.name)} title="Убрать отметку «уже есть»" aria-label="Убрать отметку «уже есть»" style={styles.pantryBtnActive}>
+                            <Home size={13} />
+                          </button>
+                        </>
                       ) : (
                         <>
                           <span style={{ color: "var(--text-tertiary)" }}>
                             {it.amount} {it.unit}
                             {plan.itemized && it.cost != null && ` · ${it.cost.toLocaleString("ru-RU")} ₽`}
                           </span>
+                          <button onClick={() => toggleHaveAlready(it.name)} title="Уже есть дома — не покупать в этот раз" aria-label="Уже есть дома — не покупать в этот раз" style={styles.pantryBtn}>
+                            <Home size={13} />
+                          </button>
                           {canOrderForReal && (
                             <button onClick={() => handleFindSubstitute(it.name)} title="Нет в наличии — подобрать замену" aria-label="Нет в наличии — подобрать замену" style={styles.subFindBtn}>
                               <PackageSearch size={13} />
@@ -2188,6 +2228,12 @@ const styles = {
   listRow: { display: "flex", justifyContent: "space-between", gap: 8, padding: "7px 0", borderBottom: "1px solid var(--hairline-2)", fontSize: 13.5 },
   subFindBtn: { display: "flex", alignItems: "center", justifyContent: "center", background: "none", border: "none", padding: 2, color: "var(--text-tertiary)", cursor: "pointer" },
   subRevertBtn: { display: "flex", alignItems: "center", justifyContent: "center", background: "none", border: "none", padding: 2, color: "var(--danger)", cursor: "pointer" },
+  // "Уже есть дома" (см. lib/pantry.js) — padding 6 (не 2, как у соседних
+  // subFindBtn/subRevertBtn) — те уже отмечены как слишком мелкая тач-зона
+  // при аудите доступности, не повторяем ту же ошибку в новом элементе:
+  // 13 (иконка) + 6*2 = 25px, укладывается в минимум WCAG 2.5.8 (24×24).
+  pantryBtn: { display: "flex", alignItems: "center", justifyContent: "center", background: "none", border: "none", padding: 6, margin: -6, color: "var(--text-tertiary)", cursor: "pointer" },
+  pantryBtnActive: { display: "flex", alignItems: "center", justifyContent: "center", background: "none", border: "none", padding: 6, margin: -6, color: "var(--accent)", cursor: "pointer" },
   subPanel: { display: "flex", flexDirection: "column", gap: 6, padding: "8px 10px 10px", marginBottom: 4, borderRadius: 14, ...glass(0.5, 10), border: "1px solid var(--hairline)" },
   subPanelHint: { display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, color: "var(--text-tertiary)" },
   subOptionBtn: { display: "flex", alignItems: "center", gap: 8, width: "100%", textAlign: "left", background: "none", border: "1px solid var(--hairline)", borderRadius: 10, padding: "8px 10px", fontSize: 12.5, color: "var(--text-primary)", cursor: "pointer" },
