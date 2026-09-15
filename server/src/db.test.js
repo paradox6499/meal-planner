@@ -1,4 +1,8 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { DatabaseSync } from "node:sqlite";
+import { mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import {
   openDb, saveUserPlan, findCandidateSlots, markReminderSent,
   insertEvent, summarizeEventsSince, getLastDigestAt, setLastDigestAt,
@@ -6,6 +10,7 @@ import {
   setUserPro, getUserPro, countPlanGenerationsSince, savePlanHistory, listPlanHistory,
   saveFeedback, listRecentFeedback, updateMealTimesForUser,
   extendUserPro, createPendingPayment, updatePaymentStatus, summarizePaymentsSince,
+  getUsersWithProExpiringSoon,
 } from "./db.js";
 
 describe("db", () => {
@@ -169,6 +174,57 @@ describe("Pro-статус", () => {
     extendUserPro(db, 42, { fromISO: "2026-09-10T09:00:00Z", addDays: 30 }); // до 2026-10-10
     const until = extendUserPro(db, 42, { fromISO: "2026-09-15T09:00:00Z", addDays: 30 }); // оплатили ещё раз спустя 5 дней
     expect(until).toBe("2026-11-09T09:00:00.000Z"); // 2026-10-10 + 30 дней, а не 2026-09-15 + 30
+  });
+});
+
+// Регрессия на реальный продовый сбой (лог Render: "no such column: is_pro"
+// в getUsersWithProExpiringSoon) — is_pro попал в текст CREATE TABLE IF NOT
+// EXISTS users позже, чем таблица впервые создалась на диске Render, а
+// IF NOT EXISTS ничего не делает для уже существующей таблицы. Ни один тест
+// это не ловил, потому что все они открывают ":memory:" — там таблица
+// СОЗДАЁТСЯ с нуля при каждом запуске, is_pro в ней есть сразу. Здесь —
+// настоящий файл на диске, вручную создан по СТАРОЙ схеме (как 56ae78d,
+// самый первый коммит бэкенда) — то есть именно то, что физически лежит на
+// Render прямо сейчас: openDb должен домигрировать такую базу, а не упасть.
+describe("миграция существующей БД без is_pro (регрессия продового сбоя)", () => {
+  let dir, dbPath;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "sedim-migration-test-"));
+    dbPath = join(dir, "data.db");
+    const legacy = new DatabaseSync(dbPath);
+    legacy.exec(`
+      CREATE TABLE users (
+        telegram_user_id INTEGER PRIMARY KEY,
+        timezone_offset_minutes INTEGER NOT NULL DEFAULT 180,
+        reminder_lead_minutes INTEGER NOT NULL DEFAULT 30
+      );
+    `);
+    // Нестандартные значения сразу при вставке (не отдельным UPDATE'ом
+    // вторым подключением к тому же файлу после) — второе открытие того же
+    // файла в том же тесте подвешивало SQLite-блокировку на файле в этом
+    // окружении, тест зависал на реальном таймауте вместо честного результата.
+    legacy.prepare("INSERT INTO users (telegram_user_id, timezone_offset_minutes, reminder_lead_minutes) VALUES (?, ?, ?)").run(777, 240, 45);
+    legacy.close();
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  it("openDb добавляет is_pro в уже существующую (старую) таблицу users, не падает", () => {
+    const db = openDb(dbPath);
+    expect(getUserPro(db, 777, new Date().toISOString())).toBe(false); // дефолт 0, не падает
+    setUserPro(db, 777, true);
+    expect(getUserPro(db, 777, new Date().toISOString())).toBe(true);
+  });
+
+  it("getUsersWithProExpiringSoon (тот самый запрос из живого лога) отрабатывает на домигрированной базе", () => {
+    const db = openDb(dbPath);
+    extendUserPro(db, 777, { fromISO: new Date().toISOString(), addDays: 2 });
+    expect(() => getUsersWithProExpiringSoon(db, { nowISO: new Date().toISOString(), windowMs: 3 * 24 * 3_600_000 })).not.toThrow();
+  });
+
+  it("существующие данные (timezone/reminder_lead), записанные ДО миграции, не теряются", () => {
+    const db = openDb(dbPath);
+    const rows = db.prepare("SELECT * FROM users WHERE telegram_user_id = 777").all();
+    expect(rows[0]).toMatchObject({ timezone_offset_minutes: 240, reminder_lead_minutes: 45, is_pro: 0 });
   });
 });
 
