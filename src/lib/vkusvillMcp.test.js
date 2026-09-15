@@ -1,10 +1,40 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { toVkusvillQuantity, searchProducts, createCartLink, clearMcpCache, resolvePrices } from "./vkusvillMcp.js";
+import { toVkusvillQuantity, searchProducts, createCartLink, clearMcpCache, resolvePrices, parsePackageAmount } from "./vkusvillMcp.js";
 
 // Используется и при сборке реальной корзины, и при пересчёте "Итого за
 // продукты" на замену товара (ResultView в App.jsx) — если эта функция
 // разойдётся, разойдутся ОБА места одновременно, поэтому важно закрепить
 // поведение тестом, а не полагаться на то, что они просто зовут одну функцию.
+// Регрессия на живую жалобу "не удалось получить цены почти ни на один
+// товар": priceByName резолвился на 100%, но цена блюда выставлялась только
+// для ~7% рецептов — причина в том, что почти все товары ВкусВилл продаются
+// "поштучно" (unit: "шт" = 1 упаковка), а вес/объём зашит только в название
+// ("Фарш из индейки, 500 г").
+describe("parsePackageAmount", () => {
+  it("достаёт вес/объём из названия товара, переводит кг/л в г/мл", () => {
+    expect(parsePackageAmount("Фарш из индейки, 500 г")).toEqual({ amount: 500, unit: "г" });
+    expect(parsePackageAmount("Сахар-песок, 1 кг")).toEqual({ amount: 1000, unit: "г" });
+    expect(parsePackageAmount("Молоко, 900 мл")).toEqual({ amount: 900, unit: "мл" });
+    expect(parsePackageAmount("Масло растительное, 1 л")).toEqual({ amount: 1000, unit: "мл" });
+  });
+
+  it("понимает &nbsp; между числом и единицей (как реально приходит от ВкусВилл)", () => {
+    expect(parsePackageAmount("Чечевица красная, 450&nbsp;г")).toEqual({ amount: 450, unit: "г" });
+  });
+
+  it("дробные значения", () => {
+    expect(parsePackageAmount("Творог, 0.5 кг")).toEqual({ amount: 500, unit: "г" });
+    expect(parsePackageAmount("Сливки, 0,33 л")).toEqual({ amount: 330, unit: "мл" });
+  });
+
+  it("нет распознаваемого веса в названии -> null, не гадает", () => {
+    expect(parsePackageAmount("Хлеб бородинский")).toBeNull();
+    expect(parsePackageAmount("")).toBeNull();
+    expect(parsePackageAmount(null)).toBeNull();
+    expect(parsePackageAmount(undefined)).toBeNull();
+  });
+});
+
 describe("toVkusvillQuantity", () => {
   it("для наших ингредиентов в штуках берёт округлённое количество как есть", () => {
     expect(toVkusvillQuantity(3, "шт", "кг")).toBe(3);
@@ -260,5 +290,28 @@ describe("resolvePrices — ограничение параллелизма (р�
       { matched: false, name: "Куриное филе" },
       { matched: false, name: "Гречка" },
     ]);
+  });
+
+  // Регрессия на живую жалобу "не удалось получить цены почти ни на один
+  // товар" — см. parsePackageAmount выше за полным объяснением.
+  it("товар 'шт' с весом в названии -> packageAmount/packageUnit распознаны", async () => {
+    fetch.mockResolvedValue(mockMcpResponse({ items: [{ xml_id: 1, name: "Фарш из индейки, 500&nbsp;г", price: { current: 443 }, unit: "шт" }] }));
+    const [resolved] = await resolvePrices([{ name: "Фарш из индейки", amount: 1, unit: "шт" }]);
+    expect(resolved.packageAmount).toBe(500);
+    expect(resolved.packageUnit).toBe("г");
+  });
+
+  it("товар уже на вес/объём (не 'шт') -> packageAmount не парсится (незачем)", async () => {
+    fetch.mockResolvedValue(mockMcpResponse({ items: [{ xml_id: 1, name: "Морковь мытая, 500 г", price: { current: 60 }, unit: "кг" }] }));
+    const [resolved] = await resolvePrices([{ name: "Морковь", amount: 1, unit: "шт" }]);
+    expect(resolved.packageAmount).toBeNull();
+    expect(resolved.packageUnit).toBeNull();
+  });
+
+  it("товар 'шт' без распознаваемого веса в названии -> packageAmount null, не падает", async () => {
+    fetch.mockResolvedValue(mockMcpResponse({ items: [{ xml_id: 1, name: "Хлеб бородинский", price: { current: 80 }, unit: "шт" }] }));
+    const [resolved] = await resolvePrices([{ name: "Хлеб", amount: 1, unit: "шт" }]);
+    expect(resolved.packageAmount).toBeNull();
+    expect(resolved.packageUnit).toBeNull();
   });
 });

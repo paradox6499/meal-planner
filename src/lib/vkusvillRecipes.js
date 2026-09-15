@@ -249,7 +249,11 @@ const AVG_PIECE_GRAMS = [
   { re: /огурец|огурц/i, grams: 100 },
   { re: /картофел/i, grams: 120 },
   { re: /морков/i, grams: 90 },
-  { re: /перец сладк/i, grams: 150 },
+  { re: /перец сладк|перец болгарск/i, grams: 150 },
+  // Куриное бедро/окорочок — частый "поштучный" ингредиент в рецептах,
+  // найдено при том же живом прогоне: не попадал в таблицу вообще, хотя это
+  // не овощ, а тот же принцип (рецепт "1 шт", каталожный товар — на вес).
+  { re: /бедр[оа].*курин|курин.*бедр|окорочок/i, grams: 160 },
   { re: /кабачок|цукини/i, grams: 300 },
   { re: /баклажан/i, grams: 250 },
   { re: /лимон/i, grams: 100 },
@@ -275,14 +279,23 @@ export function resolveIngredientCost(name, amount, unit, info) {
     return pricePerBaseUnit(info.price, info.productUnit) * amount;
   }
   // Рецепт — поштучно, товар — на вес: пробуем честную оценку по названию
-  // (см. AVG_PIECE_GRAMS выше). Обратный случай (рецепт — в граммах, товар —
-  // поштучно, например "22.5 г майонеза" при товаре "банка") оставляем
-  // непосчитанным, как и раньше — размер "штуки" там куда менее предсказуем
-  // (майонез бывает 100 г и 800 г банкой), рискованная оценка хуже честного "не знаем".
+  // (см. AVG_PIECE_GRAMS выше).
   if (unit === "шт" && isWeightOrVolumeUnit(info.productUnit)) {
     const gramsPerPiece = estimatePieceGrams(name);
     if (gramsPerPiece == null) return null;
     return pricePerBaseUnit(info.price, info.productUnit) * amount * gramsPerPiece;
+  }
+  // Рецепт — в граммах/мл, товар — "шт" (упаковка): раньше это ВСЕГДА
+  // оставалось непосчитанным ("майонез бывает 100 г и 800 г банкой, риск
+  // хуже честного 'не знаем'") — но живой прогон показал, что это не редкий
+  // случай вроде майонеза, а ПОДАВЛЯЮЩЕЕ большинство обычных товаров
+  // (крупы, фарш, сахар — ВкусВилл продаёт их "поштучно" = 1 упаковка, а
+  // вес пишет только в название: "Фарш из индейки, 500 г"). priceByName уже
+  // несёт распарсенный вес упаковки (packageAmount/packageUnit — см.
+  // parsePackageAmount в vkusvillMcp.js), если название удалось разобрать —
+  // тогда это НЕ риск, а тот же вес, что видит покупатель на сайте.
+  if (isWeightOrVolumeUnit(unit) && info.productUnit === "шт" && info.packageAmount > 0 && isWeightOrVolumeUnit(info.packageUnit) === isWeightOrVolumeUnit(unit)) {
+    return (info.price / info.packageAmount) * amount;
   }
   return null;
 }
@@ -314,7 +327,9 @@ export async function attachRealCosts(pools) {
   const viaBackend = await resolvePricesViaBackend(names);
   const resolved = viaBackend ?? (await resolvePrices(names.map((name) => ({ name, amount: 1, unit: "шт" }))));
   resolved.forEach((r) => {
-    if (r.matched && r.price != null) priceByName.set(r.name, { price: r.price, productUnit: r.productUnit });
+    if (r.matched && r.price != null) {
+      priceByName.set(r.name, { price: r.price, productUnit: r.productUnit, packageAmount: r.packageAmount ?? null, packageUnit: r.packageUnit ?? null });
+    }
   });
 
   Object.values(pools).forEach((recipes) => {

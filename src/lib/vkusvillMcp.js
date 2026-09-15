@@ -227,6 +227,35 @@ export function createCartLink(products) {
 // "Итого за продукты" при замене товара: сколько единиц товара-замены реально
 // уйдёт в корзину, столько и должно учитываться в сумме, а не голая цена за
 // одну штуку/кг замены без учёта нужного количества.
+// Найдено при разборе живой жалобы "не удалось получить цены почти ни на
+// один товар": прогнал вживую несколько сотен ингредиентов — priceByName
+// РЕЗОЛВИЛСЯ на 100% (каждое название нашло товар), но итоговая цена блюда
+// выставлялась в среднем только для ~7% рецептов. Причина — не rate-limit, а
+// то, что почти ВСЕ обычные товары (крупы, фарш, сахар и т.п.) продаются на
+// ВкусВилл "поштучно" (unit: "шт" = одна упаковка), а настоящий вес/объём
+// зашит ТОЛЬКО в текст названия ("Фарш из индейки, 500 г", "Сахар-песок,
+// 1 кг") — не в отдельном структурированном поле. Раньше "шт" на товаре при
+// рецепте в граммах/мл всегда означало "не считаем" (см. resolveIngredientCost
+// в vkusvillRecipes.js) — оказалось, что это не редкий частный случай, а
+// подавляющее большинство обычных бакалейных товаров. Эта функция достаёт
+// вес/объём прямо из названия, чтобы можно было посчитать цену за грамм/мл.
+export function parsePackageAmount(productName) {
+  if (!productName) return null;
+  const normalized = productName.replace(/&nbsp;/gi, " ");
+  // (?![а-яёА-ЯЁ]) вместо \b — тот же нюанс, что и в vkusvillIngredientToTriple
+  // выше: JS \b/\w по умолчанию ASCII-only, граница сразу после кириллической
+  // буквы (тут "г" — последний символ названия) не определяется как
+  // ожидается, \b тут ловил бы false negative на КАЖДОМ названии, кончающемся
+  // на единицу измерения — то есть буквально на всех, поймано тестом.
+  const match = /(\d+(?:[.,]\d+)?)\s*(кг|г|мл|л)(?![а-яёА-ЯЁ])/i.exec(normalized);
+  if (!match) return null;
+  let amount = parseFloat(match[1].replace(",", "."));
+  let unit = match[2].toLowerCase();
+  if (unit === "кг") { amount *= 1000; unit = "г"; }
+  if (unit === "л") { amount *= 1000; unit = "мл"; }
+  return { amount, unit };
+}
+
 export function toVkusvillQuantity(amount, ourUnit, productUnit) {
   const clamp = (n) => Math.min(40, Math.max(0.01, n));
   if (ourUnit === "шт") return clamp(Math.round(amount));
@@ -287,18 +316,29 @@ export async function resolvePrices(items) {
         xml_id: item.xmlId,
         price: item.knownPrice ?? null,
         productUnit: item.knownUnit,
+        // Замена ("Нет в наличии") приходит уже с известными price/unit от
+        // getSubstituteOptions — там нет названия товара для парсинга упаковки,
+        // поэтому packageAmount/packageUnit тут не бывает — не самый частый
+        // путь (в отличие от resolveIngredientCost на массовой сборке плана).
+        packageAmount: null, packageUnit: null,
         q: toVkusvillQuantity(item.amount, item.unit, item.knownUnit),
       };
     }
     const data = await searchProducts({ q: item.name, mode: "short", vvonly: 0 });
     const match = data.items?.[0];
     if (!match) return { matched: false, name: item.name };
+    // Вес/объём упаковки — только когда сам товар "поштучный" (шт): если
+    // ВкусВилл и так продаёт на вес/объём (кг/л/г/мл), пересчитывать нечего,
+    // pricePerBaseUnit уже справляется без парсинга названия.
+    const pkg = match.unit === "шт" ? parsePackageAmount(match.name) : null;
     return {
       matched: true,
       name: item.name,
       xml_id: match.xml_id,
       price: match.price?.current ?? null,
       productUnit: match.unit,
+      packageAmount: pkg?.amount ?? null,
+      packageUnit: pkg?.unit ?? null,
       q: toVkusvillQuantity(item.amount, item.unit, match.unit),
     };
   });

@@ -534,7 +534,7 @@ describe("POST /api/prices", () => {
     });
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body.prices).toEqual([{ name: "Лук", matched: true, price: 58, productUnit: "кг", xmlId: "1" }]);
+    expect(body.prices).toEqual([{ name: "Лук", matched: true, price: 58, productUnit: "кг", xmlId: "1", packageAmount: null, packageUnit: null }]);
 
     // второй запрос с теми же именами — должен взять из кэша, без нового обращения к ВкусВилл
     const calls = fetch.mock.calls.length;

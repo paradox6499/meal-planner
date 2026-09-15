@@ -158,10 +158,47 @@ describe("resolveIngredientCost — оценка поштучных овощей
     expect(resolveIngredientCost("Экзотический корнеплод", 1, "шт", { price: 300, productUnit: "кг" })).toBeNull();
   });
 
-  it("обратный случай (рецепт в граммах, товар поштучно) — по-прежнему не оценивается", () => {
-    // майонез 22.5 г, товар продаётся банкой ("шт") — размер банки непредсказуем,
-    // рискованная оценка тут хуже честного "не знаем"
+  it("болгарский перец (не только 'сладкий') и куриное бедро — найдено на живом прогоне, добавлено в таблицу", () => {
+    expect(resolveIngredientCost("Перец болгарский", 1, "шт", { price: 200, productUnit: "кг" })).toBeCloseTo(0.2 * 150, 5);
+    expect(resolveIngredientCost("Куриное бедро", 1, "шт", { price: 250, productUnit: "кг" })).toBeCloseTo(0.25 * 160, 5);
+  });
+
+  it("обратный случай (рецепт в граммах, товар поштучно), вес упаковки НЕИЗВЕСТЕН — не оценивается", () => {
+    // майонез 22.5 г, товар продаётся банкой ("шт"), и вес банки не удалось
+    // распарсить из названия (packageAmount отсутствует) — размер банки
+    // непредсказуем, рискованная оценка тут хуже честного "не знаем"
     expect(resolveIngredientCost("Майонез", 22.5, "г", { price: 118, productUnit: "шт" })).toBeNull();
+  });
+});
+
+// Регрессия на живую жалобу "не удалось получить цены почти ни на один
+// товар": прогнал вживую несколько сотен ингредиентов — priceByName
+// резолвился на 100%, но цена блюда выставлялась только для ~7% рецептов.
+// Причина: почти ВСЕ обычные товары ВкусВилл (крупы, фарш, сахар) продаются
+// "поштучно" (unit: "шт" = 1 упаковка), а настоящий вес зашит только в
+// название ("Фарш из индейки, 500 г") — это не редкий случай вроде майонеза
+// в банке, а подавляющее большинство. См. parsePackageAmount в vkusvillMcp.js.
+describe("resolveIngredientCost — товар 'шт' с известным весом упаковки (из названия)", () => {
+  it("рецепт в граммах, товар 'шт' с packageAmount — считает цену за грамм из цены упаковки", () => {
+    // Фарш из индейки, 500 г за 443₽ = 0.886₽/г; рецепту нужно 130 г
+    const cost = resolveIngredientCost("Фарш из индейки", 130, "г", { price: 443, productUnit: "шт", packageAmount: 500, packageUnit: "г" });
+    expect(cost).toBeCloseTo((443 / 500) * 130, 5);
+  });
+
+  it("рецепт в мл, товар 'шт' с packageAmount в мл", () => {
+    const cost = resolveIngredientCost("Молоко", 200, "мл", { price: 90, productUnit: "шт", packageAmount: 900, packageUnit: "мл" });
+    expect(cost).toBeCloseTo((90 / 900) * 200, 5);
+  });
+
+  it("рецепт поштучно ('шт'), товар тоже поштучно ('шт') — это уже совпадающий род единиц, считается обычной веткой, а не этой", () => {
+    const cost = resolveIngredientCost("Яйцо", 2, "шт", { price: 8, productUnit: "шт" });
+    expect(cost).toBe(16);
+  });
+
+  it("packageAmount отсутствует/0/null — не считается (то же поведение, что и раньше)", () => {
+    expect(resolveIngredientCost("Фарш из индейки", 130, "г", { price: 443, productUnit: "шт" })).toBeNull();
+    expect(resolveIngredientCost("Фарш из индейки", 130, "г", { price: 443, productUnit: "шт", packageAmount: 0, packageUnit: "г" })).toBeNull();
+    expect(resolveIngredientCost("Фарш из индейки", 130, "г", { price: 443, productUnit: "шт", packageAmount: null, packageUnit: "г" })).toBeNull();
   });
 });
 

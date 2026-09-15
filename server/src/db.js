@@ -163,6 +163,14 @@ export function openDb(path) {
   // когда она реально закончится (см. proRenewal.js).
   ensureColumn(db, "users", "pro_until", "TEXT");
   ensureColumn(db, "users", "renewal_reminder_sent_at", "TEXT");
+  // Вес/объём упаковки, распарсенный из названия товара ВкусВилл (см.
+  // vkusvillPrices.js: parsePackageAmount) — большинство товаров там
+  // продаются "поштучно" (unit: "шт" = 1 упаковка), а настоящий вес зашит
+  // только в текст названия ("Фарш из индейки, 500 г"). Без этих двух колонок
+  // кэш отдавал бы этот случай так же, как раньше отдавал живой резолвинг —
+  // "шт" без веса, а он не совпадает с граммами/мл в рецепте почти никогда.
+  ensureColumn(db, "ingredient_prices", "package_amount", "REAL");
+  ensureColumn(db, "ingredient_prices", "package_unit", "TEXT");
 
   return db;
 }
@@ -174,29 +182,33 @@ export function getIngredientPricesByName(db, names) {
   if (names.length === 0) return new Map();
   const placeholders = names.map(() => "?").join(",");
   const rows = db
-    .prepare(`SELECT name, matched, price, product_unit, xml_id, updated_at FROM ingredient_prices WHERE name IN (${placeholders})`)
+    .prepare(`SELECT name, matched, price, product_unit, xml_id, package_amount, package_unit, updated_at FROM ingredient_prices WHERE name IN (${placeholders})`)
     .all(...names);
   return new Map(
-    rows.map((r) => [r.name, { matched: !!r.matched, price: r.price, productUnit: r.product_unit, xmlId: r.xml_id, updatedAt: r.updated_at }])
+    rows.map((r) => [
+      r.name,
+      { matched: !!r.matched, price: r.price, productUnit: r.product_unit, xmlId: r.xml_id, packageAmount: r.package_amount, packageUnit: r.package_unit, updatedAt: r.updated_at },
+    ])
   );
 }
 
-/** entries: [{name, matched, price, productUnit, xmlId}] — одной транзакцией,
- * чтобы большой список ингредиентов одного плана не оставлял БД в частично
- * обновлённом состоянии при сбое посреди записи. */
+/** entries: [{name, matched, price, productUnit, xmlId, packageAmount, packageUnit}]
+ * — одной транзакцией, чтобы большой список ингредиентов одного плана не
+ * оставлял БД в частично обновлённом состоянии при сбое посреди записи. */
 export function upsertIngredientPrices(db, entries, updatedAtISO) {
   if (entries.length === 0) return;
   const stmt = db.prepare(
-    `INSERT INTO ingredient_prices (name, matched, price, product_unit, xml_id, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?)
+    `INSERT INTO ingredient_prices (name, matched, price, product_unit, xml_id, package_amount, package_unit, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(name) DO UPDATE SET
        matched = excluded.matched, price = excluded.price,
-       product_unit = excluded.product_unit, xml_id = excluded.xml_id, updated_at = excluded.updated_at`
+       product_unit = excluded.product_unit, xml_id = excluded.xml_id,
+       package_amount = excluded.package_amount, package_unit = excluded.package_unit, updated_at = excluded.updated_at`
   );
   db.exec("BEGIN");
   try {
     for (const e of entries) {
-      stmt.run(e.name, e.matched ? 1 : 0, e.price ?? null, e.productUnit ?? null, e.xmlId ?? null, updatedAtISO);
+      stmt.run(e.name, e.matched ? 1 : 0, e.price ?? null, e.productUnit ?? null, e.xmlId ?? null, e.packageAmount ?? null, e.packageUnit ?? null, updatedAtISO);
     }
     db.exec("COMMIT");
   } catch (err) {
