@@ -484,6 +484,21 @@ export async function fetchVkusvillPools({ diet, cuisines, devices, allergies, c
   return { pools, priceByName };
 }
 
+// Найдено при разборе жалобы "на замену моркови предлагает всё, кроме
+// моркови": vkusvill_product_analogs — это не "то же самое, другой бренд",
+// а весь овощной/фруктовый отдел рядом (проверено вживую на "Морковь":
+// аналоги — свёкла, лук, картофель, капуста, перец, кабачки... и ДА, там
+// реально есть "Морковь резаная"/"Морковь мытая" — просто раньше сортировка
+// была ТОЛЬКО по цене, и более дешёвые чужие овощи (свёкла/лук по 58₽/кг)
+// всплывали выше настоящей моркови (105-110₽ за упаковку). Выносим
+// совпадения по корню исходного названия наверх — это не идеальная
+// лингвистика, а осознанно грубое совпадение подстроки: этого достаточно,
+// чтобы отличить "Морковь резаная" от "Капуста", не подключая внешний
+// словарь синонимов ради этого.
+function stemOf(text) {
+  return (text.trim().split(/\s+/)[0] || "").toLowerCase();
+}
+
 /** "Нет в наличии" в списке покупок (ResultView) — предлагает замену
  * конкретному товару. Сначала ищем сам товар в каталоге (то же, что делает
  * resolvePrices при сборке корзины) — аналоги запрашиваются именно под
@@ -491,10 +506,11 @@ export async function fetchVkusvillPools({ diet, cuisines, devices, allergies, c
  * инструмент MCP ровно под этот сценарий ("похожие товары"), не наш
  * самодельный подбор по названию.
  *
- * Возвращает до 6 вариантов, отсортированных по цене (дешёвые впереди —
- * осмысленный выбор по умолчанию, раз уж всё равно нужно докупать), уже
- * прошедших те же проверки на аллергию/рацион, что и обычные рецепты — без
- * этого "замена" могла бы тихо подсунуть что-то запрещённое. */
+ * Возвращает до 6 вариантов: сначала те, что явно тот же продукт (корень
+ * названия совпадает — "Морковь резаная" для "Морковь"), затем остальные
+ * аналоги от ВкусВилл — каждая группа отдельно по цене (дешёвые впереди).
+ * Все — уже прошедшие те же проверки на аллергию/рацион, что и обычные
+ * рецепты, без этого "замена" могла бы тихо подсунуть что-то запрещённое. */
 export async function getSubstituteOptions({ name, allergies, diet }) {
   const search = await searchProducts({ q: name, mode: "short", vvonly: 0 });
   const original = search.items?.[0];
@@ -502,8 +518,9 @@ export async function getSubstituteOptions({ name, allergies, diet }) {
 
   const analogs = await getProductAnalogs(original.xml_id);
   const effectiveAllergies = diet === "gf" && !allergies.includes("gluten") ? [...allergies, "gluten"] : allergies;
+  const stem = stemOf(name);
 
-  return (analogs.products || [])
+  const options = (analogs.products || [])
     .map((p) => ({
       xmlId: p.xml_id,
       name: decodeHtmlEntities(p.name || ""),
@@ -512,7 +529,10 @@ export async function getSubstituteOptions({ name, allergies, diet }) {
       image: p.images?.[0]?.small || null,
     }))
     .filter((p) => p.price != null && p.xmlId !== original.xml_id)
-    .filter((p) => !nameViolatesAllergies(p.name, effectiveAllergies) && !nameViolatesDiet(p.name, diet))
-    .sort((a, b) => a.price - b.price)
-    .slice(0, 6);
+    .filter((p) => !nameViolatesAllergies(p.name, effectiveAllergies) && !nameViolatesDiet(p.name, diet));
+
+  const sameItem = options.filter((p) => stem.length >= 3 && p.name.toLowerCase().includes(stem));
+  const others = options.filter((p) => !sameItem.includes(p));
+  const byPrice = (a, b) => a.price - b.price;
+  return [...sameItem.sort(byPrice), ...others.sort(byPrice)].slice(0, 6);
 }

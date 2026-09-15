@@ -1,11 +1,11 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 vi.mock("./vkusvillMcp.js", async (importOriginal) => {
   const actual = await importOriginal();
-  return { ...actual, searchRecipes: vi.fn(), resolvePrices: vi.fn() };
+  return { ...actual, searchRecipes: vi.fn(), resolvePrices: vi.fn(), searchProducts: vi.fn(), getProductAnalogs: vi.fn() };
 });
 vi.mock("./backend.js", () => ({ resolvePricesViaBackend: vi.fn() }));
-import { searchRecipes, resolvePrices } from "./vkusvillMcp.js";
+import { searchRecipes, resolvePrices, searchProducts, getProductAnalogs } from "./vkusvillMcp.js";
 import { resolvePricesViaBackend } from "./backend.js";
 import {
   vkusvillIngredientToTriple,
@@ -18,6 +18,7 @@ import {
   searchRawRecipes,
   attachRealCosts,
   fetchVkusvillPools,
+  getSubstituteOptions,
 } from "./vkusvillRecipes.js";
 
 describe("vkusvillIngredientToTriple", () => {
@@ -440,5 +441,74 @@ describe("fetchVkusvillPools — id_cooking_method_filter при несколь�
 
   it("устройства не выбраны — фильтр не применяется (как и раньше)", async () => {
     expect(await call([])).toBe(0);
+  });
+});
+
+// Регрессия на живую жалобу "на замену моркови предлагает всё, кроме
+// моркови": vkusvill_product_analogs — это не "то же самое, другой бренд",
+// а весь овощной отдел рядом (проверено вживую: аналоги моркови — свёкла,
+// лук, капуста и т.д., хотя "Морковь резаная"/"Морковь мытая" там ТОЖЕ
+// есть). Раньше сортировка была только по цене — более дешёвые чужие овощи
+// всплывали выше настоящей моркови.
+describe("getSubstituteOptions — приоритет совпадений по названию над просто дешёвыми аналогами", () => {
+  beforeEach(() => {
+    searchProducts.mockReset();
+    getProductAnalogs.mockReset();
+    // decodeHtmlEntities (vkusvillRecipes.js) использует DOMParser — есть в
+    // браузере, но не в тестовом окружении Node (environment: "node", без
+    // jsdom, см. vitest.config.js). Минимальный стаб — этого достаточно,
+    // названия в тестах ниже без реальных HTML-сущностей.
+    vi.stubGlobal(
+      "DOMParser",
+      class {
+        parseFromString(str) {
+          return { documentElement: { textContent: str.replace(/&nbsp;/g, " ") } };
+        }
+      }
+    );
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("аналоги с тем же корнем названия — первыми, даже если дороже", async () => {
+    searchProducts.mockResolvedValue({ items: [{ xml_id: "606", name: "Морковь" }] });
+    getProductAnalogs.mockResolvedValue({
+      products: [
+        { xml_id: "1", name: "Свёкла", price: { current: 58 }, unit: "кг" }, // дешевле, но другой овощ
+        { xml_id: "2", name: "Морковь мытая, 600 г", price: { current: 110 }, unit: "шт" }, // дороже, но тот же продукт
+        { xml_id: "3", name: "Капуста белокочанная", price: { current: 48 }, unit: "кг" },
+      ],
+    });
+    const options = await getSubstituteOptions({ name: "Морковь", allergies: [], diet: "any" });
+    expect(options[0].name).toBe("Морковь мытая, 600 г"); // настоящая морковь — первая, несмотря на цену
+    expect(options.map((o) => o.name)).toContain("Свёкла");
+    expect(options.map((o) => o.name)).toContain("Капуста белокочанная");
+  });
+
+  it("внутри каждой группы (тот же продукт / остальные аналоги) — сортировка по цене", async () => {
+    searchProducts.mockResolvedValue({ items: [{ xml_id: "1", name: "Молоко" }] });
+    getProductAnalogs.mockResolvedValue({
+      products: [
+        { xml_id: "2", name: "Молоко 3.2%", price: { current: 120 }, unit: "шт" },
+        { xml_id: "3", name: "Молоко 2.5%", price: { current: 90 }, unit: "шт" },
+        { xml_id: "4", name: "Кефир", price: { current: 70 }, unit: "шт" },
+        { xml_id: "5", name: "Йогурт", price: { current: 60 }, unit: "шт" },
+      ],
+    });
+    const options = await getSubstituteOptions({ name: "Молоко", allergies: [], diet: "any" });
+    expect(options.map((o) => o.name)).toEqual(["Молоко 2.5%", "Молоко 3.2%", "Йогурт", "Кефир"]);
+  });
+
+  it("сам исходный товар (тот же xmlId) не попадает в список замен", async () => {
+    searchProducts.mockResolvedValue({ items: [{ xml_id: "1", name: "Морковь" }] });
+    getProductAnalogs.mockResolvedValue({ products: [{ xml_id: "1", name: "Морковь", price: { current: 58 }, unit: "кг" }] });
+    const options = await getSubstituteOptions({ name: "Морковь", allergies: [], diet: "any" });
+    expect(options).toHaveLength(0);
+  });
+
+  it("товар не найден в каталоге -> пустой список, не падает", async () => {
+    searchProducts.mockResolvedValue({ items: [] });
+    const options = await getSubstituteOptions({ name: "Неизвестный товар", allergies: [], diet: "any" });
+    expect(options).toEqual([]);
+    expect(getProductAnalogs).not.toHaveBeenCalled();
   });
 });
