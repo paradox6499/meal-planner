@@ -209,6 +209,68 @@ describe("buildInitialPlan", () => {
     expect(plan.days[0].dayMeals[0].recipeId).toBe(0);
     expect(plan.days[0].dayMeals[1].recipeId).toBe(0);
   });
+
+  // familyByMeal — жалоба в чате: "в паре 2 человека, один ест дома только
+  // завтрак и ужин, а второй ещё и обед". buildInitialPlan сам по себе не
+  // выбирает конкретные блюда по количеству едоков (это делает буджетинг —
+  // пул один и тот же для всех), поэтому регрессия тут в первую очередь про
+  // то, что пустой/отсутствующий familyByMeal не меняет прежнее поведение.
+  describe("familyByMeal", () => {
+    it("без familyByMeal (или с пустым объектом) даёт тот же план, что и раньше — тот же бюджетинг для константного family", () => {
+      const pool = [120, 150, 170, 190, 200, 220, 250, 270].map((c, i) => mkRecipe(i, c));
+      const pools = { breakfast: [], main: pool, snack: [] };
+      const planWithout = buildInitialPlan(pools, MEALS_2, 3000, 2);
+      const planWithEmpty = buildInitialPlan(pools, MEALS_2, 3000, 2, {});
+      expect(planWithEmpty.days.map((d) => d.dayMeals.map((m) => m.recipeId))).toEqual(
+        planWithout.days.map((d) => d.dayMeals.map((m) => m.recipeId))
+      );
+    });
+
+    it("familyByMeal[id] === family (одинаковое число явно для всех) — тот же план, что и вообще без переопределений", () => {
+      const pool = [120, 150, 170, 190, 200, 220, 250, 270].map((c, i) => mkRecipe(i, c));
+      const pools = { breakfast: [], main: pool, snack: [] };
+      const planFlat = buildInitialPlan(pools, MEALS_2, 3000, 2);
+      const planExplicit = buildInitialPlan(pools, MEALS_2, 3000, 2, { lunch: 2, dinner: 2 });
+      expect(planExplicit.days.map((d) => d.dayMeals.map((m) => m.recipeId))).toEqual(
+        planFlat.days.map((d) => d.dayMeals.map((m) => m.recipeId))
+      );
+    });
+
+    it("приём пищи с меньшим числом едоков не 'крадёт' бюджет у остальных — общая сумма всё равно целится в budget", () => {
+      const pool = [50, 80, 100, 130, 160, 190, 220, 250, 280, 310].map((c, i) => mkRecipe(i, c));
+      const pools = { breakfast: [], main: pool, snack: [] };
+      // завтрак только на 1 человека, обед и ужин — на 4 (семья из 4, но
+      // завтракает дома только один); family=4 как база для незаданных.
+      const meals3 = [
+        { id: "breakfast", label: "Завтрак", category: "main" },
+        { id: "lunch", label: "Обед", category: "main" },
+        { id: "dinner", label: "Ужин", category: "main" },
+      ];
+      const budget = 15000;
+      const plan = buildInitialPlan(pools, meals3, budget, 4, { breakfast: 1 });
+      let totalMoney = 0;
+      plan.days.forEach((d) => {
+        d.dayMeals.forEach((m) => {
+          const cost = pool.find((r) => r.id === m.recipeId).cost;
+          const mealFamily = m.mealId === "breakfast" ? 1 : 4;
+          totalMoney += cost * mealFamily;
+        });
+      });
+      // Не обязано попасть тютелька-в-тютельку (дискретные цены пула), но
+      // должно быть в разумных пределах вокруг заданного бюджета — не
+      // "сильно меньше" (будто бюджет для завтрака посчитали на 4 человек,
+      // хотя реально тратили на 1, и не выбрали более дорогие блюда взамен).
+      expect(totalMoney).toBeGreaterThan(budget * 0.7);
+      expect(totalMoney).toBeLessThan(budget * 1.3);
+    });
+
+    it("приём пищи без записи в familyByMeal использует обычный family", () => {
+      const pool = [mkRecipe(0, 100)];
+      const pools = { breakfast: [], main: pool, snack: [] };
+      const plan = buildInitialPlan(pools, MEALS_2, 100 * 14, 3, { lunch: 1 }); // dinner не задан -> family=3
+      expect(plan.days[0].dayMeals).toHaveLength(2); // не падает при разных family на разные приёмы
+    });
+  });
 });
 
 describe("buildPlanView", () => {
@@ -279,6 +341,33 @@ describe("buildPlanView", () => {
   it("mostlyUnpriced=false вне итемизированного режима (не-ВкусВилл — там своя, старая логика)", () => {
     const view = buildPlanView(planState, pools, 2, null);
     expect(view.mostlyUnpriced).toBe(false);
+  });
+
+  describe("familyByMeal", () => {
+    it("без familyByMeal (или с пустым объектом) — тот же total, что и раньше", () => {
+      const withoutArg = buildPlanView(planState, pools, 2, null);
+      const withEmpty = buildPlanView(planState, pools, 2, null, {});
+      expect(withEmpty.total).toBe(withoutArg.total);
+    });
+
+    it("переопределение по mealId применяется вместо общего family — total и список покупок считают по нему", () => {
+      // planState здесь — один слот с mealId="lunch"; family=2, но для lunch
+      // задано 5 (например, "уточнить по приёмам пищи" в Аккаунте).
+      const view = buildPlanView(planState, pools, 2, null, { lunch: 5 });
+      expect(view.total).toBe(100 * 5); // cost=100 × family[lunch]=5, а не общий family=2
+      const carrot = view.grouped.flatMap((g) => g.items).find((it) => it.name === "морковь");
+      expect(carrot.amount).toBe(200 * 5); // 200г на человека × 5
+    });
+
+    it("mealId без записи в familyByMeal использует общий family как раньше", () => {
+      const view = buildPlanView(planState, pools, 2, null, { dinner: 5 }); // lunch не задан
+      expect(view.total).toBe(100 * 2);
+    });
+
+    it("каждый dayMeal несёт свой резолвленный family (для RecipeModal/строки блюда — не общий стейт)", () => {
+      const view = buildPlanView(planState, pools, 2, null, { lunch: 5 });
+      expect(view.days[0].dayMeals[0].family).toBe(5);
+    });
   });
 });
 

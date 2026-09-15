@@ -66,10 +66,28 @@ export function buildPools(diet, cuisines, devices, allergies, maxCookTime) {
 // дешёвые рецепты в пуле, алгоритм просто берёт минимально возможное и даёт
 // уйти в минус — дальше это видно пользователю по индикатору "превышен
 // бюджет" в ResultView, а не скрывается.
-export function buildInitialPlan(pools, selectedMeals, budget, family) {
-  const totalSlots = 7 * selectedMeals.length;
-  let remainingBudget = family > 0 ? budget / family : budget; // считаем в цене на человека, family умножается позже в buildPlanView
-  let remainingSlots = totalSlots;
+// familyByMeal — необязательные точечные переопределения количества едоков
+// по id приёма пищи (см. MEALS в App.jsx), например { breakfast: 1, dinner: 2 }
+// для пары, где один ест дома только ужин. Приём пищи, которого в объекте
+// нет, использует общее family — так что при пустом/отсутствующем
+// familyByMeal (подавляющее большинство пользователей) поведение ровно
+// такое же, как раньше, когда family было единственным числом на всех.
+// Жалоба в чате: "в паре 2 человека, один ест дома только завтрак и ужин, а
+// второй завтрак, обед и ужин" — раньше посчитать это было нечем.
+export function buildInitialPlan(pools, selectedMeals, budget, family, familyByMeal = {}) {
+  const familyFor = (mealId) => familyByMeal[mealId] || family;
+
+  // Бюджет теперь считается сразу в реальных деньгах, а не "на человека":
+  // раньше remainingBudget = budget/family корректно работало только
+  // потому, что family было одинаковым для каждого приёма пищи и потому
+  // сокращалось из допустимого среднего одинаково на каждом слоте. Как
+  // только family может отличаться по приёмам пищи, это сокращение
+  // перестаёт быть однородным — вместо него remainingBudget/remainingSlots
+  // ниже взвешены по реальному числу едоков на каждый слот. При постоянном
+  // family по всем приёмам пищи это математически то же самое, что и раньше
+  // (regression-тесты в planLogic.test.js).
+  let remainingBudget = budget;
+  let remainingSlots = 7 * selectedMeals.reduce((sum, m) => sum + familyFor(m.id), 0);
   // Сколько раз рецепт уже использован за всю неделю (id уникальны в рамках
   // категории, так что один общий счётчик на все категории безопасен) —
   // раньше избегали повтора только среди ПОСЛЕДНИХ 2 выборов, из-за чего на
@@ -86,7 +104,7 @@ export function buildInitialPlan(pools, selectedMeals, budget, family) {
   // низком бюджете), защиты не было вообще.
   let usedToday = new Set();
 
-  const pickRecipe = (category) => {
+  const pickRecipe = (category, mealFamily) => {
     const pool = pools[category];
     if (!pool || pool.length === 0) return null;
     const allowedAvg = remainingSlots > 0 ? remainingBudget / remainingSlots : Infinity;
@@ -115,8 +133,8 @@ export function buildInitialPlan(pools, selectedMeals, budget, family) {
 
     usageCount[chosen.id] = (usageCount[chosen.id] || 0) + 1;
     usedToday.add(chosen.id);
-    remainingBudget -= chosen.cost;
-    remainingSlots -= 1;
+    remainingBudget -= chosen.cost * mealFamily;
+    remainingSlots -= mealFamily;
     return chosen;
   };
 
@@ -131,7 +149,7 @@ export function buildInitialPlan(pools, selectedMeals, budget, family) {
         emptyMealLabels.add(m.label);
         return;
       }
-      const r = pickRecipe(m.category);
+      const r = pickRecipe(m.category, familyFor(m.id));
       dayMeals.push({ mealId: m.id, mealLabel: m.label, category: m.category, recipeId: r.id });
     });
     days.push({ day, dayMeals });
@@ -151,8 +169,12 @@ export function buildInitialPlan(pools, selectedMeals, budget, family) {
 // см. vkusvillRecipes.js), а "Итого" — их сумма; ResultView может честно
 // пересчитать её при замене, просто заменив цену одной строки, а не
 // пересобирая весь план.
-export function buildPlanView(planState, pools, family, priceByName) {
+// familyByMeal — см. комментарий у buildInitialPlan; та же карта переопределений
+// количества едоков по id приёма пищи, здесь используется для итоговой суммы
+// и количества ингредиентов в списке покупок вместо единого family.
+export function buildPlanView(planState, pools, family, priceByName, familyByMeal = {}) {
   if (!planState) return null;
+  const familyFor = (mealId) => familyByMeal[mealId] || family;
 
   // Рецепт мог прийти либо из статического RECIPES_BY_ID, либо из живых
   // pools (VkusVill, id вида "vv-12345" — в статической карте их нет). Сам
@@ -170,12 +192,13 @@ export function buildPlanView(planState, pools, family, priceByName) {
     const dayMeals = d.dayMeals.map((slot) => {
       const recipe = recipesById.get(slot.recipeId);
       const pool = pools[slot.category] || [];
+      const mealFamily = familyFor(slot.mealId);
       const [cost, isRealPrice] = effectiveRecipeCost(recipe);
       if (!isRealPrice) anyEstimated = true;
-      total += cost * family;
+      total += cost * mealFamily;
       recipe.ingr.forEach(([name, amount, unit]) => {
         const key = `${name}|${unit}`;
-        ingredMap[key] = (ingredMap[key] || 0) + amount * family;
+        ingredMap[key] = (ingredMap[key] || 0) + amount * mealFamily;
       });
       return {
         mealId: slot.mealId,
@@ -183,6 +206,7 @@ export function buildPlanView(planState, pools, family, priceByName) {
         category: slot.category,
         recipe,
         cost,
+        family: mealFamily,
         isRealPrice,
         canSwap: pool.length > 1,
       };

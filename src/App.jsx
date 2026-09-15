@@ -148,6 +148,13 @@ export default function MealPlanner() {
   const [step, setStep] = useState(0);
   const [store, setStore] = useState(savedActivePlan?.store ?? null);
   const [family, setFamily] = useState(savedProfile?.family ?? 2);
+  // Необязательные точечные переопределения "Семьи" по приёмам пищи (см.
+  // комментарий у buildInitialPlan в planLogic.js) — например, пара, где
+  // один ест дома только завтрак и ужин, а второй ещё и обед. Пустой объект
+  // (по умолчанию) означает "одинаково для всех приёмов пищи", т.е. прежнее
+  // поведение — настройка сознательно "спрятана" в Аккаунте, а не в визарде
+  // (см. AccountView), чтобы не усложнять сборку плана тем, кому это не нужно.
+  const [familyByMeal, setFamilyByMeal] = useState(savedProfile?.familyByMeal ?? {});
   const [meals, setMeals] = useState(savedProfile?.meals ?? ["lunch", "dinner"]);
   const [budget, setBudget] = useState(savedActivePlan?.budget ?? 4000);
   const [diet, setDiet] = useState(savedProfile?.diet ?? null);
@@ -327,7 +334,7 @@ export default function MealPlanner() {
 
   // planState хранит только id рецептов по дням — так swapMeal меняет один слот,
   // не трогая остальную неделю и не требуя пересборки с нуля
-  const planView = useMemo(() => buildPlanView(planState, pools, family, priceByName), [planState, pools, family, priceByName]);
+  const planView = useMemo(() => buildPlanView(planState, pools, family, priceByName, familyByMeal), [planState, pools, family, priceByName, familyByMeal]);
 
   // Best-effort отправка плана на сервер напоминаний — см. lib/backend.js,
   // там же и все причины, по которым это может тихо ничего не сделать
@@ -406,7 +413,7 @@ export default function MealPlanner() {
       resolvedPools = buildPools(diet, cuisines, devices, allergies, maxCookTime);
     }
 
-    const newPlanState = buildInitialPlan(resolvedPools, selectedMeals, budget, family);
+    const newPlanState = buildInitialPlan(resolvedPools, selectedMeals, budget, family, familyByMeal);
     setPools(resolvedPools);
     setPriceByName(resolvedPriceByName);
     setPlanState(newPlanState);
@@ -420,7 +427,7 @@ export default function MealPlanner() {
     // РОВНО тот план, что только что собрали, один раз, а не всё, во что он
     // потом превратится после замен товаров (см. лимит выше — тот сценарий
     // сознательно повторяет отправку при каждой замене, этот — нет).
-    const freshPlanView = buildPlanView(newPlanState, resolvedPools, family, resolvedPriceByName);
+    const freshPlanView = buildPlanView(newPlanState, resolvedPools, family, resolvedPriceByName, familyByMeal);
     savePlanToHistory({
       storeId: store,
       storeName: STORES.find((s) => s.id === store)?.name || store,
@@ -469,14 +476,14 @@ export default function MealPlanner() {
     setStep(0); setStore(null); setBudget(4000); setDone(false); setPlanState(null);
     setOpenRecipe(null); setAssembling(false); setPools(null); setPriceByName(null);
     if (!hasProfile) {
-      setFamily(2); setMeals(["lunch", "dinner"]); setDiet(null);
+      setFamily(2); setFamilyByMeal({}); setMeals(["lunch", "dinner"]); setDiet(null);
       setAllergies([]); setCuisines([]); setDevices([]); setMaxCookTime(null);
     }
   };
 
   const handleSaveProfile = () => {
     hapticNotify("success");
-    saveProfile({ family, meals, diet, allergies, cuisines, devices, displayName, mealTimes, maxCookTime });
+    saveProfile({ family, familyByMeal, meals, diet, allergies, cuisines, devices, displayName, mealTimes, maxCookTime });
     // Раньше время приёмов пищи долетало до сервера напоминаний ТОЛЬКО вместе
     // с целым планом (см. useEffect ниже на submitPlanToBackend) — если
     // открыть Аккаунт и поменять время, не пересобирая план заново в этой же
@@ -697,6 +704,7 @@ export default function MealPlanner() {
             displayName={displayName} setDisplayName={setDisplayName}
             theme={theme} setTheme={setTheme}
             family={family} setFamily={setFamily}
+            familyByMeal={familyByMeal} setFamilyByMeal={setFamilyByMeal}
             meals={meals} setMeals={setMeals}
             diet={diet} setDiet={setDiet}
             allergies={allergies} setAllergies={setAllergies}
@@ -932,7 +940,7 @@ export default function MealPlanner() {
       </div>
 
       {openRecipe && (
-        <RecipeModal dm={openRecipe} family={family} onClose={() => setOpenRecipe(null)} />
+        <RecipeModal dm={openRecipe} family={openRecipe.family ?? family} onClose={() => setOpenRecipe(null)} />
       )}
       {showProModal && <ProModal onClose={() => setShowProModal(false)} />}
     </div>
@@ -984,7 +992,7 @@ const THEME_OPTIONS = [
 // у AccountSubscriptionCard ниже про то, почему кнопка пока не платит.
 function AccountView({
   displayName, setDisplayName, theme, setTheme,
-  family, setFamily, meals, setMeals, diet, setDiet,
+  family, setFamily, familyByMeal, setFamilyByMeal, meals, setMeals, diet, setDiet,
   allergies, setAllergies, cuisines, setCuisines, devices, setDevices,
   maxCookTime, setMaxCookTime,
   mealTimes, setMealTimes,
@@ -997,6 +1005,24 @@ function AccountView({
     onSave();
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
+  };
+
+  // Порции по приёмам пищи — свёрнуто по умолчанию (не усложняет экран тем,
+  // у кого вся семья ест одинаково), но сразу раскрыто, если такие
+  // переопределения уже есть — чтобы не прятать уже сделанную настройку.
+  const [showMealPortions, setShowMealPortions] = useState(() => Object.keys(familyByMeal || {}).length > 0);
+  const familyForMeal = (mealId) => familyByMeal?.[mealId] ?? family;
+  const setMealFamily = (mealId, updater) => {
+    hapticSelect();
+    setFamilyByMeal((prev) => {
+      const cur = prev?.[mealId] ?? family;
+      const next = typeof updater === "function" ? updater(cur) : updater;
+      return { ...prev, [mealId]: Math.max(1, Math.min(8, next)) };
+    });
+  };
+  const resetMealPortions = () => {
+    hapticImpact("light");
+    setFamilyByMeal({});
   };
 
   return (
@@ -1113,6 +1139,42 @@ function AccountView({
             </button>
           ))}
         </div>
+
+        {meals.length > 0 && (
+          <div style={{ marginTop: 16 }}>
+            {!showMealPortions ? (
+              <button className="chip" onClick={() => { hapticSelect(); setShowMealPortions(true); }} style={styles.linkBtn}>
+                Уточнить по приёмам пищи
+              </button>
+            ) : (
+              <>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                  <div style={styles.acctLabel}>Сколько человек на каждый приём пищи</div>
+                  {Object.keys(familyByMeal || {}).length > 0 && (
+                    <button className="chip" onClick={resetMealPortions} style={{ ...styles.linkBtn, padding: 0 }}>
+                      Одинаково для всех
+                    </button>
+                  )}
+                </div>
+                <p style={styles.acctSectionHint}>
+                  Например, если кто-то в семье ест дома не на все приёмы пищи — сколько человек реально закладывать в каждый.
+                </p>
+                <div style={styles.stack}>
+                  {MEALS.filter((m) => meals.includes(m.id)).map((m) => (
+                    <div key={m.id} style={styles.mealTimeRow}>
+                      <span>{m.label}</span>
+                      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                        <button style={styles.counterBtnSmall} onClick={() => setMealFamily(m.id, (f) => f - 1)}>−</button>
+                        <div style={styles.counterValSmall}>{familyForMeal(m.id)}</div>
+                        <button style={styles.counterBtnSmall} onClick={() => setMealFamily(m.id, (f) => f + 1)}>+</button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+        )}
 
         {meals.length > 0 && (
           <>
@@ -1786,7 +1848,7 @@ function ResultView({ plan, storeId, storeName, budget, family, mealsCount, diet
                 <span style={styles.timeBadge}>
                   <Clock size={11} /> {dm.recipe.time} мин
                 </span>
-                <span style={{ color: "var(--text-tertiary)", fontSize: 13, flexShrink: 0 }}>{(dm.cost * family).toLocaleString("ru-RU")} ₽</span>
+                <span style={{ color: "var(--text-tertiary)", fontSize: 13, flexShrink: 0 }}>{(dm.cost * (dm.family ?? family)).toLocaleString("ru-RU")} ₽</span>
                 <button
                   onClick={() => onSwap(dayIndex, i)}
                   disabled={!dm.canSwap}
@@ -2169,6 +2231,18 @@ const styles = {
   counterBtn: { width: 44, height: 44, borderRadius: "50%", border: "1px solid var(--hairline)", ...glass(0.6, 10), color: ACCENT, fontSize: 20, cursor: "pointer", lineHeight: 1, boxShadow: "0 2px 8px rgba(0,0,0,0.06)" },
   counterVal: { fontSize: 36, fontWeight: 700, minWidth: 44, textAlign: "center" },
   counterCaption: { textAlign: "center", fontSize: 13, color: "var(--text-tertiary)", marginTop: 8 },
+  // Компактная версия counterBtn/counterVal — для строчных степперов внутри
+  // mealTimeRow (порции по приёмам пищи), а не отдельного центрированного
+  // шага визарда. 32px — то же соображение по тач-зоне 24×24 (WCAG 2.5.8),
+  // что и у counterBtn/pantryBtn, просто с меньшим визуальным весом рядом с
+  // коротким лейблом приёма пищи.
+  counterBtnSmall: { width: 32, height: 32, borderRadius: "50%", border: "1px solid var(--hairline)", ...glass(0.6, 8), color: ACCENT, fontSize: 16, cursor: "pointer", lineHeight: 1 },
+  counterValSmall: { fontSize: 15, fontWeight: 700, minWidth: 18, textAlign: "center" },
+  // Текстовая ссылка-переключатель ("Уточнить по приёмам пищи" / "Одинаково
+  // для всех") — сознательно не chip/rowChip: это необязательное
+  // дополнительное действие, не должно выглядеть как ещё один такой же по
+  // весу выбор, что и сами приёмы пищи выше.
+  linkBtn: { background: "none", border: "none", padding: "4px 0", color: ACCENT, fontSize: 13.5, fontWeight: 600, cursor: "pointer" },
   budgetVal: { fontSize: 36, fontWeight: 700, textAlign: "center", marginBottom: 16 },
   slider: { width: "100%" },
   sliderLabels: { display: "flex", justifyContent: "space-between", fontSize: 12, color: "var(--text-tertiary)", marginTop: 6 },
