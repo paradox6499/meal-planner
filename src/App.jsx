@@ -810,6 +810,18 @@ export default function MealPlanner() {
                 <div style={styles.budgetVal}>{budget.toLocaleString("ru-RU")} ₽</div>
                 <input type="range" min={1500} max={15000} step={250} value={budget} onChange={(e) => setBudget(Number(e.target.value))} style={styles.slider} />
                 <div style={styles.sliderLabels}><span>1 500 ₽</span><span>15 000 ₽</span></div>
+                {/* Вопрос в чате: "выдаёт 17 000 при бюджете 15 000, почему?"
+                    — честный ответ: алгоритм целится в сумму, но не может
+                    дать железную гарантию "не больше" — если рацион/аллергии/
+                    кухня отфильтровали слишком много дешёвых рецептов,
+                    уложиться физически не во что (пример из чата: неделя
+                    только на рыбе за 7 000 ₽). Подпись ставит ожидания
+                    заранее, а не оставляет пользователя гадать при виде
+                    красной цифры в конце визарда (см. ResultView — там она
+                    уже подсвечивается, но без объяснения "почему"). */}
+                <p style={{ fontSize: 12, color: "var(--text-tertiary)", textAlign: "center", margin: "14px 0 0 0", lineHeight: 1.45 }}>
+                  Мы стараемся уложиться в эту сумму, но не всегда получается тютелька-в-тютельку — при строгих ограничениях по рациону, аллергиям или кухне подходящих дешёвых рецептов может просто не найтись, и итог выйдет чуть выше.
+                </p>
               </StepShell>
             )}
 
@@ -1077,11 +1089,26 @@ function AccountView({
             onClick={() => {
               hapticImpact("light");
               trackEvent("support_clicked");
-              // openTelegramLink — официальный способ открыть t.me-ссылку из
-              // Mini App (обычный window.open в некоторых клиентах может не
-              // сработать); вне Telegram (локальный просмотр) — просто
-              // открываем как обычную ссылку.
-              window.Telegram?.WebApp?.openTelegramLink ? window.Telegram.WebApp.openTelegramLink(SUPPORT_URL) : window.open(SUPPORT_URL, "_blank");
+              // Раньше — openTelegramLink(SUPPORT_URL). Жалоба в чате: "кнопка
+              // никуда не переводит", воспроизвели на двух разных аккаунтах и
+              // устройствах — не случайность одного клиента. SUPPORT_URL у нас
+              // указывает на ТОГО ЖЕ БОТА, что и держит текущий Mini App
+              // (@s_edim_bot — по замыслу поддержка ведёт в чат с самим ботом,
+              // не на личный аккаунт разработчика, см. webhook.js). Открыть
+              // ссылку "на самого себя" через openTelegramLink — известная
+              // проблема Telegram Mini Apps: клиент и так уже "внутри" чата с
+              // этим ботом, и на части платформ команда открыть ЭТУ ЖЕ ссылку
+              // просто ничего не делает. Мини-апп всегда запущен ПОВЕРХ чата с
+              // открывшим его ботом — надёжный способ вернуть пользователя в
+              // этот чат, чтобы он написал сообщение, это закрыть сам Mini App
+              // (WebApp.close() — официальный метод, работает на всех
+              // клиентах, а не только там, где openTelegramLink не игнорирует
+              // ссылку на себя). Вне Telegram (локальный просмотр, close()
+              // недоступен) — по-прежнему открываем как обычную ссылку.
+              const tg = window.Telegram?.WebApp;
+              if (tg?.close) tg.close();
+              else if (tg?.openTelegramLink) tg.openTelegramLink(SUPPORT_URL);
+              else window.open(SUPPORT_URL, "_blank");
             }}
             style={styles.rowChip(false)}
           >
@@ -1821,6 +1848,15 @@ function ResultView({ plan, storeId, storeName, budget, family, mealsCount, diet
         {!plan.itemized && plan.anyEstimated && (
           <span style={{ fontSize: 11, color: "var(--text-tertiary)", marginTop: 4 }}>
             Часть цен — оценочные, без данных из магазина
+          </span>
+        )}
+        {/* Та же подпись, что на шаге "Бюджет" визарда, но здесь уместнее —
+            когда цифра реально красная, а не заранее на всякий случай. Кто-то
+            видит этот экран, вообще пропустив шаг бюджета (вернувшийся
+            пользователь с сохранённым профилем — короткий визард). */}
+        {over && (
+          <span style={{ fontSize: 11, color: "var(--text-tertiary)", marginTop: 4, textAlign: "center" }}>
+            Уложиться точно в бюджет не вышло — среди рецептов под ваши фильтры не нашлось достаточно дешёвых вариантов
           </span>
         )}
       </div>

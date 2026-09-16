@@ -299,6 +299,14 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
 
       const auth = validateInitData(body.initData, botToken);
       if (!auth.ok) {
+        // Та же дыра, что нашлась у /api/pay/create ("нажимаю — событий в
+        // логе нет вообще"): отказ авторизации тут не логировался НИКАК —
+        // если у кого-то из тестировавших initData не проходит проверку
+        // (например, открыли не через кнопку бота, а по голой ссылке на
+        // GitHub Pages в обычном браузере — тогда initData у Telegram просто
+        // пустая строка), events молча отбрасывались, а /report потом
+        // честно, но вводяще в заблуждение писал "Событий не было".
+        console.warn(`[events] отказ авторизации (401):`, auth.error);
         sendJson(res, 401, { ok: false, error: auth.error });
         return;
       }
