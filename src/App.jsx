@@ -1829,6 +1829,23 @@ function ResultView({ plan, storeId, storeName, budget, family, mealsCount, diet
         </div>
       )}
 
+      {/* Не путать с mostlyUnpriced выше — та про "почти всё не нашлось",
+          эта про отдельные блюда: у части рецептов не набралось достаточно
+          совпадений по ингредиентам в каталоге, чтобы доверять их цене
+          (см. attachRealCosts в vkusvillRecipes.js). У таких блюд ниже стоит
+          "—" вместо цены — раньше вместо этого молча показывался 0 ₽,
+          выглядевший как "блюдо бесплатное" (жалоба в чате: "все блюда и
+          итог по нулям"). Не дублируем предупреждение, если mostlyUnpriced
+          уже объяснил ситуацию целиком. */}
+      {plan.anyDishUnpriced && !plan.mostlyUnpriced && (
+        <div style={styles.warningBox}>
+          <TriangleAlert size={15} style={{ flexShrink: 0, marginTop: 1 }} />
+          <span>
+            У части блюд не нашлась цена в каталоге ВкусВилл — отмечены «—» вместо стоимости. Остальная сумма и список покупок посчитаны как обычно.
+          </span>
+        </div>
+      )}
+
       <div style={{ ...styles.totalBox, borderColor: over ? "rgba(255,59,48,0.35)" : "rgba(10,132,255,0.3)" }}>
         <span style={{ fontSize: 13, color: "var(--text-tertiary)" }}>Итого за продукты</span>
         <span style={{ fontSize: 28, fontWeight: 700, letterSpacing: "-0.01em", color: over ? DANGER : ACCENT }}>
@@ -1884,7 +1901,13 @@ function ResultView({ plan, storeId, storeName, budget, family, mealsCount, diet
                 <span style={styles.timeBadge}>
                   <Clock size={11} /> {dm.recipe.time} мин
                 </span>
-                <span style={{ color: "var(--text-tertiary)", fontSize: 13, flexShrink: 0 }}>{(dm.cost * (dm.family ?? family)).toLocaleString("ru-RU")} ₽</span>
+                {/* cost===null — ВкусВилл не нашёл в каталоге достаточно
+                    ингредиентов блюда, чтобы доверять цене (см.
+                    attachRealCosts в vkusvillRecipes.js) — честное "—",
+                    а не 0 ₽, которое выглядело бы как "блюдо бесплатное". */}
+                <span style={{ color: "var(--text-tertiary)", fontSize: 13, flexShrink: 0 }}>
+                  {dm.cost == null ? "—" : `${(dm.cost * (dm.family ?? family)).toLocaleString("ru-RU")} ₽`}
+                </span>
                 <button
                   onClick={() => onSwap(dayIndex, i)}
                   disabled={!dm.canSwap}
@@ -2103,8 +2126,9 @@ function RecipeModal({ dm, family, onClose }) {
         <div style={styles.modalMeta}>
           <span style={styles.timeBadge}><Clock size={13} /> {recipe.time} мин</span>
           <span>
-            {(cost * family).toLocaleString("ru-RU")} ₽ на {family} {family === 1 ? "человека" : "человек"}
-            {!isRealPrice && " (оценочно)"}
+            {cost == null
+              ? `Цена неизвестна — не нашли товар в каталоге`
+              : <>{(cost * family).toLocaleString("ru-RU")} ₽ на {family} {family === 1 ? "человека" : "человек"}{!isRealPrice && " (оценочно)"}</>}
           </span>
         </div>
 

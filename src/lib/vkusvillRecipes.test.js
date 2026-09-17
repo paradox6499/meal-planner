@@ -319,6 +319,34 @@ describe("attachRealCosts — цена блюда не выставляется 
   });
 });
 
+// Регрессия на прод-баг (жалоба в чате: "план на 15 000 ₽, а все блюда и
+// итог по 0 ₽"): normalizeVkusvillRecipe раньше выставлял cost:0 ДО
+// attachRealCosts — тот же 0, что и "цена честно посчитана и равна нулю".
+// effectiveRecipeCost в data/recipes.js для ВкусВилл-рецептов ВСЕГДА
+// доверяет recipe.cost как есть (isRealPrice не undefined), никогда не
+// подставляя оценку взамен — блюдо с недостаточным совпадением ингредиентов
+// выглядело БЕСПЛАТНЫМ, а не "цена неизвестна". Проверяем через настоящий
+// fetchVkusvillPools (не через фикстуру attachRealCosts выше), потому что
+// баг был именно в дефолте normalizeVkusvillRecipe, а не в самой
+// attachRealCosts.
+describe("fetchVkusvillPools — недостаточное совпадение ингредиентов даёт cost:null, не cost:0", () => {
+  it("cost остаётся null (не 0), если ни один ингредиент не нашёлся в каталоге", async () => {
+    searchRecipes.mockResolvedValue({
+      items: [{
+        id: 10, name: "Экзотическое блюдо", cooking_time: { name: "до 40 минут" }, steps: [],
+        ingredients: [{ name: "Редкий ингредиент", quantity: "200 г" }],
+        portions: 1,
+      }],
+    });
+    resolvePrices.mockResolvedValue([{ matched: false, name: "Редкий ингредиент" }]);
+    const { pools } = await fetchVkusvillPools({
+      diet: "any", cuisines: [], devices: [], allergies: [], categories: ["main"], maxCookTime: null,
+    });
+    expect(pools.main[0].cost).toBeNull(); // не 0 — "неизвестно", а не "бесплатно"
+    expect(pools.main[0].isRealPrice).toBe(false);
+  });
+});
+
 // Серверный кэш цен (server/src/vkusvillPrices.js, POST /api/prices) —
 // общий на всех пользователей, должен реже упираться в rate-limit ВкусВилл,
 // чем клиентский in-memory кэш (per-браузер). attachRealCosts пробует его

@@ -369,6 +369,56 @@ describe("buildPlanView", () => {
       expect(view.days[0].dayMeals[0].family).toBe(5);
     });
   });
+
+  // Регрессия на прод-баг (жалоба в чате: "план на 15 000 ₽, а все блюда и
+  // итог по 0 ₽") — ВкусВилл-рецепт с cost:null (недостаточно совпадений
+  // ингредиентов в каталоге, см. attachRealCosts в vkusvillRecipes.js) не
+  // должен молча превращаться в 0 в сумме — раньше именно это и происходило
+  // (0 * family = 0, и от него ничего не отличало реальный бесплатный товар).
+  describe("cost:null (ВкусВилл не смог оценить блюдо) не портит total", () => {
+    const unpricedRecipe = {
+      id: "r2", name: "Неоценённый рецепт", category: "main", cost: null, isRealPrice: false, time: 10, emoji: "🍽️",
+      ingr: [["редкий_ингредиент", 100, "г"]],
+    };
+    const pricedRecipe = {
+      id: "r3", name: "Оценённый рецепт", category: "main", cost: 150, isRealPrice: true, time: 10, emoji: "🍽️",
+      ingr: [["морковь", 100, "г"]],
+    };
+    const vvPools = { breakfast: [], main: [unpricedRecipe, pricedRecipe], snack: [] };
+
+    it("блюдо без цены не участвует в total (а не считается как 0)", () => {
+      const planStateOne = { days: [{ day: 1, dayMeals: [{ mealId: "lunch", mealLabel: "Обед", category: "main", recipeId: "r2" }] }], warnings: [] };
+      const view = buildPlanView(planStateOne, vvPools, 2, null);
+      expect(view.total).toBe(0); // единственное блюдо недооценено — итог честно 0, не NaN
+      expect(view.anyDishUnpriced).toBe(true);
+    });
+
+    it("одно оценённое и одно неоценённое блюдо — total считает только оценённое", () => {
+      const planStateTwo = {
+        days: [{ day: 1, dayMeals: [
+          { mealId: "lunch", mealLabel: "Обед", category: "main", recipeId: "r2" },
+          { mealId: "dinner", mealLabel: "Ужин", category: "main", recipeId: "r3" },
+        ] }],
+        warnings: [],
+      };
+      const view = buildPlanView(planStateTwo, vvPools, 2, null);
+      expect(view.total).toBe(150 * 2); // только r3, r2 пропущен, не NaN и не 0-как-r2
+      expect(view.anyDishUnpriced).toBe(true);
+      expect(Number.isNaN(view.total)).toBe(false);
+    });
+
+    it("dm.cost остаётся null в days (для честного «—» в интерфейсе вместо 0 ₽)", () => {
+      const planStateOne = { days: [{ day: 1, dayMeals: [{ mealId: "lunch", mealLabel: "Обед", category: "main", recipeId: "r2" }] }], warnings: [] };
+      const view = buildPlanView(planStateOne, vvPools, 2, null);
+      expect(view.days[0].dayMeals[0].cost).toBeNull();
+    });
+
+    it("anyDishUnpriced=false, когда у всех блюд есть цена", () => {
+      const planStateThree = { days: [{ day: 1, dayMeals: [{ mealId: "lunch", mealLabel: "Обед", category: "main", recipeId: "r3" }] }], warnings: [] };
+      const view = buildPlanView(planStateThree, vvPools, 2, null);
+      expect(view.anyDishUnpriced).toBe(false);
+    });
+  });
 });
 
 // Регрессия на жалобу в чате: "в корзине 10 позиций, и то все овощи, без

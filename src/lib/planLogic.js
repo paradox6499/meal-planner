@@ -187,6 +187,15 @@ export function buildPlanView(planState, pools, family, priceByName, familyByMea
   let total = 0;
 
   let anyEstimated = false;
+  // Отдельно от anyEstimated: cost===null значит "цены вообще нет" (см.
+  // attachRealCosts в vkusvillRecipes.js — недостаточно совпавших
+  // ингредиентов), а не просто "цена приблизительная". Раньше такое блюдо
+  // тихо считалось как cost=0 и уходило в total как есть — план на 15 000 ₽
+  // мог показать итог 0 ₽, если у нескольких блюд не набралось совпадений
+  // (жалоба в чате). Теперь такое блюдо не участвует в сумме вообще, а
+  // ResultView показывает у него "—" вместо "0 ₽" — и есть явный флаг, чтобы
+  // предупредить пользователя, что часть блюд осталась без цены.
+  let anyDishUnpriced = false;
 
   const days = planState.days.map((d) => {
     const dayMeals = d.dayMeals.map((slot) => {
@@ -195,7 +204,8 @@ export function buildPlanView(planState, pools, family, priceByName, familyByMea
       const mealFamily = familyFor(slot.mealId);
       const [cost, isRealPrice] = effectiveRecipeCost(recipe);
       if (!isRealPrice) anyEstimated = true;
-      total += cost * mealFamily;
+      if (cost == null) anyDishUnpriced = true;
+      else total += cost * mealFamily;
       recipe.ingr.forEach(([name, amount, unit]) => {
         const key = `${name}|${unit}`;
         ingredMap[key] = (ingredMap[key] || 0) + amount * mealFamily;
@@ -260,7 +270,7 @@ export function buildPlanView(planState, pools, family, priceByName, familyByMea
     total: Math.round(itemized ? itemizedTotal : total),
     itemized,
     warnings: planState.warnings || [],
-    anyEstimated, anyUnpriced: itemized && unpricedCount > 0, mostlyUnpriced,
+    anyEstimated, anyDishUnpriced, anyUnpriced: itemized && unpricedCount > 0, mostlyUnpriced,
   };
 }
 
