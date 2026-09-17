@@ -77,13 +77,25 @@ export function buildDigestText(summary, { sinceISO, now, paymentsSummary = { co
 /** Собирает и шлёт отчёт ПРЯМО СЕЙЧАС, без проверки "пора ли" — используется
  * и автоматическим тиком (через runDigest ниже), и командой /report из
  * webhook.js (см. planReplyForUpdate), когда захотелось посмотреть отчёт
- * без ожидания следующего DIGEST_HOUR. Обновляет last_digest_at в обоих
- * случаях — если админ запросил отчёт вручную посреди дня, автоматический
- * тик за тот же день его не задвоит. Не бросает исключение при неудаче
- * отправки (например, разработчик ещё не написал боту /start, и Telegram
- * не даёт слать в чат, который бот не открывал первым) — вызывающий код
- * логирует и пробует в следующий раз, процесс падать не должен. */
-export async function sendDigestNow(db, { botToken, adminTelegramId }, now = new Date()) {
+ * без ожидания следующего DIGEST_HOUR.
+ *
+ * updateWatermark — по умолчанию true (нужно ежедневному автотику: он же
+ * читает last_digest_at через shouldRunDigest, и без обновления слал бы
+ * дубль в тот же день). Ручной /report вызывается с updateWatermark:false
+ * (см. app.js) — иначе получалась путаница из чата: "/report пишет
+ * 'событий не было', хотя другой пользователь час назад собирал план" —
+ * админ незадолго до этого уже проверял /report, тот СБРОСИЛ окно "с
+ * последнего раза" на момент проверки, и событие пользователя, случившееся
+ * ДО этого сброса, просто выпало из следующего отчёта. /report — это
+ * "посмотреть, что происходит", а не "отметить как прочитанное"; сбрасывать
+ * окно должен только настоящий ежедневный тик, а не количество раз, сколько
+ * админ заглянул из любопытства.
+ *
+ * Не бросает исключение при неудаче отправки (например, разработчик ещё не
+ * написал боту /start, и Telegram не даёт слать в чат, который бот не
+ * открывал первым) — вызывающий код логирует и пробует в следующий раз,
+ * процесс падать не должен. */
+export async function sendDigestNow(db, { botToken, adminTelegramId }, now = new Date(), { updateWatermark = true } = {}) {
   if (!adminTelegramId) return { sent: false, reason: "ADMIN_TELEGRAM_ID не задан" };
 
   const lastDigestAt = getLastDigestAt(db);
@@ -94,7 +106,7 @@ export async function sendDigestNow(db, { botToken, adminTelegramId }, now = new
 
   try {
     await sendTelegramMessage(botToken, adminTelegramId, text, { parseMode: undefined });
-    setLastDigestAt(db, now.toISOString());
+    if (updateWatermark) setLastDigestAt(db, now.toISOString());
     return { sent: true, summary };
   } catch (err) {
     console.error("[digest] не удалось отправить отчёт:", err.message);

@@ -779,6 +779,30 @@ describe("POST /telegram/webhook", () => {
     expect(telegramCalls).toHaveLength(0);
   });
 
+  // Регрессия на жалобу в чате: "/report пишет 'событий не было', хотя
+  // другой пользователь час назад собирал план" — /report раньше сам
+  // обновлял last_digest_at при каждом вызове, поэтому ПЕРВАЯ же ручная
+  // проверка "съедала" окно у второй — событие, случившееся ДО первого
+  // /report, честно попадало в первый отчёт, но повторный /report чуть
+  // позже уже не видел его снова (окно сдвинулось на момент первой
+  // проверки). /report — это "посмотреть", а не "отметить прочитанным";
+  // должен видеть одно и то же событие сколько угодно раз подряд, пока не
+  // сработает настоящий ежедневный автотик.
+  it("два подряд /report видят одно и то же старое событие — второй вызов не сдвигает окно первого", async () => {
+    insertEvent(db, { telegramUserId: 42, eventName: "plan_generated", props: null, createdAtISO: new Date(Date.now() - 3600_000).toISOString() });
+
+    const first = await post({ message: { text: "/report", chat: { id: 777 } } });
+    expect(first.status).toBe(200);
+    const second = await post({ message: { text: "/report", chat: { id: 777 } } });
+    expect(second.status).toBe(200);
+
+    expect(telegramCalls).toHaveLength(2);
+    const firstText = JSON.parse(telegramCalls[0][1].body).text;
+    const secondText = JSON.parse(telegramCalls[1][1].body).text;
+    expect(firstText).toContain("планов собрано");
+    expect(secondText).toContain("планов собрано"); // не "Событий не было" во второй раз
+  });
+
   it("произвольное сообщение от пользователя -> сохраняет как обращение и шлёт благодарность", async () => {
     const res = await post({ message: { text: "Не находит цены на творог", chat: { id: 42 }, from: { id: 42 } } });
     expect(res.status).toBe(200);

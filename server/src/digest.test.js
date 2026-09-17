@@ -139,4 +139,22 @@ describe("sendDigestNow", () => {
     const autoRun = await runDigest(db, { botToken: "TOKEN", adminTelegramId: 777, digestHour: 9 }, new Date("2026-09-10T09:30:00Z"));
     expect(autoRun.sent).toBe(false); // уже отправляли сегодня вручную
   });
+
+  // Регрессия на жалобу в чате: "/report пишет 'событий не было', хотя
+  // другой пользователь час назад собирал план" — /report (app.js) теперь
+  // зовёт sendDigestNow с updateWatermark:false именно чтобы избежать этого.
+  it("updateWatermark:false — не трогает last_digest_at (для /report, 'посмотреть', а не 'отметить прочитанным')", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({ ok: true, result: {} }) }));
+    const db = openDb(":memory:");
+
+    const result = await sendDigestNow(db, { botToken: "TOKEN", adminTelegramId: 777 }, new Date("2026-09-10T03:00:00Z"), { updateWatermark: false });
+    expect(result.sent).toBe(true);
+    expect(getLastDigestAt(db)).toBeNull(); // не сдвинулось
+
+    // повторный вызов чуть позже видит ТО ЖЕ САМОЕ окно (с 24ч назад, раз
+    // last_digest_at так и не проставился), а не "с прошлой проверки"
+    insertEvent(db, { telegramUserId: 1, eventName: "app_opened", props: null, createdAtISO: "2026-09-10T02:00:00.000Z" });
+    const second = await sendDigestNow(db, { botToken: "TOKEN", adminTelegramId: 777 }, new Date("2026-09-10T03:30:00Z"), { updateWatermark: false });
+    expect(second.summary.totalEvents).toBe(1); // событие в 02:00 всё ещё видно
+  });
 });

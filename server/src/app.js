@@ -577,7 +577,9 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
         if (reply?.kind === "start") {
           await sendTelegramMessage(botToken, reply.chatId, buildWelcomeText());
         } else if (reply?.kind === "report") {
-          await sendDigestNow(db, { botToken, adminTelegramId });
+          // updateWatermark:false — /report это "посмотреть", не "отметить
+          // прочитанным" (см. комментарий у sendDigestNow в digest.js).
+          await sendDigestNow(db, { botToken, adminTelegramId }, new Date(), { updateWatermark: false });
         } else if (reply?.kind === "backup") {
           await sendBackupNow(db, { botToken, adminTelegramId });
         } else if (reply?.kind === "list_feedback") {
