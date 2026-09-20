@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { toVkusvillQuantity, searchProducts, createCartLink, clearMcpCache, resolvePrices, parsePackageAmount } from "./vkusvillMcp.js";
+import { toVkusvillQuantity, searchProducts, createCartLink, clearMcpCache, resolvePrices, parsePackageAmount, buildCartFromShoppingList } from "./vkusvillMcp.js";
 
 // Используется и при сборке реальной корзины, и при пересчёте "Итого за
 // продукты" на замену товара (ResultView в App.jsx) — если эта функция
@@ -313,5 +313,57 @@ describe("resolvePrices — ограничение параллелизма (р�
     const [resolved] = await resolvePrices([{ name: "Хлеб", amount: 1, unit: "шт" }]);
     expect(resolved.packageAmount).toBeNull();
     expect(resolved.packageUnit).toBeNull();
+  });
+});
+
+// Регрессия на жалобу в чате: "корзина ВкусВилл ограничена 20 позициями, а
+// на неделю может дать более 50 позиций, как это решить" — раньше лишнее
+// (>20) просто молча отбрасывалось (см. git-историю buildCartFromShoppingList).
+// Теперь список бьётся на батчи по 20 и на каждый создаётся своя ссылка —
+// см. комментарий у CART_LINK_LIMIT/buildCartFromShoppingList в vkusvillMcp.js
+// за объяснением, почему это безопасно копить в одну и ту же корзину ВкусВилл.
+describe("buildCartFromShoppingList — батчинг по лимиту ВкусВилл (20 позиций за вызов)", () => {
+  beforeEach(() => {
+    clearMcpCache();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url, opts) => {
+        const body = JSON.parse(opts.body);
+        if (body.params.name === "vkusvill_products_search") {
+          return mockMcpResponse({ items: [{ xml_id: 100, name: body.params.arguments.q, price: { current: 50 }, unit: "шт" }] });
+        }
+        if (body.params.name === "vkusvill_cart_link_create") {
+          const n = body.params.arguments.products.length;
+          return mockMcpResponse({ link: `https://vkusvill.ru/?share_basket=fake-${n}` });
+        }
+        throw new Error("неожиданный инструмент в тесте: " + body.params.name);
+      })
+    );
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  const mkItems = (n) => Array.from({ length: n }, (_, i) => ({ name: `Товар ${i}`, amount: 1, unit: "шт" }));
+
+  it("45 позиций -> 3 ссылки (20+20+5), а не одна урезанная до 20", async () => {
+    const { links, matchedCount, totalCount, unmatched } = await buildCartFromShoppingList(mkItems(45));
+    expect(links).toHaveLength(3);
+    expect(matchedCount).toBe(45); // ничего не потеряно, в отличие от старого .slice(0, 20)
+    expect(totalCount).toBe(45);
+    expect(unmatched).toEqual([]);
+  });
+
+  it("15 позиций (меньше лимита) -> ровно 1 ссылка", async () => {
+    const { links } = await buildCartFromShoppingList(mkItems(15));
+    expect(links).toHaveLength(1);
+  });
+
+  it("ровно 20 позиций -> 1 ссылка, не 2 (одна из которых пустая)", async () => {
+    const { links } = await buildCartFromShoppingList(mkItems(20));
+    expect(links).toHaveLength(1);
+  });
+
+  it("21 позиция -> 2 ссылки (20+1)", async () => {
+    const { links } = await buildCartFromShoppingList(mkItems(21));
+    expect(links).toHaveLength(2);
   });
 });

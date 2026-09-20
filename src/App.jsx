@@ -1756,19 +1756,20 @@ function ResultView({ plan, storeId, storeName, budget, family, mealsCount, diet
           ? { name: sub.name, amount: it.amount, unit: it.unit, xmlId: sub.xmlId, knownPrice: sub.price, knownUnit: sub.productUnit }
           : { name: it.name, amount: it.amount, unit: it.unit };
       });
-      const { link, matchedCount, totalCount, unmatched } = await buildCartFromShoppingList(items);
-      window.open(link, "_blank", "noopener,noreferrer");
+      const { links, matchedCount, totalCount, unmatched } = await buildCartFromShoppingList(items);
+      // Первая ссылка открывается сразу этим же кликом — открыть её ПОЗЖЕ
+      // отдельным вызовом window.open() без прямого пользовательского жеста
+      // почти наверняка заблокирует браузер как всплывающее окно. Остальные
+      // (если список длиннее 20 позиций — см. CART_LINK_LIMIT в vkusvillMcp.js)
+      // пользователь открывает сам по очереди кнопками ниже — по той же причине:
+      // несколько window.open() подряд в цикле блокируются почти везде,
+      // кроме самого первого.
+      window.open(links[0], "_blank", "noopener,noreferrer");
       // Раньше при неполном совпадении это уходило только в console.warn —
       // пользователь открывал корзину и молча недосчитывался части товаров,
-      // не понимая почему. ВкусВилл вдобавок принимает максимум 20 позиций
-      // за раз (см. vkusvillMcp.js) — при длинном списке это тоже причина
-      // расхождения, а не только "не нашли в каталоге". Показываем сразу обе.
-      const note =
-        matchedCount < totalCount
-          ? `В корзину добавлено ${matchedCount} из ${totalCount} товаров.` +
-            (totalCount > 20 ? " ВкусВилл принимает максимум 20 позиций за раз — часть пришлось докупить отдельно." : " Часть не нашлась в каталоге — докупите её отдельно.")
-          : null;
-      setOrderState({ status: "idle", note });
+      // не понимая почему.
+      const note = matchedCount < totalCount ? `В корзину добавлено ${matchedCount} из ${totalCount} товаров. Часть не нашлась в каталоге — докупите её отдельно.` : null;
+      setOrderState({ status: "idle", note, links });
       hapticNotify("success");
       if (unmatched.length > 0) console.warn("Не нашли в каталоге ВкусВилл:", unmatched);
     } catch (err) {
@@ -2039,6 +2040,30 @@ function ResultView({ plan, storeId, storeName, budget, family, mealsCount, diet
           )}
           {orderState.status === "idle" && orderState.note && (
             <p style={styles.orderNote}>{orderState.note}</p>
+          )}
+          {/* ВкусВилл принимает максимум 20 позиций в одной ссылке "поделились
+              товарами" — при более длинном списке покупок (обычное дело на
+              неделю) buildCartFromShoppingList возвращает несколько ссылок.
+              Первая уже открылась сама тем же кликом — остальные открываем
+              по одной явным нажатием (иначе блокировщик всплывающих окон
+              не пропустит window.open() без собственного жеста пользователя).
+              Открыть и подтвердить каждую по очереди — они добавляются в
+              ОДНУ и ту же корзину на сайте ВкусВилл, а не заменяют друг друга. */}
+          {orderState.status === "idle" && orderState.links?.length > 1 && (
+            <div style={styles.orderPartsWrap}>
+              <p style={styles.orderNote}>
+                Список покупок длиннее, чем принимает ВкусВилл за раз — открылась только первая часть. Откройте и подтвердите остальные по очереди, они добавятся в ту же корзину:
+              </p>
+              {orderState.links.slice(1).map((link, i) => (
+                <button
+                  key={i}
+                  onClick={() => window.open(link, "_blank", "noopener,noreferrer")}
+                  style={styles.orderPartBtn}
+                >
+                  Открыть часть {i + 2} из {orderState.links.length}
+                </button>
+              ))}
+            </div>
           )}
         </>
       ) : (
@@ -2387,6 +2412,11 @@ const styles = {
   orderBtn: { width: "100%", padding: "14px 0", background: `linear-gradient(180deg, ${ACCENT}, #0066DB)`, border: "none", borderRadius: 18, color: "#fff", fontSize: 14.5, fontWeight: 600, cursor: "pointer", marginTop: 8, boxShadow: "0 8px 20px rgba(10,132,255,0.35)" },
   orderError: { fontSize: 12, color: "var(--danger)", textAlign: "center", marginTop: 8 },
   orderNote: { fontSize: 12, color: "var(--text-tertiary)", textAlign: "center", marginTop: 8, lineHeight: 1.4 },
+  orderPartsWrap: { display: "flex", flexDirection: "column", gap: 8, marginTop: 4 },
+  orderPartBtn: {
+    width: "100%", padding: "11px 0", background: "transparent", border: `1.5px solid ${ACCENT}`,
+    borderRadius: 16, color: ACCENT, fontSize: 13.5, fontWeight: 600, cursor: "pointer",
+  },
   shareBtn: { width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 8, padding: "13px 0", ...glass(0.6, 10), border: "1px solid var(--hairline)", borderRadius: 18, color: "var(--text-primary)", fontSize: 14, fontWeight: 600, cursor: "pointer", marginTop: 8 },
 
   recipeRowBtn: { flex: 1, display: "flex", alignItems: "center", gap: 8, background: "none", border: "none", padding: "4px 2px", borderRadius: 10, textAlign: "left", cursor: "pointer", color: "var(--text-primary)", font: "inherit", minWidth: 0 },

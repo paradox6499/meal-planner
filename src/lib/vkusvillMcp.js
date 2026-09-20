@@ -351,15 +351,27 @@ export async function resolvePrices(items) {
   return settled.map((r, i) => (r.status === "fulfilled" ? r.value : { matched: false, name: items[i].name }));
 }
 
+// Жёсткий лимит самого VkusVill на один вызов vkusvill_cart_link_create —
+// не наша прихоть, сервер отклоняет запрос длиннее этого. Раньше при более
+// длинном списке лишнее просто молча отбрасывалось (жалоба в чате: "план
+// даёт 50+ позиций, а в корзине заказа только 20"). Реальный недельный план
+// почти всегда длиннее 20 позиций — 1-2 приёма пищи в день на неделю уже
+// дают под полсотни уникальных ингредиентов.
+const CART_LINK_LIMIT = 20;
+
 /** Берёт плоский список покупок ([{name, amount, unit}], как в App.jsx
- * plan.grouped[].items) и превращает в ссылку на реальную корзину ВкусВилл.
+ * plan.grouped[].items) и превращает в НЕСКОЛЬКО ссылок на корзину ВкусВилл
+ * (см. CART_LINK_LIMIT) — по одной на каждые 20 позиций, а не одну на всё.
  * Часть ингредиентов может не найтись (пряности, самодельные заготовки) —
- * это ожидаемо, не ошибка; такие просто не попадают в корзину, а не роняют
- * весь заказ.
+ * это ожидаемо, не ошибка; такие просто не попадают ни в одну ссылку, а не
+ * роняют весь заказ.
  *
- * Ограничение самого VkusVill: максимум 20 позиций в ссылке — если список
- * покупок больше, берутся первые 20 найденных (без приоритизации по важности,
- * это первое приближение, не решение продуктового вопроса "что важнее").*/
+ * Ссылки открываются пользователем по очереди (см. handleOrder в App.jsx) —
+ * механизм "поделились товарами" на стороне ВкусВилл (basket_add_multy)
+ * рассчитан именно на накопление, не на замену: открыли и подтвердили
+ * первую ссылку — добавилась в корзину; открыли и подтвердили вторую —
+ * добавилась туда же, к первой, а не вместо неё (проверено вживую через
+ * реальный MCP-вызов и сетевые запросы на vkusvill.ru, не предположение).*/
 export async function buildCartFromShoppingList(items) {
   const resolved = await resolvePrices(items);
   const matched = resolved.filter((r) => r.matched);
@@ -369,8 +381,18 @@ export async function buildCartFromShoppingList(items) {
     throw new Error("Не нашли ни одного товара ВкусВилл по списку покупок");
   }
 
-  const capped = matched.slice(0, 20);
-  const { link } = await createCartLink(capped.map(({ xml_id, q }) => ({ xml_id, q })));
+  const batches = [];
+  for (let i = 0; i < matched.length; i += CART_LINK_LIMIT) {
+    batches.push(matched.slice(i, i + CART_LINK_LIMIT));
+  }
+  // Последовательно, не Promise.all — это СОЗДАЮЩИЕ вызовы (не кэшируются,
+  // см. CACHEABLE_TOOLS выше), параллельный залп в несколько штук сразу
+  // — тот же риск burst-лимита, которого и так стараемся избегать в этом файле.
+  const links = [];
+  for (const batch of batches) {
+    const { link } = await createCartLink(batch.map(({ xml_id, q }) => ({ xml_id, q })));
+    links.push(link);
+  }
 
-  return { link, matchedCount: capped.length, totalCount: items.length, unmatched };
+  return { links, matchedCount: matched.length, totalCount: items.length, unmatched };
 }
