@@ -6,7 +6,7 @@ import { fetchVkusvillPools, getSubstituteOptions, attachRealCosts } from "./lib
 import { loadProfile, saveProfile, clearProfile, loadTheme, saveTheme } from "./lib/profile.js";
 import { loadActivePlan, saveActivePlan, clearActivePlan } from "./lib/activePlan.js";
 import { buildPools, buildInitialPlan, buildPlanView, interleaveGroups, computeBudgetStreak, computeRecentSavings } from "./lib/planLogic.js";
-import { submitPlanToBackend, checkPlanStatus, savePlanToHistory, fetchPlanHistory, updateMealTimes, createProPayment, claimReferral, fetchReferralStatus } from "./lib/backend.js";
+import { submitPlanToBackend, checkPlanStatus, savePlanToHistory, fetchPlanHistory, updateMealTimes, createProPayment, claimReferral, fetchReferralStatus, getBackendUrl } from "./lib/backend.js";
 import { loadPantryStaples, savePantryStaples } from "./lib/pantry.js";
 import { trackEvent } from "./lib/analytics.js";
 import logoUrl from "./assets/logo.svg";
@@ -1029,12 +1029,18 @@ function AccountView({
   // без консоли — одним взглядом или скриншотом в поддержку.
   const [showDiag, setShowDiag] = useState(false);
   const diagTg = window.Telegram?.WebApp;
-  const diagBackendUrl = import.meta.env.VITE_BACKEND_URL || null;
+  // Настоящий адрес, не просто "настроен/не настроен" — именно так нашёлся
+  // прод-баг (жалоба "http 404: not found"): VITE_BACKEND_URL был задан с
+  // завершающим слешем, из-за которого КАЖДЫЙ вызов бэкенда уходил в
+  // двойной слеш и молча 404-ился на нашем же роутере (см. getBackendUrl в
+  // backend.js). Показываем сырое значение — такую опечатку видно сразу, не
+  // дожидаясь ещё одного круга "проверьте логи".
+  const diagBackendUrl = getBackendUrl() || null;
   const diagInitData = diagTg?.initData || "";
   // Длина, не само значение — initData несёт подписанные данные пользователя,
   // показывать их в интерфейсе незачем даже себе самому.
   const diagRows = [
-    ["Адрес сервера", diagBackendUrl ? "настроен" : "не настроен"],
+    ["Адрес сервера", diagBackendUrl || "не настроен"],
     ["Telegram WebApp", diagTg ? "обнаружен" : "не обнаружен"],
     ["initData", diagInitData ? `есть (${diagInitData.length} симв.)` : "отсутствует"],
     ["Платформа", diagTg?.platform || "—"],

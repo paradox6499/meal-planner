@@ -4,8 +4,18 @@
 // вопрос про 152-ФЗ при таком масштабе. Тот же принцип best-effort, что и в
 // backend.js: без VITE_BACKEND_URL или вне Telegram — тихо ничего не делает,
 // ни один вызов trackEvent не должен уметь сломать основной сценарий.
+import { getBackendUrl } from "./backend.js";
+
 export function trackEvent(eventName, props = null) {
-  const backendUrl = import.meta.env.VITE_BACKEND_URL;
+  // getBackendUrl (не голый import.meta.env.VITE_BACKEND_URL) — срезает
+  // завершающий слеш. Жалоба в чате "http 404: not found" — VITE_BACKEND_URL
+  // в GitHub Actions задан С завершающим слешем, `${backendUrl}/events`
+  // собирал "//events" (двойной слеш), наш же роутер на сервере матчит URL
+  // точным сравнением строк и такое ни с чем не совпадает — событие 404-лось
+  // молча (обработчик 404 ничего не логирует), поэтому /report и показывал
+  // "Событий не было" даже после реальных действий в приложении. См.
+  // подробный комментарий у getBackendUrl в backend.js.
+  const backendUrl = getBackendUrl();
   if (!backendUrl) return;
 
   const tg = window.Telegram?.WebApp;

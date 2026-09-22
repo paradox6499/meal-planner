@@ -42,6 +42,27 @@ export function buildMealSlots(planView, mealTimes) {
   );
 }
 
+// Настоящий прод-баг (жалоба в чате "http 404: not found" — видно только
+// после того, как ProModal стала показывать причину отказа на экране, не
+// только в console.warn), стоивший нескольких дней путаницы с "логи
+// пустые" и "событий не было": VITE_BACKEND_URL в GitHub Actions задан С
+// завершающим слешем (https://…onrender.com/), а КАЖДЫЙ вызов в этом файле
+// собирал путь как `${backendUrl}/api/...` — итог "//api/..." (двойной
+// слеш). Сервер (простой роутер без фреймворка, см. server/src/app.js)
+// матчит req.url ТОЧНЫМ сравнением строк ("/api/pay/create") — "//api/..."
+// ни с чем не совпадает и падает в 404 у самого же нашего роутера, причём
+// молча: обработчик 404 ничего не логирует. Живьём проверено curl'ом
+// напрямую на проде — именно так и воспроизводится. Из-за этого не только
+// оплата, а ВООБЩЕ ЛЮБОЙ вызов бэкенда (аналитика, история планов,
+// реферальная программа, напоминания) тихо проваливался в 404 для
+// реальных пользователей всё это время. getBackendUrl — единственное
+// место, где вообще читается VITE_BACKEND_URL, чтобы этот класс бага не
+// мог повториться незаметно ещё раз в одном из мест и уцелеть в остальных.
+export function getBackendUrl() {
+  const raw = import.meta.env.VITE_BACKEND_URL;
+  return raw ? raw.replace(/\/+$/, "") : raw;
+}
+
 // typeof-проверка первой (а не просто window?.Telegram...) — раньше во всех
 // функциях этого файла молча подразумевалось, что глобальный window вообще
 // существует (правда в браузере, но не в тестах Node-окружения без jsdom, см.
@@ -61,7 +82,7 @@ function currentInitData() {
  * плана вообще, тот же принцип "бэкенд опционален", что и у остальных
  * функций этого файла. */
 export async function checkPlanStatus() {
-  const backendUrl = import.meta.env.VITE_BACKEND_URL;
+  const backendUrl = getBackendUrl();
   const initData = currentInitData();
   if (!backendUrl || !initData) return null;
 
@@ -98,7 +119,7 @@ export async function checkPlanStatus() {
  * следующий круг диагностики не должен снова упираться в "а в логах пусто".
  */
 export async function createProPayment() {
-  const backendUrl = import.meta.env.VITE_BACKEND_URL;
+  const backendUrl = getBackendUrl();
   const initData = currentInitData();
   if (!backendUrl || !initData) {
     console.warn("Не удалось создать платёж: нет backendUrl или initData", { hasBackendUrl: !!backendUrl, hasInitData: !!initData });
@@ -140,7 +161,7 @@ export async function createProPayment() {
  * resolvePrices напрямую, тот же принцип "бэкенд опционален", что и везде
  * в этом файле. names — БЕЗ дублей не обязательно, сервер сам дедуплицирует. */
 export async function resolvePricesViaBackend(names) {
-  const backendUrl = import.meta.env.VITE_BACKEND_URL;
+  const backendUrl = getBackendUrl();
   const initData = currentInitData();
   if (!backendUrl || !initData || names.length === 0) return null;
 
@@ -163,7 +184,7 @@ export async function resolvePricesViaBackend(names) {
  * best-effort, как и всё остальное здесь: без бэкенда просто не сохраняется,
  * история — приятное дополнение, а не часть основного сценария. */
 export async function savePlanToHistory({ storeId, storeName, budget, family, totalCost, plan }) {
-  const backendUrl = import.meta.env.VITE_BACKEND_URL;
+  const backendUrl = getBackendUrl();
   const initData = currentInitData();
   if (!backendUrl || !initData) return;
 
@@ -192,7 +213,7 @@ export async function savePlanToHistory({ storeId, storeName, budget, family, to
  * Telegram), пустой массив [] — "спросили, там пока пусто". Разные вещи для
  * UI: null скрывает раздел "История" целиком, [] показывает "пока пусто". */
 export async function fetchPlanHistory() {
-  const backendUrl = import.meta.env.VITE_BACKEND_URL;
+  const backendUrl = getBackendUrl();
   const initData = currentInitData();
   if (!backendUrl || !initData) return null;
 
@@ -221,7 +242,7 @@ export async function fetchPlanHistory() {
  * best-effort, как и всё остальное здесь — если сохранённого плана ещё нет,
  * сервер просто ничего не найдёт и не обновит, это не ошибка. */
 export async function updateMealTimes(mealTimes) {
-  const backendUrl = import.meta.env.VITE_BACKEND_URL;
+  const backendUrl = getBackendUrl();
   const initData = currentInitData();
   if (!backendUrl || !initData) return;
 
@@ -250,7 +271,7 @@ export async function updateMealTimes(mealTimes) {
 }
 
 export async function submitPlanToBackend(planView, mealTimes) {
-  const backendUrl = import.meta.env.VITE_BACKEND_URL;
+  const backendUrl = getBackendUrl();
   if (!backendUrl) return; // бэкенд ещё не задеплоен — молча ничего не делаем, это ок
 
   const tg = window.Telegram?.WebApp;
@@ -302,7 +323,7 @@ export async function submitPlanToBackend(planView, mealTimes) {
  * пользователь и т.п., см. server/src/referrals.js) не нужен вызывающему
  * коду — это best-effort фоновая регистрация, не блокирующая ничего в UI. */
 export async function claimReferral(referrerTelegramId) {
-  const backendUrl = import.meta.env.VITE_BACKEND_URL;
+  const backendUrl = getBackendUrl();
   const initData = currentInitData();
   if (!backendUrl || !initData) return;
 
@@ -322,7 +343,7 @@ export async function claimReferral(referrerTelegramId) {
  * спросить/не получилось (см. AccountView в App.jsx: раздел "Пригласить
  * друга" рендерится и без этого — просто без строки прогресса). */
 export async function fetchReferralStatus() {
-  const backendUrl = import.meta.env.VITE_BACKEND_URL;
+  const backendUrl = getBackendUrl();
   const initData = currentInitData();
   if (!backendUrl || !initData) return null;
 

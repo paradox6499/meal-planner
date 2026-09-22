@@ -1,9 +1,51 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { buildMealSlots, todayPlusDays, checkPlanStatus, savePlanToHistory, fetchPlanHistory, updateMealTimes, resolvePricesViaBackend, createProPayment, claimReferral, fetchReferralStatus } from "./backend.js";
+import { buildMealSlots, todayPlusDays, checkPlanStatus, savePlanToHistory, fetchPlanHistory, updateMealTimes, resolvePricesViaBackend, createProPayment, claimReferral, fetchReferralStatus, getBackendUrl } from "./backend.js";
 
 function stubTelegram(initData) {
   vi.stubGlobal("window", { Telegram: initData !== undefined ? { WebApp: { initData } } : undefined });
 }
+
+// Регрессия на прод-баг (жалоба в чате: "http 404: not found", всплывшая
+// только после того, как ProModal стала показывать причину отказа на
+// экране, а не только в console.warn) — VITE_BACKEND_URL в GitHub Actions
+// был задан С завершающим слешем, и КАЖДЫЙ вызов бэкенда (`${backendUrl}/...`)
+// собирал путь с двойным слешем ("//api/pay/create"), который наш же
+// роутер на сервере (точное сравнение строк) не матчит ни с чем и молча
+// 404-ит. Из-за этого не только оплата — вообще любой вызов бэкенда
+// (аналитика, история планов, рефералка, напоминания) тихо проваливался
+// для реальных пользователей.
+describe("getBackendUrl", () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  it("срезает один или несколько завершающих слешей", () => {
+    vi.stubEnv("VITE_BACKEND_URL", "https://api.example.com/");
+    expect(getBackendUrl()).toBe("https://api.example.com");
+
+    vi.stubEnv("VITE_BACKEND_URL", "https://api.example.com///");
+    expect(getBackendUrl()).toBe("https://api.example.com");
+  });
+
+  it("без завершающего слеша — не трогает адрес", () => {
+    vi.stubEnv("VITE_BACKEND_URL", "https://api.example.com");
+    expect(getBackendUrl()).toBe("https://api.example.com");
+  });
+
+  it("не задан -> falsy, не бросает", () => {
+    vi.stubEnv("VITE_BACKEND_URL", "");
+    expect(getBackendUrl()).toBeFalsy();
+  });
+
+  it("createProPayment реально бьёт по пути БЕЗ двойного слеша, даже если адрес задан с завершающим", async () => {
+    vi.stubEnv("VITE_BACKEND_URL", "https://api.example.com/"); // как в живом GitHub Actions
+    stubTelegram("x");
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ ok: true, confirmationUrl: "https://yookassa.ru/checkout/pay-1" }) });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await createProPayment();
+
+    expect(fetchMock).toHaveBeenCalledWith("https://api.example.com/api/pay/create", expect.anything());
+  });
+});
 
 describe("todayPlusDays", () => {
   const originalTZ = process.env.TZ;
