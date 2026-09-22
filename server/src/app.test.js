@@ -601,7 +601,7 @@ describe("POST /api/pay/create", () => {
     const res = await fetch(`${baseUrl}/api/pay/create`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ initData: validInitData(42) }),
+      body: JSON.stringify({ initData: validInitData(42), email: "user@example.com" }),
     });
     expect(res.status).toBe(200);
     const body = await res.json();
@@ -622,9 +622,37 @@ describe("POST /api/pay/create", () => {
     const res = await fetch(`${baseUrl}/api/pay/create`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ initData: validInitData(42) }),
+      body: JSON.stringify({ initData: validInitData(42), email: "user@example.com" }),
     });
     expect(res.status).toBe(503);
+  });
+
+  // Регрессия на живую жалобу "ЮKassa createPayment: Receipt is missing or
+  // illegal" — магазин требует чек с контактом покупателя на каждый платёж
+  // (54-ФЗ). Отсекаем отсутствующий/некорректный email ДО похода к ЮKassa —
+  // понятная ошибка сразу, а не невнятный отказ платёжного провайдера.
+  it("без email -> 400, платёж не создаётся, к ЮKassa не ходим", async () => {
+    await startServer({ botToken: BOT_TOKEN, yookassa: YOOKASSA_CREDS });
+    const yookassaFetch = vi.fn();
+    stubYookassaFetch(yookassaFetch);
+
+    const res = await fetch(`${baseUrl}/api/pay/create`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ initData: validInitData(42) }),
+    });
+    expect(res.status).toBe(400);
+    expect(yookassaFetch).not.toHaveBeenCalled();
+  });
+
+  it("email не похож на email (нет @/домена) -> 400", async () => {
+    await startServer({ botToken: BOT_TOKEN, yookassa: YOOKASSA_CREDS });
+    const res = await fetch(`${baseUrl}/api/pay/create`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ initData: validInitData(42), email: "не-email" }),
+    });
+    expect(res.status).toBe(400);
   });
 });
 

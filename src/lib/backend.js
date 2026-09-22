@@ -105,6 +105,10 @@ export async function checkPlanStatus() {
  * ProModal), не встраивается в само мини-приложение: ЮKassa не поддерживает
  * работу внутри Telegram WebView.
  *
+ * email — обязателен (см. lib/payerContact.js): магазин требует фискальный
+ * чек на каждый платёж (54-ФЗ), а чек требует контакт покупателя. Telegram
+ * email не даёт вообще ни при каких условиях, поэтому спрашиваем сами.
+ *
  * Возвращает {ok:true, confirmationUrl} или {ok:false, reason, detail} —
  * раньше был просто null на любой неудаче, и все причины ("нет backendUrl/
  * initData" / "сервер ответил ошибкой" / "сетевая ошибка") были неотличимы
@@ -118,7 +122,7 @@ export async function checkPlanStatus() {
  * причину прямо в интерфейсе: "нет интернета", "сервер ответил 503" и т.п. —
  * следующий круг диагностики не должен снова упираться в "а в логах пусто".
  */
-export async function createProPayment() {
+export async function createProPayment(email) {
   const backendUrl = getBackendUrl();
   const initData = currentInitData();
   if (!backendUrl || !initData) {
@@ -130,7 +134,7 @@ export async function createProPayment() {
     const res = await fetch(`${backendUrl}/api/pay/create`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ initData }),
+      body: JSON.stringify({ initData, email }),
     });
     if (!res.ok) {
       const data = await res.json().catch(() => null);

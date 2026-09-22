@@ -17,13 +17,23 @@ function authHeader(shopId, secretKey) {
 
 /**
  * @param {{shopId: string, secretKey: string}} creds
- * @param {{amountRub: number, description: string, returnUrl: string, telegramUserId: number, idempotenceKey: string}} params
+ * @param {{amountRub: number, description: string, returnUrl: string, telegramUserId: number, idempotenceKey: string, receiptEmail: string}} params
  * idempotenceKey — свой (не сгенерированный тут), чтобы вызывающий код мог
  * гарантированно не создать дубль платежа при повторе запроса (например,
  * если ответ ЮKassa потерялся в сети, а фронтенд ретраит) — тот же payment
  * id вернётся повторно вместо второго списания.
+ *
+ * receipt — обязателен для этого магазина (живая жалоба в чате: без него
+ * ЮKassa отвечала "Receipt is missing or illegal") — магазин подключён с
+ * онлайн-кассой (обычная схема для ИП), она требует фискальный чек на
+ * КАЖДЫЙ платёж по 54-ФЗ. customer.email — обязательный контакт покупателя
+ * для чека (см. lib/payerContact.js на фронтенде, Telegram email не даёт).
+ * vat_code: 1 = "без НДС" — верно для ИП на УСН (самый частый случай для
+ * такого масштаба); если ИП на другом налоговом режиме, это число нужно
+ * поменять на соответствующий код ЮKassa.
  */
-export async function createPayment({ shopId, secretKey }, { amountRub, description, returnUrl, telegramUserId, idempotenceKey }) {
+export async function createPayment({ shopId, secretKey }, { amountRub, description, returnUrl, telegramUserId, idempotenceKey, receiptEmail }) {
+  const amount = { value: amountRub.toFixed(2), currency: "RUB" };
   const res = await fetch(`${API_BASE}/payments`, {
     method: "POST",
     headers: {
@@ -32,11 +42,24 @@ export async function createPayment({ shopId, secretKey }, { amountRub, descript
       "Idempotence-Key": idempotenceKey,
     },
     body: JSON.stringify({
-      amount: { value: amountRub.toFixed(2), currency: "RUB" },
+      amount,
       confirmation: { type: "redirect", return_url: returnUrl },
       capture: true,
       description,
       metadata: { telegram_user_id: String(telegramUserId) },
+      receipt: {
+        customer: { email: receiptEmail },
+        items: [
+          {
+            description,
+            quantity: "1.00",
+            amount,
+            vat_code: 1,
+            payment_mode: "full_payment",
+            payment_subject: "service",
+          },
+        ],
+      },
     }),
   });
   const body = await res.json().catch(() => null);

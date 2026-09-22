@@ -481,6 +481,19 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
         return sendJson(res, auth.status, { ok: false, error: auth.error });
       }
 
+      // Живая жалоба в чате: "ЮKassa createPayment: Receipt is missing or
+      // illegal" — магазин подключён с онлайн-кассой (обычная схема для ИП),
+      // она требует фискальный чек на КАЖДЫЙ платёж по 54-ФЗ, а чек требует
+      // контакт покупателя. Telegram email не даёт вообще ни при каких
+      // условиях — фронтенд теперь сам спрашивает его один раз перед первой
+      // оплатой (см. lib/payerContact.js). Простая проверка формата, не
+      // полноценная валидация — отсекает пустое/случайно не то поле до
+      // похода к ЮKassa, а не полноценно подтверждает существование ящика.
+      const email = typeof auth.body.email === "string" ? auth.body.email.trim() : "";
+      if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        return sendJson(res, 400, { ok: false, error: "нужен email для чека" });
+      }
+
       try {
         const idempotenceKey = randomUUID();
         const payment = await createPayment(yookassa, {
@@ -489,6 +502,7 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
           returnUrl: "https://t.me/s_edim_bot",
           telegramUserId: auth.telegramUserId,
           idempotenceKey,
+          receiptEmail: email,
         });
         createPendingPayment(db, {
           yookassaPaymentId: payment.id, telegramUserId: auth.telegramUserId,

@@ -8,6 +8,7 @@ import { loadActivePlan, saveActivePlan, clearActivePlan } from "./lib/activePla
 import { buildPools, buildInitialPlan, buildPlanView, interleaveGroups, computeBudgetStreak, computeRecentSavings } from "./lib/planLogic.js";
 import { submitPlanToBackend, checkPlanStatus, savePlanToHistory, fetchPlanHistory, updateMealTimes, createProPayment, claimReferral, fetchReferralStatus, getBackendUrl } from "./lib/backend.js";
 import { loadPantryStaples, savePantryStaples } from "./lib/pantry.js";
+import { loadPayerEmail, savePayerEmail } from "./lib/payerContact.js";
 import { trackEvent } from "./lib/analytics.js";
 import logoUrl from "./assets/logo.svg";
 import { hapticSelect, hapticImpact, hapticNotify } from "./lib/haptics.js";
@@ -1607,15 +1608,23 @@ function ProModal({ onClose }) {
   // всё оказалось в порядке) и до логов на сервере (тоже пусто) — и всё
   // равно осталось неясно, что произошло. Показывать причину сразу под
   // кнопкой — следующий круг диагностики не должен снова упираться в
-  // "а в логах пусто", достаточно посмотреть на сам экран.
+  // "а в логах пусто", достаточно посмотреть на сам экран. Именно так и
+  // нашёлся настоящий корень: "Receipt is missing or illegal" — магазин
+  // требует чек с email покупателя на каждый платёж (54-ФЗ), а Telegram
+  // email не даёт вообще ни при каких условиях, см. lib/payerContact.js.
   const [errorDetail, setErrorDetail] = useState(null);
+  const [email, setEmail] = useState(loadPayerEmail);
+  const emailValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
   const handleSubscribe = async () => {
+    if (!emailValid) return; // кнопка и так задизейблена — подстраховка от гонки
     hapticImpact("light");
     trackEvent("pro_subscribe_clicked");
     setPaymentState("loading");
     setErrorDetail(null);
 
-    const result = await createProPayment();
+    const trimmedEmail = email.trim();
+    savePayerEmail(trimmedEmail);
+    const result = await createProPayment(trimmedEmail);
     if (!result.ok) {
       hapticNotify("error");
       setPaymentState("error");
@@ -1668,10 +1677,25 @@ function ProModal({ onClose }) {
             <span style={styles.proPriceNew}>299 ₽</span>
             <span style={styles.proPricePeriod}>/ мес</span>
           </div>
+          {/* Обязателен для чека (54-ФЗ, см. lib/payerContact.js) — ЮKassa
+              без email/телефона покупателя отклоняет платёж целиком.
+              Запоминается локально, при следующей оплате спрашивать не нужно. */}
+          <div style={{ ...styles.acctLabel, marginTop: 12, textAlign: "left" }}>Email для чека</div>
+          <input
+            type="email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && e.currentTarget.blur()}
+            placeholder="you@example.com"
+            enterKeyHint="done"
+            autoComplete="email"
+            style={styles.textInput}
+          />
+          <p style={{ ...styles.acctSectionHint, margin: "6px 0 0 0" }}>Нужен по закону — на него ЮKassa пришлёт кассовый чек.</p>
           <button
             onClick={handleSubscribe}
-            disabled={paymentState === "loading"}
-            style={{ ...styles.navBtnPrimary, width: "100%", justifyContent: "center", marginTop: 12, opacity: paymentState === "loading" ? 0.6 : 1 }}
+            disabled={paymentState === "loading" || !emailValid}
+            style={{ ...styles.navBtnPrimary, width: "100%", justifyContent: "center", marginTop: 12, opacity: paymentState === "loading" || !emailValid ? 0.6 : 1 }}
           >
             {paymentState === "loading" ? <><Loader2 size={16} className="spin" /> Готовим оплату…</> : "Оформить подписку"}
           </button>
