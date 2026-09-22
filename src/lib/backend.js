@@ -82,24 +82,27 @@ export async function checkPlanStatus() {
 /** Создаёт платёж в ЮKassa (POST /api/pay/create) и возвращает checkout-
  * ссылку — открывается через Telegram.WebApp.openLink (см. App.jsx:
  * ProModal), не встраивается в само мини-приложение: ЮKassa не поддерживает
- * работу внутри Telegram WebView. null — нечем спросить (нет бэкенда, не в
- * Telegram) или сервер отказал (оплата ещё не настроена — YOOKASSA_SHOP_ID/
- * YOOKASSA_SECRET_KEY, см. server/README.md — или сбой ЮKassa) — вызывающий
- * код показывает пользователю понятную причину вместо тихого "ничего не
- * произошло". */
+ * работу внутри Telegram WebView.
+ *
+ * Возвращает {ok:true, confirmationUrl} или {ok:false, reason, detail} —
+ * раньше был просто null на любой неудаче, и все причины ("нет backendUrl/
+ * initData" / "сервер ответил ошибкой" / "сетевая ошибка") были неотличимы
+ * друг от друга СНАРУЖИ функции, даже когда внутри она уже честно писала их
+ * в console.warn — а DevTools у обычного пользователя никто не открывает.
+ * Живая жалоба в чате дошла до диагностики подключения в Аккаунте (backendUrl
+ * и initData оказались в полном порядке) и до логов на сервере (тоже пусто,
+ * даже после того как там стали логировать и отказ авторизации, и успех) —
+ * и всё равно осталось неясно, что произошло на самом деле. reason здесь —
+ * чтобы ProModal мог показать ПОЛЬЗОВАТЕЛЮ (не только консоли) точную
+ * причину прямо в интерфейсе: "нет интернета", "сервер ответил 503" и т.п. —
+ * следующий круг диагностики не должен снова упираться в "а в логах пусто".
+ */
 export async function createProPayment() {
   const backendUrl = import.meta.env.VITE_BACKEND_URL;
   const initData = currentInitData();
-  // Раньше эти два случая (не дошли до бэкенда вообще / бэкенд дошёл и
-  // ответил ошибкой) были неотличимы друг от друга — ни один не оставлял ни
-  // следа в консоли, а на бэкенде при отказе авторизации тоже не было лога
-  // (см. app.js) — итог: "нажимаю оплатить — ничего не происходит и нигде
-  // ничего не видно" (жалоба в чате). console.warn тут не мешает обычным
-  // пользователям (DevTools никто не открывает), но даёт зацепку при
-  // диагностике через Telegram Desktop → Inspect или обычный браузер.
   if (!backendUrl || !initData) {
     console.warn("Не удалось создать платёж: нет backendUrl или initData", { hasBackendUrl: !!backendUrl, hasInitData: !!initData });
-    return null;
+    return { ok: false, reason: "no_backend_or_initdata" };
   }
 
   try {
@@ -111,13 +114,17 @@ export async function createProPayment() {
     if (!res.ok) {
       const data = await res.json().catch(() => null);
       console.warn("Не удалось создать платёж: сервер ответил ошибкой", res.status, data?.error);
-      return null;
+      return { ok: false, reason: "server_error", detail: `HTTP ${res.status}${data?.error ? `: ${data.error}` : ""}` };
     }
     const data = await res.json();
-    return data.confirmationUrl || null;
+    if (!data.confirmationUrl) {
+      console.warn("Не удалось создать платёж: сервер не вернул confirmationUrl", data);
+      return { ok: false, reason: "no_url" };
+    }
+    return { ok: true, confirmationUrl: data.confirmationUrl };
   } catch (err) {
     console.warn("Не удалось создать платёж: сетевая ошибка", err.message);
-    return null;
+    return { ok: false, reason: "network_error", detail: err.message };
   }
 }
 

@@ -1596,17 +1596,27 @@ function PlanHistorySection({ planHistory }) {
 // исходную кнопку без объяснений.
 function ProModal({ onClose }) {
   const [paymentState, setPaymentState] = useState("idle");
+  // Причина отказа — видна прямо в интерфейсе, не только в console.warn.
+  // Долгая жалоба в чате дошла до диагностики подключения (Аккаунт — там
+  // всё оказалось в порядке) и до логов на сервере (тоже пусто) — и всё
+  // равно осталось неясно, что произошло. Показывать причину сразу под
+  // кнопкой — следующий круг диагностики не должен снова упираться в
+  // "а в логах пусто", достаточно посмотреть на сам экран.
+  const [errorDetail, setErrorDetail] = useState(null);
   const handleSubscribe = async () => {
     hapticImpact("light");
     trackEvent("pro_subscribe_clicked");
     setPaymentState("loading");
+    setErrorDetail(null);
 
-    const confirmationUrl = await createProPayment();
-    if (!confirmationUrl) {
+    const result = await createProPayment();
+    if (!result.ok) {
       hapticNotify("error");
       setPaymentState("error");
+      setErrorDetail(result.detail || result.reason);
       return;
     }
+    const { confirmationUrl } = result;
 
     hapticNotify("success");
     // openLink — официальный способ открыть внешнюю https-ссылку из Mini App
@@ -1662,6 +1672,7 @@ function ProModal({ onClose }) {
           {paymentState === "error" && (
             <p style={{ ...styles.acctSectionHint, textAlign: "center", margin: "12px 0 0 0" }}>
               Не удалось начать оплату. Попробуйте ещё раз через минуту — если не поможет, напишите в поддержку (Аккаунт → «Написать в поддержку»).
+              {errorDetail && <><br /><span style={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: 11 }}>{errorDetail}</span></>}
             </p>
           )}
         </div>

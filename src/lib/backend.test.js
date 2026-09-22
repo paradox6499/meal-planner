@@ -262,40 +262,52 @@ describe("createProPayment", () => {
     vi.unstubAllEnvs();
   });
 
-  it("null без бэкенда/вне Telegram — ничего не запрашивает", async () => {
+  it("{ok:false, reason:'no_backend_or_initdata'} без бэкенда/вне Telegram — ничего не запрашивает", async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
 
     vi.stubEnv("VITE_BACKEND_URL", "");
     stubTelegram("x");
-    expect(await createProPayment()).toBeNull();
+    expect(await createProPayment()).toEqual({ ok: false, reason: "no_backend_or_initdata" });
 
     vi.stubEnv("VITE_BACKEND_URL", "https://api.example.com");
     stubTelegram(undefined);
-    expect(await createProPayment()).toBeNull();
+    expect(await createProPayment()).toEqual({ ok: false, reason: "no_backend_or_initdata" });
 
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("возвращает confirmationUrl при успехе", async () => {
+  it("возвращает {ok:true, confirmationUrl} при успехе", async () => {
     vi.stubEnv("VITE_BACKEND_URL", "https://api.example.com");
     stubTelegram("x");
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({ ok: true, confirmationUrl: "https://yookassa.ru/checkout/pay-1" }) }));
-    expect(await createProPayment()).toBe("https://yookassa.ru/checkout/pay-1");
+    expect(await createProPayment()).toEqual({ ok: true, confirmationUrl: "https://yookassa.ru/checkout/pay-1" });
   });
 
-  it("null при сетевой ошибке, отказе сервера (например оплата не настроена) или отсутствии confirmationUrl", async () => {
+  // Регрессия на жалобу в чате: раньше все три случая ниже схлопывались в
+  // один и тот же null — ни диагностика подключения (всё в порядке), ни
+  // логи сервера (тоже пусто) не могли объяснить, что произошло на самом
+  // деле. reason/detail теперь позволяют ProModal показать причину прямо в
+  // интерфейсе, без DevTools и без переписки "что в логах".
+  it("{ok:false, reason:'network_error'} с detail — сетевая ошибка (например нет интернета)", async () => {
     vi.stubEnv("VITE_BACKEND_URL", "https://api.example.com");
     stubTelegram("x");
-
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("boom")));
-    expect(await createProPayment()).toBeNull();
+    expect(await createProPayment()).toEqual({ ok: false, reason: "network_error", detail: "boom" });
+  });
 
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 503 }));
-    expect(await createProPayment()).toBeNull();
+  it("{ok:false, reason:'server_error'} с detail — отказ сервера (например оплата не настроена)", async () => {
+    vi.stubEnv("VITE_BACKEND_URL", "https://api.example.com");
+    stubTelegram("x");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 503, json: async () => ({ error: "оплата ещё не настроена" }) }));
+    expect(await createProPayment()).toEqual({ ok: false, reason: "server_error", detail: "HTTP 503: оплата ещё не настроена" });
+  });
 
+  it("{ok:false, reason:'no_url'} — сервер ответил успехом, но без confirmationUrl", async () => {
+    vi.stubEnv("VITE_BACKEND_URL", "https://api.example.com");
+    stubTelegram("x");
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({ ok: true }) }));
-    expect(await createProPayment()).toBeNull();
+    expect(await createProPayment()).toEqual({ ok: false, reason: "no_url" });
   });
 });
 
