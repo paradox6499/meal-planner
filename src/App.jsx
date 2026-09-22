@@ -1019,6 +1019,29 @@ function AccountView({
     setTimeout(() => setSaved(false), 2000);
   };
 
+  // Диагностика подключения — жалоба в чате: несколько кругов "проверьте
+  // логи" ни к чему не привели, потому что оказалось, что вопрос был не в
+  // сервере (он всё это время отвечал нормально), а в том, доходит ли
+  // запрос от приложения до него вообще — trackEvent и createProPayment оба
+  // молча ничего не отправляют без initData/адреса сервера (см. lib/backend.js,
+  // lib/analytics.js), и раньше узнать это можно было только через DevTools
+  // или curl с моей стороны. Теперь то же самое видно прямо в приложении,
+  // без консоли — одним взглядом или скриншотом в поддержку.
+  const [showDiag, setShowDiag] = useState(false);
+  const diagTg = window.Telegram?.WebApp;
+  const diagBackendUrl = import.meta.env.VITE_BACKEND_URL || null;
+  const diagInitData = diagTg?.initData || "";
+  // Длина, не само значение — initData несёт подписанные данные пользователя,
+  // показывать их в интерфейсе незачем даже себе самому.
+  const diagRows = [
+    ["Адрес сервера", diagBackendUrl ? "настроен" : "не настроен"],
+    ["Telegram WebApp", diagTg ? "обнаружен" : "не обнаружен"],
+    ["initData", diagInitData ? `есть (${diagInitData.length} симв.)` : "отсутствует"],
+    ["Платформа", diagTg?.platform || "—"],
+    ["Версия Mini Apps API", diagTg?.version || "—"],
+    ["Telegram ID", diagTg?.initDataUnsafe?.user?.id || "—"],
+  ];
+
   // Порции по приёмам пищи — свёрнуто по умолчанию (не усложняет экран тем,
   // у кого вся семья ест одинаково), но сразу раскрыто, если такие
   // переопределения уже есть — чтобы не прятать уже сделанную настройку.
@@ -1141,6 +1164,26 @@ function AccountView({
           )}
         </div>
       )}
+
+      <div style={styles.acctSection}>
+        {!showDiag ? (
+          <button className="chip" onClick={() => { hapticSelect(); setShowDiag(true); }} style={styles.linkBtn}>
+            Диагностика подключения
+          </button>
+        ) : (
+          <>
+            <div style={styles.acctLabel}>Диагностика подключения</div>
+            <p style={styles.acctSectionHint}>Если не работает оплата, напоминания или что-то ещё, что зависит от сервера — сделайте скриншот этого блока и пришлите в поддержку.</p>
+            <div style={styles.diagBox}>
+              {diagRows.map(([label, value], i) => (
+                <div key={label} style={{ ...styles.diagRow, borderBottom: i === diagRows.length - 1 ? "none" : "1px solid var(--hairline)" }}>
+                  <span>{label}</span><span style={styles.diagValue}>{value}</span>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+      </div>
 
       <div style={styles.acctDivider} />
 
@@ -2338,6 +2381,9 @@ const styles = {
   // дополнительное действие, не должно выглядеть как ещё один такой же по
   // весу выбор, что и сами приёмы пищи выше.
   linkBtn: { background: "none", border: "none", padding: "4px 0", color: ACCENT, fontSize: 13.5, fontWeight: 600, cursor: "pointer" },
+  diagBox: { display: "flex", flexDirection: "column", border: "1px solid var(--hairline)", borderRadius: 14, overflow: "hidden", ...glass(0.45, 8) },
+  diagRow: { display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 14px", fontSize: 13, gap: 12 },
+  diagValue: { color: "var(--text-tertiary)", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: 12.5, textAlign: "right" },
   budgetVal: { fontSize: 36, fontWeight: 700, textAlign: "center", marginBottom: 16 },
   slider: { width: "100%" },
   sliderLabels: { display: "flex", justifyContent: "space-between", fontSize: 12, color: "var(--text-tertiary)", marginTop: 6 },
