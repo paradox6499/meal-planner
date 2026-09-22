@@ -739,7 +739,7 @@ export default function MealPlanner() {
               >
                 Открыть Pro
               </button>
-              <button onClick={() => setLimitBlocked(null)} style={styles.acctClearBtn}>Назад</button>
+              <button onClick={() => setLimitBlocked(null)} style={styles.limitBackBtn}>Назад</button>
             </StepShell>
           </div>
         )}
@@ -2321,6 +2321,13 @@ const styles = {
   acctLabel: { fontSize: 12, fontWeight: 600, color: "var(--text-tertiary)", textTransform: "uppercase", letterSpacing: "0.02em", marginBottom: 8 },
   acctDivider: { height: 1, background: "var(--hairline)", margin: "22px 0" },
   acctClearBtn: { width: "100%", background: "none", border: "none", color: "var(--danger)", fontSize: 12.5, fontWeight: 500, cursor: "pointer", padding: "10px 0 0 0" },
+  // Отдельный стиль от acctClearBtn: та кнопка красная (--danger) — уместно
+  // для "Сбросить профиль" (реально необратимое действие), но не для
+  // простого "Назад" здесь — переход назад ничего не удаляет и не должен
+  // выглядеть тревожно. Жалоба в чате: кнопка была прижата почти вплотную к
+  // "Открыть Pro" над ней (padding-top 10px у acctClearBtn) — увеличил
+  // отступ и убрал ложный красный акцент.
+  limitBackBtn: { width: "100%", background: "none", border: "none", color: "var(--text-tertiary)", fontSize: 13, fontWeight: 500, cursor: "pointer", padding: "20px 0 0 0" },
   acctWarnHint: { fontSize: 12, color: "var(--warning-text)", textAlign: "center", marginTop: 8 },
   homeScreenAddedRow: {
     display: "flex", alignItems: "center", gap: 10, padding: "13px 15px", borderRadius: 18,
