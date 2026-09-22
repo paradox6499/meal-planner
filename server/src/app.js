@@ -494,6 +494,15 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
           yookassaPaymentId: payment.id, telegramUserId: auth.telegramUserId,
           amountRub: PRO_PRICE_RUB, createdAtISO: new Date().toISOString(),
         });
+        // Раньше успешный путь не оставлял НИ ОДНОЙ строки в логах — тот же
+        // класс путаницы, что и с отказом авторизации выше: диагностика
+        // подключения (Аккаунт) подтвердила, что initData/адрес сервера у
+        // пользователя в порядке, а логов при этом всё равно не было. Значит
+        // либо запрос вообще не доходит на сетевом уровне (тогда и этой
+        // строки не будет), либо платёж СОЗДАЁТСЯ успешно, а страница оплаты
+        // просто не открывается (Telegram.WebApp.openLink на фронтенде) —
+        // раньше эти два случая было решительно нечем отличить.
+        console.log(`[api/pay/create] платёж создан: id=${payment.id}, telegram_user_id=${auth.telegramUserId}`);
         sendJson(res, 200, { ok: true, confirmationUrl: payment.confirmationUrl });
       } catch (err) {
         console.error("[api/pay/create] ошибка создания платежа:", err.message);
