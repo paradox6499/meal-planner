@@ -1102,6 +1102,15 @@ function AccountView({
       </div>
       <h2 style={{ ...styles.stepTitle, marginTop: 4 }}>Аккаунт</h2>
 
+      {/* Жалоба в чате: "история планов находится внизу настроек аккаунта,
+          надо вынести наверх, чтобы пользователю не мотать вниз" — раньше
+          была самым последним блоком экрана, ПОСЛЕ всего длинного "Профиль
+          для плана" (семья/рацион/аллергии/кухни и т.д.) и карточки
+          подписки. Самое частое, зачем вообще открывают Аккаунт после
+          первой настройки — посмотреть, что уже собирали, поэтому теперь
+          это первое, что видно, без прокрутки. */}
+      <PlanHistorySection planHistory={planHistory} />
+
       <div style={styles.acctSection}>
         <div style={styles.acctLabel}>Как к вам обращаться</div>
         <input
@@ -1383,7 +1392,6 @@ function AccountView({
       <ProgressSection planHistory={planHistory} />
       <AccountSubscriptionCard onOpenPro={onOpenPro} planStatus={planStatus} />
       <ReferralSection referralStatus={referralStatus} />
-      <PlanHistorySection planHistory={planHistory} />
     </div>
   );
 }

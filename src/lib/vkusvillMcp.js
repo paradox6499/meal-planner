@@ -15,6 +15,13 @@
 // проглатывает её — решение "что показать вместо реальных данных" остаётся
 // за вызывающей стороной (UI), не за этим модулем.
 
+// resolvePricesViaBackend — общий серверный кэш цен (см. комментарий у
+// resolveCartItems ниже, где он и используется). Импорт из backend.js сюда
+// безопасен (в отличие от server/src/vkusvillPrices.js, который сознательно
+// НЕ импортирует этот файл — см. его шапку): backend.js ничего не
+// импортирует сам, цикла импортов не образуется.
+import { resolvePricesViaBackend } from "./backend.js";
+
 const MCP_URL = "https://mcp.vkusvill.ru/mcp";
 const DEFAULT_TIMEOUT_MS = 8000;
 
@@ -359,6 +366,57 @@ export async function resolvePrices(items) {
 // дают под полсотни уникальных ингредиентов.
 const CART_LINK_LIMIT = 20;
 
+// Живая жалоба в чате: "не удалось собрать корзину: не нашли ни одного
+// товара по списку покупок" — со скриншотом списка, где у большинства
+// позиций (майонез, горчица, куркума...) секундами раньше УЖЕ была честно
+// показана цена. То есть план только что успешно резолвился, а "Заказать"
+// тут же после этого проваливался ПОЛНОСТЬЮ — не частично. Причина: сборка
+// плана (attachRealCosts в vkusvillRecipes.js) идёт через общий серверный
+// кэш цен (resolvePricesViaBackend/db.js:ingredient_prices — с TTL,
+// ретраями и откатом на протухшую запись при живом сбое), а
+// buildCartFromShoppingList до этой правки ВСЕГДА бил напрямую из браузера
+// живыми запросами с нуля, без кэша и без серверного фолбэка — то есть
+// заново ловил ТОТ ЖЕ самый burst-лимит/сбой ВкусВилл, который сборка плана
+// уже один раз благополучно пережила через кэш.
+//
+// Здесь та же логика приоритета, что в attachRealCosts: сначала общий
+// кэш (быстрее, не создаёт новую нагрузку на ВкусВилл, почти наверняка уже
+// содержит те же названия, что искали секунды назад при сборке плана) —
+// откат на прямой resolvePrices(), только если бэкенда нет/не отвечает
+// (не в Telegram, бэкенд не задеплоен, сеть недоступна), ровно как было
+// раньше в этом случае.
+async function resolveCartItems(items) {
+  // Замена товара (getSubstituteOptions в vkusvillRecipes.js) уже несёт
+  // свой xmlId — resolvePrices для таких позиций никого не спрашивает,
+  // короткий путь остаётся прежним и идёт мимо кэша целиком.
+  const known = items.filter((it) => it.xmlId);
+  const toLookup = items.filter((it) => !it.xmlId);
+  if (toLookup.length === 0) return resolvePrices(known);
+
+  const viaBackend = await resolvePricesViaBackend(toLookup.map((it) => it.name));
+  if (!viaBackend) {
+    // Бэкенд недоступен/не в Telegram — прежнее поведение без изменений.
+    return [...(await resolvePrices(known)), ...(await resolvePrices(toLookup))];
+  }
+
+  const byName = new Map(viaBackend.map((r) => [r.name, r]));
+  const looked = toLookup.map((item) => {
+    const r = byName.get(item.name);
+    if (!r || !r.matched) return { matched: false, name: item.name };
+    return {
+      matched: true,
+      name: item.name,
+      xml_id: r.xmlId,
+      price: r.price,
+      productUnit: r.productUnit,
+      packageAmount: r.packageAmount ?? null,
+      packageUnit: r.packageUnit ?? null,
+      q: toVkusvillQuantity(item.amount, item.unit, r.productUnit),
+    };
+  });
+  return [...(await resolvePrices(known)), ...looked];
+}
+
 /** Берёт плоский список покупок ([{name, amount, unit}], как в App.jsx
  * plan.grouped[].items) и превращает в НЕСКОЛЬКО ссылок на корзину ВкусВилл
  * (см. CART_LINK_LIMIT) — по одной на каждые 20 позиций, а не одну на всё.
@@ -373,7 +431,7 @@ const CART_LINK_LIMIT = 20;
  * добавилась туда же, к первой, а не вместо неё (проверено вживую через
  * реальный MCP-вызов и сетевые запросы на vkusvill.ru, не предположение).*/
 export async function buildCartFromShoppingList(items) {
-  const resolved = await resolvePrices(items);
+  const resolved = await resolveCartItems(items);
   const matched = resolved.filter((r) => r.matched);
   const unmatched = resolved.filter((r) => !r.matched).map((r) => r.name);
 

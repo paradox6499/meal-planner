@@ -12,7 +12,7 @@ import {
   createPendingPayment, getPaymentByYookassaId, updatePaymentStatus, extendUserPro,
   countRewardedReferrals,
 } from "./db.js";
-import { planReplyForUpdate, buildWelcomeText, buildFeedbackAckText, buildFeedbackListText } from "./webhook.js";
+import { planReplyForUpdate, buildWelcomeText, buildFeedbackAckText, buildFeedbackListText, buildFeedbackAdminNotifyText } from "./webhook.js";
 import { sendTelegramMessage } from "./telegram.js";
 import { sendDigestNow } from "./digest.js";
 import { sendBackupNow } from "./backup.js";
@@ -610,6 +610,13 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
         } else if (reply?.kind === "feedback") {
           saveFeedback(db, { telegramUserId: reply.telegramUserId, text: reply.text, createdAtISO: new Date().toISOString() });
           await sendTelegramMessage(botToken, reply.chatId, buildFeedbackAckText());
+          // Живая жалоба: "не доходят сообщения в поддержку" — раньше
+          // обращение только оседало в БД, узнать о нём можно было только
+          // руками запросив /feedback. Теперь пушим админу сразу же, отдельно
+          // от ack пользователю (см. buildFeedbackAdminNotifyText).
+          if (adminTelegramId) {
+            await sendTelegramMessage(botToken, adminTelegramId, buildFeedbackAdminNotifyText(reply.telegramUserId, reply.text));
+          }
         }
       } catch (err) {
         console.error("[telegram/webhook] не удалось ответить:", err.message);

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildWelcomeText, buildFeedbackAckText, buildFeedbackListText, planReplyForUpdate } from "./webhook.js";
+import { buildWelcomeText, buildFeedbackAckText, buildFeedbackListText, buildFeedbackAdminNotifyText, planReplyForUpdate } from "./webhook.js";
 
 describe("buildWelcomeText", () => {
   it("объясняет, что за бот и что нажать, чтобы запустить приложение", () => {
@@ -17,6 +17,18 @@ describe("buildFeedbackListText", () => {
   it("перечисляет обращения с датой и id отправителя", () => {
     const text = buildFeedbackListText([{ telegramUserId: 42, text: "Не находит цены", createdAt: "2026-09-10T09:00:00Z" }]);
     expect(text).toContain("Не находит цены");
+    expect(text).toContain("42");
+  });
+});
+
+// Живая жалоба: "не доходят сообщения в поддержку" — раньше обращение
+// оседало в БД молча, узнать о нём было можно только вручную запросив
+// /feedback. Теперь app.js пушит этот текст админу сразу же (см. app.js —
+// ветку kind:"feedback").
+describe("buildFeedbackAdminNotifyText", () => {
+  it("содержит текст обращения и id отправителя, чтобы понять, кому отвечать", () => {
+    const text = buildFeedbackAdminNotifyText(42, "Не находит цены на творог");
+    expect(text).toContain("Не находит цены на творог");
     expect(text).toContain("42");
   });
 });

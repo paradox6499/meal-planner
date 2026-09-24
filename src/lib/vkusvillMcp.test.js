@@ -1,5 +1,14 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { toVkusvillQuantity, searchProducts, createCartLink, clearMcpCache, resolvePrices, parsePackageAmount, buildCartFromShoppingList } from "./vkusvillMcp.js";
+// Мок вместо реального backend.js: во всех тестах, кроме описанных ниже в
+// "buildCartFromShoppingList — общий серверный кэш цен...", auto-mock без
+// заданного mockResolvedValue отдаёт undefined — resolveCartItems в
+// vkusvillMcp.js трактует это как "бэкенда нет" и откатывается на прежний
+// прямой resolvePrices(), то есть поведение всех остальных тестов файла не
+// меняется ни на йоту. Явный мок нужен именно затем, чтобы отдельно
+// проверить путь "бэкенд ответил" без поднятия настоящего сервера/Telegram.
+vi.mock("./backend.js", () => ({ resolvePricesViaBackend: vi.fn() }));
+import { resolvePricesViaBackend } from "./backend.js";
 
 // Используется и при сборке реальной корзины, и при пересчёте "Итого за
 // продукты" на замену товара (ResultView в App.jsx) — если эта функция
@@ -365,5 +374,86 @@ describe("buildCartFromShoppingList — батчинг по лимиту Вку�
   it("21 позиция -> 2 ссылки (20+1)", async () => {
     const { links } = await buildCartFromShoppingList(mkItems(21));
     expect(links).toHaveLength(2);
+  });
+});
+
+// Живая жалоба в чате: "не удалось собрать корзину: не нашли ни одного
+// товара" со скриншотом, где секундами раньше сборка плана честно показала
+// цены почти на все те же позиции — то есть общий серверный кэш (которым
+// сборка плана уже пользуется, см. attachRealCosts в vkusvillRecipes.js)
+// живых данных к тому моменту не терял, а "Заказать" до этой правки просто
+// не заглядывал в кэш вообще и бил по ВкусВилл заново с нуля.
+describe("buildCartFromShoppingList — общий серверный кэш цен (resolvePricesViaBackend) в приоритете над живым поиском", () => {
+  beforeEach(() => {
+    clearMcpCache();
+    resolvePricesViaBackend.mockReset();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url, opts) => {
+        const body = JSON.parse(opts.body);
+        if (body.params.name === "vkusvill_cart_link_create") {
+          return mockMcpResponse({ link: "https://vkusvill.ru/?share_basket=fake" });
+        }
+        throw new Error("живой поиск не должен вызываться, когда бэкенд отвечает: " + body.params.name);
+      })
+    );
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("бэкенд отвечает и находит товары -> корзина собирается вообще без единого живого запроса к ВкусВилл", async () => {
+    resolvePricesViaBackend.mockResolvedValue([
+      { name: "Майонез", matched: true, price: 120, productUnit: "шт", xmlId: 777, packageAmount: 200, packageUnit: "г" },
+    ]);
+    const { links, matchedCount, unmatched } = await buildCartFromShoppingList([{ name: "Майонез", amount: 200, unit: "г" }]);
+    expect(links).toHaveLength(1);
+    expect(matchedCount).toBe(1);
+    expect(unmatched).toEqual([]);
+    // сам вызов cart_link_create получил xml_id из ответа бэкенда (777), не выдуманный
+    const [, opts] = fetch.mock.calls.find(([, o]) => JSON.parse(o.body).params.name === "vkusvill_cart_link_create");
+    expect(JSON.parse(opts.body).params.arguments.products).toEqual([{ xml_id: 777, q: 1 }]);
+  });
+
+  it("бэкенд недоступен (вернул null) -> откат на прежний прямой поиск по ВкусВилл", async () => {
+    resolvePricesViaBackend.mockResolvedValue(null);
+    // beforeEach застабил fetch так, что живой поиск бросает — здесь как раз
+    // проверяем путь, где живой поиск ДОЛЖЕН вызваться, поэтому переопределяем.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url, opts) => {
+        const body = JSON.parse(opts.body);
+        if (body.params.name === "vkusvill_products_search") {
+          return mockMcpResponse({ items: [{ xml_id: 42, name: "Морковь, 500 г", price: { current: 60 }, unit: "шт" }] });
+        }
+        if (body.params.name === "vkusvill_cart_link_create") {
+          return mockMcpResponse({ link: "https://vkusvill.ru/?share_basket=fake" });
+        }
+        throw new Error("неожиданный инструмент: " + body.params.name);
+      })
+    );
+    const { matchedCount } = await buildCartFromShoppingList([{ name: "Морковь", amount: 500, unit: "г" }]);
+    expect(matchedCount).toBe(1);
+  });
+
+  it("бэкенд отвечает, но конкретный товар не нашёл -> matched:false именно для него, не падает вся корзина", async () => {
+    resolvePricesViaBackend.mockResolvedValue([
+      { name: "Майонез", matched: true, price: 120, productUnit: "шт", xmlId: 777, packageAmount: null, packageUnit: null },
+      { name: "Редкая специя", matched: false, price: null, productUnit: null, xmlId: null, packageAmount: null, packageUnit: null },
+    ]);
+    const { matchedCount, totalCount, unmatched } = await buildCartFromShoppingList([
+      { name: "Майонез", amount: 1, unit: "шт" },
+      { name: "Редкая специя", amount: 1, unit: "шт" },
+    ]);
+    expect(matchedCount).toBe(1);
+    expect(totalCount).toBe(2);
+    expect(unmatched).toEqual(["Редкая специя"]);
+  });
+
+  it("товар с уже известным xmlId (замена через 'Нет в наличии') не спрашивает бэкенд вообще", async () => {
+    resolvePricesViaBackend.mockResolvedValue([]); // если бы вызвался — вернул бы пусто, но проверяем, что не вызвался
+    const { matchedCount } = await buildCartFromShoppingList([
+      { name: "Замена товара", amount: 2, unit: "шт", xmlId: 555, knownPrice: 90, knownUnit: "шт" },
+    ]);
+    expect(matchedCount).toBe(1);
+    expect(resolvePricesViaBackend).not.toHaveBeenCalled();
   });
 });

@@ -831,16 +831,41 @@ describe("POST /telegram/webhook", () => {
     expect(secondText).toContain("планов собрано"); // не "Событий не было" во второй раз
   });
 
-  it("произвольное сообщение от пользователя -> сохраняет как обращение и шлёт благодарность", async () => {
+  it("произвольное сообщение от пользователя -> сохраняет как обращение, шлёт благодарность пользователю и пуш админу", async () => {
     const res = await post({ message: { text: "Не находит цены на творог", chat: { id: 42 }, from: { id: 42 } } });
     expect(res.status).toBe(200);
-    expect(telegramCalls).toHaveLength(1);
-    const sentBody = JSON.parse(telegramCalls[0][1].body);
-    expect(sentBody.chat_id).toBe(42);
+    // Живая жалоба "не доходят сообщения в поддержку" — раньше обращение
+    // только оседало в БД, узнать о нём можно было только вручную запросив
+    // /feedback. Теперь помимо благодарности пользователю (chat 42) есть
+    // ВТОРОЕ сообщение — пуш админу (chat 777) с текстом обращения сразу же.
+    expect(telegramCalls).toHaveLength(2);
+    const ackBody = JSON.parse(telegramCalls[0][1].body);
+    expect(ackBody.chat_id).toBe(42);
+    const adminNotifyBody = JSON.parse(telegramCalls[1][1].body);
+    expect(adminNotifyBody.chat_id).toBe(777);
+    expect(adminNotifyBody.text).toContain("Не находит цены на творог");
+    expect(adminNotifyBody.text).toContain("42"); // telegram_user_id обратившегося — видно, кому отвечать
 
     const feedback = listRecentFeedback(db);
     expect(feedback).toHaveLength(1);
     expect(feedback[0]).toMatchObject({ telegramUserId: 42, text: "Не находит цены на творог" });
+  });
+
+  it("произвольное сообщение от пользователя, когда админ не настроен (adminTelegramId=null) -> сохраняет и отвечает, без второго сообщения", async () => {
+    const noAdminServer = createApp(db, { botToken: BOT_TOKEN, adminTelegramId: null, webhookSecret: WEBHOOK_SECRET });
+    await new Promise((resolve) => noAdminServer.listen(0, resolve));
+    const noAdminBaseUrl = `http://127.0.0.1:${noAdminServer.address().port}`;
+    try {
+      const res = await realFetch(`${noAdminBaseUrl}/telegram/webhook`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Telegram-Bot-Api-Secret-Token": WEBHOOK_SECRET },
+        body: JSON.stringify({ message: { text: "Сообщение без админа", chat: { id: 43 }, from: { id: 43 } } }),
+      });
+      expect(res.status).toBe(200);
+      expect(telegramCalls).toHaveLength(1); // только ack пользователю, некому пушить
+    } finally {
+      await new Promise((resolve) => noAdminServer.close(resolve));
+    }
   });
 
   it("произвольное сообщение от самого админа -> 200, не сохраняется как обращение", async () => {
