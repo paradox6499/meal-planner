@@ -436,6 +436,38 @@ describe("fetchVkusvillPools — количество ингредиентов �
   });
 });
 
+// Запрос в чате (после звонка с другом): "нет учёта КБЖУ, не показывается,
+// сколько блюдо содержит". ВкусВилл реально отдаёт эти данные в поле
+// raw.nutritional у большинства (не всех) рецептов — просто раньше мы их
+// никак не забирали при нормализации.
+describe("fetchVkusvillPools — КБЖУ из raw.nutritional", () => {
+  const rawRecipe = (overrides) => ({
+    id: 1, name: "Тест", cooking_time: { name: "до 40 минут" }, steps: [],
+    ingredients: [{ name: "Соль", quantity: "1 г" }], portions: 1,
+    ...overrides,
+  });
+
+  it("nutritional есть -> nutritionPer100g с calories/protein/fat/carbs", async () => {
+    searchRecipes.mockResolvedValue({
+      items: [rawRecipe({ nutritional: { calories: 141.27, proteins: 5.95, fats: 8.42, carbs: 10.92, saturated_fats: 0.99 } })],
+    });
+    resolvePrices.mockResolvedValue([]);
+    const { pools } = await fetchVkusvillPools({
+      diet: "any", cuisines: [], devices: [], allergies: [], categories: ["main"], maxCookTime: null,
+    });
+    expect(pools.main[0].nutritionPer100g).toEqual({ calories: 141.27, protein: 5.95, fat: 8.42, carbs: 10.92 });
+  });
+
+  it("nutritional отсутствует (null, частый случай) -> nutritionPer100g null, не выдумываем цифры", async () => {
+    searchRecipes.mockResolvedValue({ items: [rawRecipe({ id: 2, nutritional: null })] });
+    resolvePrices.mockResolvedValue([]);
+    const { pools } = await fetchVkusvillPools({
+      diet: "any", cuisines: [], devices: [], allergies: [], categories: ["main"], maxCookTime: null,
+    });
+    expect(pools.main[0].nutritionPer100g).toBeNull();
+  });
+});
+
 // Найдено при этом же аудите: ВкусВилл принимает только ОДИН
 // id_cooking_method_filter за запрос. При 2+ выбранных устройствах раньше
 // брался "первый попавшийся" (порядок выбора пользователя), а остальные

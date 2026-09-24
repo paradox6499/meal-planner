@@ -419,6 +419,55 @@ describe("buildPlanView", () => {
       expect(view.anyDishUnpriced).toBe(false);
     });
   });
+
+  // Запрос в чате (после созвона с другом): "форель на 7-й день — не
+  // пропадёт ли за неделю?" — предупреждение про мясо/рыбу, нужную только
+  // ближе к концу недели (LATE_WEEK_DAY_THRESHOLD = 4 из 7 в planLogic.js).
+  describe("buyLater — предупреждение про скоропортящееся мясо/рыбу на конец недели", () => {
+    const fishRecipe = {
+      id: "r-fish", name: "Форель", category: "main", cost: 100, time: 10, emoji: "🐟",
+      ingr: [["форель", 200, "г"]],
+    };
+    const carrotRecipe = {
+      id: "r-carrot", name: "Морковный суп", category: "main", cost: 50, time: 10, emoji: "🥕",
+      ingr: [["морковь", 200, "г"]],
+    };
+    const fishPools = { breakfast: [], main: [fishRecipe, carrotRecipe], snack: [] };
+
+    it("рыба нужна только в день 7 -> buyLater=true", () => {
+      const planStateLate = { days: [{ day: 7, dayMeals: [{ mealId: "lunch", mealLabel: "Обед", category: "main", recipeId: "r-fish" }] }], warnings: [] };
+      const view = buildPlanView(planStateLate, fishPools, 2, null);
+      const fish = view.grouped.flatMap((g) => g.items).find((it) => it.name === "форель");
+      expect(fish.buyLater).toBe(true);
+    });
+
+    it("рыба нужна в день 1 -> buyLater=false (можно купить сразу и приготовить)", () => {
+      const planStateEarly = { days: [{ day: 1, dayMeals: [{ mealId: "lunch", mealLabel: "Обед", category: "main", recipeId: "r-fish" }] }], warnings: [] };
+      const view = buildPlanView(planStateEarly, fishPools, 2, null);
+      const fish = view.grouped.flatMap((g) => g.items).find((it) => it.name === "форель");
+      expect(fish.buyLater).toBe(false);
+    });
+
+    it("рыба нужна и в день 1, и в день 7 -> buyLater=true (по самому позднему дню)", () => {
+      const planStateBoth = {
+        days: [
+          { day: 1, dayMeals: [{ mealId: "lunch", mealLabel: "Обед", category: "main", recipeId: "r-fish" }] },
+          { day: 7, dayMeals: [{ mealId: "dinner", mealLabel: "Ужин", category: "main", recipeId: "r-fish" }] },
+        ],
+        warnings: [],
+      };
+      const view = buildPlanView(planStateBoth, fishPools, 2, null);
+      const fish = view.grouped.flatMap((g) => g.items).find((it) => it.name === "форель");
+      expect(fish.buyLater).toBe(true);
+    });
+
+    it("овощи в день 7 -> buyLater=false (не мясо/рыба, овощи неделю не портятся так быстро)", () => {
+      const planStateVeg = { days: [{ day: 7, dayMeals: [{ mealId: "lunch", mealLabel: "Обед", category: "main", recipeId: "r-carrot" }] }], warnings: [] };
+      const view = buildPlanView(planStateVeg, fishPools, 2, null);
+      const carrot = view.grouped.flatMap((g) => g.items).find((it) => it.name === "морковь");
+      expect(carrot.buyLater).toBe(false);
+    });
+  });
 });
 
 // Регрессия на жалобу в чате: "в корзине 10 позиций, и то все овощи, без

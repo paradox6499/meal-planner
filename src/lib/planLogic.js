@@ -169,6 +169,12 @@ export function buildInitialPlan(pools, selectedMeals, budget, family, familyByM
 // см. vkusvillRecipes.js), а "Итого" — их сумма; ResultView может честно
 // пересчитать её при замене, просто заменив цену одной строки, а не
 // пересобирая весь план.
+// С какого дня недели мясо/рыба считается "понадобится позже" — 4 из 7,
+// то есть вторая половина недели. Порог, не точная наука: у нас нет данных
+// о реальном сроке годности конкретной покупки, только предупреждение
+// "подумайте, не покупать ли это позже", см. buildPlanView ниже.
+const LATE_WEEK_DAY_THRESHOLD = 4;
+
 // familyByMeal — см. комментарий у buildInitialPlan; та же карта переопределений
 // количества едоков по id приёма пищи, здесь используется для итоговой суммы
 // и количества ингредиентов в списке покупок вместо единого family.
@@ -184,6 +190,15 @@ export function buildPlanView(planState, pools, family, priceByName, familyByMea
   Object.values(pools || {}).forEach((list) => list.forEach((r) => recipesById.set(r.id, r)));
 
   const ingredMap = {};
+  // Запрос в чате (после созвона с другом): "форель на 7-й день — не
+  // пропадёт ли она за неделю?" — честно, могла бы: весь список покупок
+  // считается на всю неделю разом, без разбивки "купить сейчас" / "докупить
+  // позже". Тут не решаем это полноценно (это отдельная фича — сколько
+  // хранится каждый продукт, когда именно за ним идти), а честно фиксируем
+  // самый поздний день, на который нужен ингредиент — ResultView показывает
+  // предупреждение для скоропортящихся отделов (мясо/рыба), если он нужен
+  // только ближе к концу недели, а не для всех подряд.
+  const lastDayByKey = {};
   let total = 0;
 
   let anyEstimated = false;
@@ -209,6 +224,7 @@ export function buildPlanView(planState, pools, family, priceByName, familyByMea
       recipe.ingr.forEach(([name, amount, unit]) => {
         const key = `${name}|${unit}`;
         ingredMap[key] = (ingredMap[key] || 0) + amount * mealFamily;
+        lastDayByKey[key] = Math.max(lastDayByKey[key] || 0, d.day);
       });
       return {
         mealId: slot.mealId,
@@ -241,7 +257,14 @@ export function buildPlanView(planState, pools, family, priceByName, familyByMea
         unpricedCount++;
       }
     }
-    return { name, amount: roundedAmount, unit, dept: departmentOf(name), cost };
+    const dept = departmentOf(name);
+    // Только "Мясо и рыба" — самая безопасность-критичная скоропортящаяся
+    // категория (свежая рыба/мясо, не консервы и не заморозка — но отличить
+    // это по названию мы не можем, поэтому предупреждение мягкое, не запрет).
+    // Овощи/молочное в среднем спокойно лежат неделю, не флагуем их, чтобы
+    // не обесценить предупреждение частым ложным срабатыванием.
+    const buyLater = dept === "Мясо и рыба" && (lastDayByKey[key] || 0) >= LATE_WEEK_DAY_THRESHOLD;
+    return { name, amount: roundedAmount, unit, dept, cost, buyLater };
   });
   const grouped = DEPARTMENTS.map((d) => ({
     name: d.name,

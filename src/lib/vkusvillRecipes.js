@@ -172,6 +172,20 @@ function normalizeVkusvillRecipe(raw, category) {
     sourceUrl: raw.url,
     ingr,
     steps: (raw.steps || []).map((s) => s.text).filter(Boolean),
+    // КБЖУ — реальные данные от ВкусВилл (raw.nutritional), не у каждого
+    // рецепта есть (часто null) — тогда просто не показываем блок в
+    // интерфейсе, а не гадаем цифры. Судя по порядку величин (рецепт с
+    // сыром и курицей — 141 ккал, а не в разы больше) это на 100 г готового
+    // блюда, стандартный для рецептных сайтов формат — не на порцию целиком
+    // (raw.portions — отдельное поле, число порций, тут не участвует).
+    nutritionPer100g: raw.nutritional
+      ? {
+          calories: raw.nutritional.calories ?? null,
+          protein: raw.nutritional.proteins ?? null,
+          fat: raw.nutritional.fats ?? null,
+          carbs: raw.nutritional.carbs ?? null,
+        }
+      : null,
   };
 }
 

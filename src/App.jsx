@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect } from "react";
-import { Check, ChevronLeft, ChevronRight, Store, Users, Wallet, Salad, ChefHat, Flame, RotateCcw, UtensilsCrossed, Clock, Repeat, Ban, TriangleAlert, X, Loader2, Share2, Settings, Sun, Moon, MonitorSmartphone, Sparkles, PackageSearch, Home, MessageCircle } from "lucide-react";
+import { Check, ChevronLeft, ChevronRight, Store, Users, Wallet, Salad, ChefHat, Flame, RotateCcw, UtensilsCrossed, Clock, Repeat, Ban, TriangleAlert, X, Loader2, Share2, Settings, Sun, Moon, MonitorSmartphone, Sparkles, PackageSearch, Home, MessageCircle, Clapperboard, History } from "lucide-react";
 import { ALLERGENS } from "./data/recipes.js";
 import { buildCartFromShoppingList, toVkusvillQuantity, clearMcpCache } from "./lib/vkusvillMcp.js";
 import { fetchVkusvillPools, getSubstituteOptions, attachRealCosts } from "./lib/vkusvillRecipes.js";
@@ -441,7 +441,22 @@ export default function MealPlanner() {
         shoppingItemsCount: freshPlanView.grouped.reduce((sum, g) => sum + g.items.length, 0),
         days: freshPlanView.days.map((d) => ({
           day: d.day,
-          dayMeals: d.dayMeals.map((dm) => ({ mealLabel: dm.mealLabel, name: dm.recipe.name, emoji: dm.recipe.emoji, time: dm.recipe.time, cost: dm.cost })),
+          // Раньше в истории сохранялось только название блюда — открыть
+          // рецепт из прошлого плана было нечем (запрос после созвона с
+          // другом: "история планов не даёт рецепты, только список блюд").
+          // Кладём сюда компактную "смотровую" версию рецепта (без служебных
+          // полей вроде cuisine/diets/devices, нужных только при подборе) —
+          // укладывается в MAX_PLAN_JSON_LENGTH на сервере с большим запасом
+          // (тот лимит и заводился "с запасом на неделю рецептов", см. app.js).
+          dayMeals: d.dayMeals.map((dm) => ({
+            mealLabel: dm.mealLabel, name: dm.recipe.name, emoji: dm.recipe.emoji, time: dm.recipe.time, cost: dm.cost,
+            photoUrl: dm.recipe.photoUrl || null,
+            ingr: dm.recipe.ingr,
+            steps: dm.recipe.steps,
+            nutritionPer100g: dm.recipe.nutritionPer100g || null,
+            family: dm.family,
+            isRealPrice: dm.isRealPrice,
+          })),
         })),
       },
     });
@@ -1546,6 +1561,12 @@ const HISTORY_DAY_EMOJI_FALLBACK = "🍽";
 // зависит от недоступного бэкенда).
 function PlanHistorySection({ planHistory }) {
   const [openId, setOpenId] = useState(null);
+  // Запрос в чате (после созвона с другом): "история планов, когда хочет
+  // пользователь открыть, то не даёт рецепты, а только список блюд". Планы,
+  // сохранённые ДО этого изменения, не несут dm.ingr/steps (в истории уже
+  // лежит старый плоский формат) — тогда блюдо остаётся простым текстом, не
+  // кнопкой, без ошибки. Новые планы кладут полный рецепт, см. handleFinish.
+  const [historyRecipe, setHistoryRecipe] = useState(null);
   if (planHistory === null) return null;
 
   return (
@@ -1575,7 +1596,30 @@ function PlanHistorySection({ planHistory }) {
                       <div key={d.day} style={styles.historyDay}>
                         <span style={styles.historyDayLabel}>День {d.day}</span>
                         <span>
-                          {d.dayMeals.map((dm) => `${dm.emoji || HISTORY_DAY_EMOJI_FALLBACK} ${dm.name}`).join(" · ")}
+                          {d.dayMeals.map((dm, i) => (
+                            <span key={i}>
+                              {i > 0 && " · "}
+                              {dm.ingr ? (
+                                <button
+                                  className="recipe-row-btn"
+                                  onClick={() =>
+                                    setHistoryRecipe({
+                                      recipe: {
+                                        name: dm.name, emoji: dm.emoji, photoUrl: dm.photoUrl, time: dm.time,
+                                        ingr: dm.ingr, steps: dm.steps, nutritionPer100g: dm.nutritionPer100g,
+                                      },
+                                      cost: dm.cost, isRealPrice: dm.isRealPrice, family: dm.family || p.family || 1,
+                                    })
+                                  }
+                                  style={styles.historyDishBtn}
+                                >
+                                  {dm.emoji || HISTORY_DAY_EMOJI_FALLBACK} {dm.name}
+                                </button>
+                              ) : (
+                                <>{dm.emoji || HISTORY_DAY_EMOJI_FALLBACK} {dm.name}</>
+                              )}
+                            </span>
+                          ))}
                         </span>
                       </div>
                     ))}
@@ -1586,6 +1630,7 @@ function PlanHistorySection({ planHistory }) {
           })}
         </div>
       )}
+      {historyRecipe && <RecipeModal dm={historyRecipe} family={historyRecipe.family} onClose={() => setHistoryRecipe(null)} />}
     </div>
   );
 }
@@ -2049,7 +2094,20 @@ function ResultView({ plan, storeId, storeName, budget, family, mealsCount, diet
                       ) : already ? (
                         <span style={{ textDecoration: "line-through", color: "var(--text-tertiary)" }}>{it.name}</span>
                       ) : (
-                        it.name
+                        <>
+                          {it.name}
+                          {/* Запрос в чате: "форель на 7-й день — не пропадёт
+                              ли за неделю". Честно предупреждаем про
+                              скоропортящееся мясо/рыбу, нужное только ближе к
+                              концу недели, вместо того чтобы молча звать
+                              купить всё сразу в день 0 — см. buyLater в
+                              planLogic.js (buildPlanView). */}
+                          {it.buyLater && (
+                            <span style={styles.buyLaterBadge} title="Понадобится ближе к концу недели — храните дольше рискованно, лучше докупить свежим позже">
+                              {" "}🕒 докупить позже
+                            </span>
+                          )}
+                        </>
                       )}
                     </span>
                     <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
@@ -2241,6 +2299,22 @@ function RecipeModal({ dm, family, onClose }) {
           </span>
         </div>
 
+        {/* КБЖУ — запрос в чате "нет учёта КБЖУ". Реальные данные от
+            ВкусВилл (raw.nutritional), не у каждого рецепта есть — тогда
+            просто не показываем блок, а не выдумываем цифры. На 100 г
+            готового блюда (см. комментарий у nutritionPer100g в
+            vkusvillRecipes.js), не пересчитываем на порцию/family — это
+            справочная характеристика самого блюда, не факта "сколько купить". */}
+        {recipe.nutritionPer100g && (
+          <div style={{ ...styles.modalMeta, marginTop: -10 }}>
+            <span>🔥 {Math.round(recipe.nutritionPer100g.calories)} ккал</span>
+            <span>Б {Math.round(recipe.nutritionPer100g.protein)} г</span>
+            <span>Ж {Math.round(recipe.nutritionPer100g.fat)} г</span>
+            <span>У {Math.round(recipe.nutritionPer100g.carbs)} г</span>
+            <span style={{ color: "var(--text-tertiary)" }}>на 100 г</span>
+          </div>
+        )}
+
         <h3 style={styles.sectionTitle}>Ингредиенты</h3>
         <div style={{ ...styles.listBox, marginBottom: 18 }}>
           {recipe.ingr.map(([name, amount, unit]) => (
@@ -2257,6 +2331,23 @@ function RecipeModal({ dm, family, onClose }) {
             <li key={i} style={styles.stepItem}>{step}</li>
           ))}
         </ol>
+
+        {/* Запрос в чате: "что делать, если человек хочет готовить по видео,
+            а не по тексту". ВкусВилл видео не отдаёт вообще (проверено
+            вживую через их же MCP — в ответе нет ни одного поля с видео),
+            записывать/лицензировать своё — совсем другой по объёму проект.
+            Компромисс: честная поисковая ссылка на YouTube по названию
+            блюда — не обещаем, что видео точно найдётся или совпадёт с
+            рецептом один в один, просто даём быстрый путь поискать самому. */}
+        <a
+          href={`https://www.youtube.com/results?search_query=${encodeURIComponent(`${recipe.name} рецепт`)}`}
+          target="_blank"
+          rel="noopener noreferrer"
+          style={styles.videoSearchLink}
+          onClick={() => trackEvent("recipe_video_search_clicked")}
+        >
+          <Clapperboard size={14} /> Найти видео-рецепт на YouTube
+        </a>
       </div>
     </div>
   );
@@ -2370,6 +2461,7 @@ const styles = {
   historyDetail: { padding: "10px 14px", display: "flex", flexDirection: "column", gap: 6 },
   historyDay: { display: "flex", flexDirection: "column", gap: 2, fontSize: 12.5, color: "var(--text-secondary)" },
   historyDayLabel: { fontSize: 11, fontWeight: 700, color: "var(--text-tertiary)", textTransform: "uppercase" },
+  historyDishBtn: { background: "none", border: "none", padding: 0, margin: 0, font: "inherit", color: "inherit", cursor: "pointer", textDecoration: "underline", textDecorationColor: "rgba(10,132,255,0.35)" },
   proHero: {
     width: 64, height: 64, borderRadius: 20, margin: "0 auto 14px auto", display: "flex", alignItems: "center", justifyContent: "center",
     background: "rgba(10,132,255,0.12)",
@@ -2495,6 +2587,7 @@ const styles = {
   // subFindBtn/subRevertBtn) — те уже отмечены как слишком мелкая тач-зона
   // при аудите доступности, не повторяем ту же ошибку в новом элементе:
   // 13 (иконка) + 6*2 = 25px, укладывается в минимум WCAG 2.5.8 (24×24).
+  buyLaterBadge: { fontSize: 11, color: "var(--warning-text)", fontWeight: 600, whiteSpace: "nowrap" },
   pantryBtn: { display: "flex", alignItems: "center", justifyContent: "center", background: "none", border: "none", padding: 6, margin: -6, color: "var(--text-tertiary)", cursor: "pointer" },
   pantryBtnActive: { display: "flex", alignItems: "center", justifyContent: "center", background: "none", border: "none", padding: 6, margin: -6, color: "var(--accent)", cursor: "pointer" },
   subPanel: { display: "flex", flexDirection: "column", gap: 6, padding: "8px 10px 10px", marginBottom: 4, borderRadius: 14, ...glass(0.5, 10), border: "1px solid var(--hairline)" },
@@ -2532,6 +2625,11 @@ const styles = {
   modalHero: { width: "100%", height: 120, borderRadius: 20, background: "linear-gradient(135deg, rgba(10,132,255,0.14), rgba(100,210,255,0.14))", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 56, marginBottom: 16 },
   modalHeroPhoto: { width: "100%", height: 180, borderRadius: 20, objectFit: "cover", marginBottom: 16, display: "block" },
   modalMeta: { display: "flex", gap: 14, fontSize: 13, color: "var(--text-tertiary)", marginBottom: 18, flexWrap: "wrap" },
+  videoSearchLink: {
+    display: "flex", alignItems: "center", justifyContent: "center", gap: 8, marginTop: 18,
+    padding: "12px 0", borderRadius: 16, border: "1px solid var(--hairline)", ...glass(0.45, 10),
+    color: "var(--text-primary)", fontSize: 13.5, fontWeight: 600, textDecoration: "none",
+  },
   stepsList: { margin: 0, padding: "0 0 0 18px", display: "flex", flexDirection: "column", gap: 8, fontSize: 13.5, lineHeight: 1.5, color: "var(--text-primary)" },
   stepItem: { paddingLeft: 4 },
 
