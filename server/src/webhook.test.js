@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildWelcomeText, buildFeedbackAckText, buildFeedbackListText, buildFeedbackAdminNotifyText, planReplyForUpdate } from "./webhook.js";
+import { buildWelcomeText, buildFeedbackAckText, buildFeedbackListText, buildFeedbackAdminNotifyText, buildSupportPromptText, planReplyForUpdate } from "./webhook.js";
 
 describe("buildWelcomeText", () => {
   it("объясняет, что за бот и что нажать, чтобы запустить приложение", () => {
@@ -30,6 +30,14 @@ describe("buildFeedbackAdminNotifyText", () => {
     const text = buildFeedbackAdminNotifyText(42, "Не находит цены на творог");
     expect(text).toContain("Не находит цены на творог");
     expect(text).toContain("42");
+  });
+});
+
+describe("buildSupportPromptText", () => {
+  it("просит написать сообщение сейчас, объясняет, что оно дойдёт до поддержки", () => {
+    const text = buildSupportPromptText();
+    expect(text).toMatch(/напишите/i);
+    expect(text.length).toBeGreaterThan(0);
   });
 });
 

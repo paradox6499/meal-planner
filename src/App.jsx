@@ -1,12 +1,12 @@
 import { useState, useMemo, useEffect } from "react";
-import { Check, ChevronLeft, ChevronRight, Store, Users, Wallet, Salad, ChefHat, Flame, RotateCcw, UtensilsCrossed, Clock, Repeat, Ban, TriangleAlert, X, Loader2, Share2, Settings, Sun, Moon, MonitorSmartphone, Sparkles, PackageSearch, Home, MessageCircle, Clapperboard, History } from "lucide-react";
+import { Check, ChevronLeft, ChevronRight, Store, Users, Wallet, Salad, ChefHat, Flame, RotateCcw, UtensilsCrossed, Clock, Repeat, Ban, TriangleAlert, X, Loader2, Share2, Settings, Sun, Moon, MonitorSmartphone, Sparkles, PackageSearch, Home, MessageCircle, Clapperboard, History, Plus } from "lucide-react";
 import { ALLERGENS } from "./data/recipes.js";
 import { buildCartFromShoppingList, toVkusvillQuantity, clearMcpCache } from "./lib/vkusvillMcp.js";
 import { fetchVkusvillPools, getSubstituteOptions, attachRealCosts } from "./lib/vkusvillRecipes.js";
 import { loadProfile, saveProfile, clearProfile, loadTheme, saveTheme } from "./lib/profile.js";
-import { loadActivePlan, saveActivePlan, clearActivePlan } from "./lib/activePlan.js";
+import { loadActivePlanSlots, saveActivePlanSlot, setActiveSlotId, removeActivePlanSlot, clearAllActivePlans, genSlotId, MAX_PRO_SLOTS } from "./lib/activePlan.js";
 import { buildPools, buildInitialPlan, buildPlanView, interleaveGroups, computeBudgetStreak, computeRecentSavings } from "./lib/planLogic.js";
-import { submitPlanToBackend, checkPlanStatus, savePlanToHistory, fetchPlanHistory, updateMealTimes, createProPayment, claimReferral, fetchReferralStatus, getBackendUrl } from "./lib/backend.js";
+import { submitPlanToBackend, checkPlanStatus, savePlanToHistory, fetchPlanHistory, updateMealTimes, createProPayment, claimReferral, fetchReferralStatus, getBackendUrl, sendSupportPrompt } from "./lib/backend.js";
 import { loadPantryStaples, savePantryStaples } from "./lib/pantry.js";
 import { loadPayerEmail, savePayerEmail } from "./lib/payerContact.js";
 import { trackEvent } from "./lib/analytics.js";
@@ -144,10 +144,19 @@ export default function MealPlanner() {
   // Читаем один раз при монтировании, как и savedProfile выше — если план
   // есть, сразу открываем ResultView, минуя визард целиком; "Заново"
   // (см. reset ниже) явно стирает запись.
-  const [savedActivePlan] = useState(loadActivePlan);
+  //
+  // Живой вывод из ревью Pro-плюшек (чат): "Несколько планов одновременно"
+  // рекламировалось как Pro-бонус, а по факту хранился ровно один план —
+  // planSlots хранит НАБОР слотов (см. lib/activePlan.js), planSlotId — id
+  // слота, который сейчас редактируется/показывается (не обязательно
+  // совпадает с activeSlotId в planSlots — тот персистентный указатель, этот
+  // локальный "текущий" на время сессии, синхронизируются в паре мест ниже).
+  const [planSlots, setPlanSlots] = useState(loadActivePlanSlots); // {slots, activeSlotId}
+  const initialActiveSlot = planSlots.slots.find((s) => s.id === planSlots.activeSlotId) ?? null;
+  const [planSlotId, setPlanSlotId] = useState(initialActiveSlot?.id ?? null);
 
   const [step, setStep] = useState(0);
-  const [store, setStore] = useState(savedActivePlan?.store ?? null);
+  const [store, setStore] = useState(initialActiveSlot?.store ?? null);
   const [family, setFamily] = useState(savedProfile?.family ?? 2);
   // Необязательные точечные переопределения "Семьи" по приёмам пищи (см.
   // комментарий у buildInitialPlan в planLogic.js) — например, пара, где
@@ -157,15 +166,15 @@ export default function MealPlanner() {
   // (см. AccountView), чтобы не усложнять сборку плана тем, кому это не нужно.
   const [familyByMeal, setFamilyByMeal] = useState(savedProfile?.familyByMeal ?? {});
   const [meals, setMeals] = useState(savedProfile?.meals ?? ["lunch", "dinner"]);
-  const [budget, setBudget] = useState(savedActivePlan?.budget ?? 4000);
+  const [budget, setBudget] = useState(initialActiveSlot?.budget ?? 4000);
   const [diet, setDiet] = useState(savedProfile?.diet ?? null);
   const [allergies, setAllergies] = useState(savedProfile?.allergies ?? []);
   const [cuisines, setCuisines] = useState(savedProfile?.cuisines ?? []);
   const [devices, setDevices] = useState(savedProfile?.devices ?? []);
   const [maxCookTime, setMaxCookTime] = useState(savedProfile?.maxCookTime ?? null);
-  const [done, setDone] = useState(!!savedActivePlan);
+  const [done, setDone] = useState(!!initialActiveSlot);
   const [assembling, setAssembling] = useState(false);
-  const [planState, setPlanState] = useState(savedActivePlan?.planState ?? null);
+  const [planState, setPlanState] = useState(initialActiveSlot?.planState ?? null);
   const [openRecipe, setOpenRecipe] = useState(null);
   const [showProModal, setShowProModal] = useState(false);
   const [showAccount, setShowAccount] = useState(false);
@@ -173,11 +182,19 @@ export default function MealPlanner() {
   const [mealTimes, setMealTimes] = useState(savedProfile?.mealTimes ?? DEFAULT_MEAL_TIMES);
 
   // Тариф и история — реальные данные с бэкенда (null = ещё не спрашивали
-  // или нечем спросить, см. lib/backend.js). Запрашиваем при открытии
-  // Аккаунта, не на каждый рендер — это единственное место, где они видны.
+  // или нечем спросить, см. lib/backend.js). planHistory/referralStatus —
+  // только при открытии Аккаунта (единственное место, где они видны).
+  // planStatus (isPro) нужен ещё и в ResultView — переключатель слотов плана
+  // ("Ещё один план") должен знать про тариф ДО того, как пользователь
+  // вообще откроет Аккаунт, поэтому спрашивается сразу при монтировании (и
+  // ещё раз — при открытии Аккаунта, на случай если тариф поменялся,
+  // например только что оплатили Pro).
   const [planStatus, setPlanStatus] = useState(null);
   const [planHistory, setPlanHistory] = useState(null);
   const [referralStatus, setReferralStatus] = useState(null);
+  useEffect(() => {
+    checkPlanStatus().then(setPlanStatus);
+  }, []);
   useEffect(() => {
     if (!showAccount) return;
     checkPlanStatus().then(setPlanStatus);
@@ -185,11 +202,42 @@ export default function MealPlanner() {
     fetchReferralStatus().then(setReferralStatus);
   }, [showAccount]);
 
-  // Блокировка "бесплатный лимит исчерпан" — знаем об этом только после
-  // ответа бэкенда на попытку "Собрать список" (см. handleFinish), поэтому
-  // отдельное состояние, а не часть planStatus выше (тот обновляется только
-  // пока открыт Аккаунт).
+  // Блокировка "бесплатный лимит исчерпан" — раньше узнавали об этом только
+  // после ответа бэкенда на попытку "Собрать список" (см. handleFinish),
+  // поэтому отдельное состояние, а не часть planStatus выше (тот обновляется
+  // только пока открыт Аккаунт). Теперь может выставиться и раньше — см.
+  // эффект lastPlanGate ниже, для случая "локального плана нет, а
+  // бесплатный лимит уже исчерпан".
   const [limitBlocked, setLimitBlocked] = useState(null); // null | { nextResetHint }
+
+  // Просьба в чате: "когда пользователь составил свой 1 бесплатный план, ему
+  // не открывался визард заново с шагами, а показывался план при входе" —
+  // initialActiveSlot (localStorage) уже решает это для обычного случая, но
+  // Telegram WebView иногда сам чистит localStorage (или человек открыл с
+  // другого устройства) — тогда локального плана нет, и до этой правки
+  // человек каждый раз проходил ВЕСЬ визард заново, чтобы узнать только в
+  // самом конце (см. handleFinish), что бесплатный лимит уже исчерпан. Здесь
+  // та же проверка выполняется СРАЗУ при входе, не дожидаясь конца визарда:
+  // если план на эту неделю уже есть в истории на бэкенде — показываем его
+  // (см. LastPlanGateView), а не форму заново; если истории почему-то нет
+  // (savePlanToHistory — best-effort, могла не сохраниться) — сразу
+  // существующий экран limitBlocked, а не после десятка вопросов визарда.
+  const [lastPlanGate, setLastPlanGate] = useState(null); // null | { latest, status }
+  useEffect(() => {
+    if (initialActiveSlot) return; // локальный план уже есть — обычный путь через ResultView, эта проверка не нужна
+    let cancelled = false;
+    (async () => {
+      const status = await checkPlanStatus();
+      if (cancelled || !status || status.canGenerate !== false) return;
+      const history = await fetchPlanHistory();
+      if (cancelled) return;
+      const latest = history && history.length > 0 ? history[0] : null;
+      if (latest) setLastPlanGate({ latest, status });
+      else setLimitBlocked({ nextResetHint: status.nextResetHint });
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- один раз на монтировании, как и соседний эффект homeScreenStatus ниже
+  }, []);
 
   // "Добавить на экран" (Bot API 8.0+, см. lib/homeScreen.js) — статус
   // проверяем один раз при монтировании, а не при каждом открытии Аккаунта:
@@ -291,10 +339,10 @@ export default function MealPlanner() {
   // считаются один раз, в момент "Собрать список" (handleFinish), а не
   // реактивно по ходу визарда. До первого нажатия — null, и это ок:
   // planView ниже явно проверяет planState на null раньше, чем тронуть pools.
-  const [pools, setPools] = useState(savedActivePlan?.pools ?? null);
+  const [pools, setPools] = useState(initialActiveSlot?.pools ?? null);
   // Карта ингредиент->цена товара (ВкусВилл) — null для остальных сетей или
   // если реальные рецепты не подтянулись (см. комментарий у buildPlanView).
-  const [priceByName, setPriceByName] = useState(savedActivePlan?.priceByName ?? null);
+  const [priceByName, setPriceByName] = useState(initialActiveSlot?.priceByName ?? null);
   const [retryingPrices, setRetryingPrices] = useState(false);
   const [priceRetryFailed, setPriceRetryFailed] = useState(false);
 
@@ -337,6 +385,12 @@ export default function MealPlanner() {
   // не трогая остальную неделю и не требуя пересборки с нуля
   const planView = useMemo(() => buildPlanView(planState, pools, family, priceByName, familyByMeal), [planState, pools, family, priceByName, familyByMeal]);
 
+  // "Несколько планов одновременно" — Pro-бонус (см. planSlots выше): можно
+  // добавить ещё один слот, пока их меньше MAX_PRO_SLOTS. planStatus===null
+  // (бэкенд ещё не ответил/недоступен) — canAddPlanSlot честно false, как и
+  // везде в этом файле для "бэкенд опционален".
+  const canAddPlanSlot = !!planStatus?.isPro && planSlots.slots.length < MAX_PRO_SLOTS;
+
   // Best-effort отправка плана на сервер напоминаний — см. lib/backend.js,
   // там же и все причины, по которым это может тихо ничего не сделать
   // (бэкенд не задеплоен, приложение открыто не в Telegram). Срабатывает
@@ -347,18 +401,27 @@ export default function MealPlanner() {
     if (done && planView) submitPlanToBackend(planView, mealTimes);
   }, [done, planView, mealTimes]);
 
-  // Локальное сохранение ТЕКУЩЕГО плана (см. lib/activePlan.js) — отдельно
-  // от бэкенда выше: это не про напоминания, а про то, чтобы при следующем
-  // открытии приложения (вышли из Telegram и зашли снова) сразу увидеть свой
-  // план, а не визард "собрать новый" (жалоба в чате). Срабатывает на каждое
-  // изменение плана — в том числе "Заменить блюдо" и повтор получения цен,
-  // чтобы восстановленный план был тем же, что видели последним, а не тем,
-  // что было в момент самой первой сборки.
+  // Локальное сохранение ТЕКУЩЕГО слота плана (см. lib/activePlan.js) —
+  // отдельно от бэкенда выше: это не про напоминания, а про то, чтобы при
+  // следующем открытии приложения (вышли из Telegram и зашли снова) сразу
+  // увидеть свой план, а не визард "собрать новый" (жалоба в чате).
+  // Срабатывает на каждое изменение плана — в том числе "Заменить блюдо" и
+  // повтор получения цен, чтобы восстановленный план был тем же, что видели
+  // последним, а не тем, что было в момент самой первой сборки. planSlotId
+  // отсутствует, только пока визард ещё ни разу не финишировал (см.
+  // handleFinish/startNewPlanSlot — оба выставляют его одновременно с done).
   useEffect(() => {
-    if (done && planState) {
-      saveActivePlan({ store, budget, planState, pools, priceByName });
+    if (done && planState && planSlotId) {
+      saveActivePlanSlot({ id: planSlotId, store, budget, planState, pools, priceByName });
+      setActiveSlotId(planSlotId);
+      setPlanSlots((prev) => {
+        const idx = prev.slots.findIndex((s) => s.id === planSlotId);
+        const slot = { id: planSlotId, store, budget, planState, pools, priceByName };
+        const slots = idx >= 0 ? prev.slots.map((s, i) => (i === idx ? slot : s)) : [...prev.slots, slot];
+        return { slots, activeSlotId: planSlotId };
+      });
     }
-  }, [done, planState, pools, priceByName, store, budget]);
+  }, [done, planState, pools, priceByName, store, budget, planSlotId]);
 
   const handleFinish = async () => {
     // Бесплатный лимит — только если есть у кого спросить (бэкенд задеплоен
@@ -419,6 +482,10 @@ export default function MealPlanner() {
     setPriceByName(resolvedPriceByName);
     setPlanState(newPlanState);
     setDone(true);
+    // Самый первый план вообще (ни "Заново", ни "Ещё один план" не заводили
+    // planSlotId заранее) — заводим id прямо здесь, иначе автосохранение
+    // (эффект выше) не сработает: он ждёт planSlotId вместе с done/planState.
+    if (!planSlotId) setPlanSlotId(genSlotId());
     setAssembling(false);
     hapticNotify("success");
     trackEvent("plan_generated", { store, budget, family, meals_count: selectedMeals.length });
@@ -482,19 +549,72 @@ export default function MealPlanner() {
     });
   };
 
-  // "Заново" — начать новый план. Если есть сохранённый профиль, семья/приёмы
+  // "Заново" — начать новый план ВЗАМЕН текущего (тот же слот, planSlotId не
+  // меняется — если визард будет заброшен на середине, старый план слота
+  // никуда не денется: перезапишется, только когда handleFinish реально
+  // досчитает новый, не раньше). Если есть сохранённый профиль, семья/приёмы
   // пищи/рацион/аллергии/кухня/техника НЕ сбрасываются на дефолт — они и
   // так уже верные (в этом весь смысл профиля), сбрасывается только то, что
   // специфично для конкретной прошлой сборки: магазин, бюджет и сам план.
   const reset = () => {
     hapticImpact("light");
-    clearActivePlan();
     setStep(0); setStore(null); setBudget(4000); setDone(false); setPlanState(null);
     setOpenRecipe(null); setAssembling(false); setPools(null); setPriceByName(null);
     if (!hasProfile) {
       setFamily(2); setFamilyByMeal({}); setMeals(["lunch", "dinner"]); setDiet(null);
       setAllergies([]); setCuisines([]); setDevices([]); setMaxCookTime(null);
     }
+  };
+
+  // Живой вывод из ревью Pro-плюшек: "Несколько планов одновременно" — Pro
+  // может держать до MAX_PRO_SLOTS планов и переключаться между ними, не
+  // теряя ни один (в отличие от "Заново" выше, которое всегда заменяет
+  // ОДИН и тот же слот). applySlotToState — общая часть switchToSlot и
+  // removeSlot (переключение на другой слот после удаления текущего).
+  function applySlotToState(slot) {
+    setPlanSlotId(slot?.id ?? null);
+    setStore(slot?.store ?? null);
+    setBudget(slot?.budget ?? 4000);
+    setPlanState(slot?.planState ?? null);
+    setPools(slot?.pools ?? null);
+    setPriceByName(slot?.priceByName ?? null);
+    setDone(!!slot);
+    setStep(0); setAssembling(false); setOpenRecipe(null);
+  }
+
+  const switchToSlot = (id) => {
+    const slot = planSlots.slots.find((s) => s.id === id);
+    if (!slot || id === planSlotId) return;
+    hapticSelect();
+    applySlotToState(slot);
+    setActiveSlotId(id);
+    setPlanSlots((prev) => ({ ...prev, activeSlotId: id }));
+    trackEvent("plan_slot_switched");
+  };
+
+  const removeSlot = (id) => {
+    hapticImpact("light");
+    removeActivePlanSlot(id);
+    const slots = planSlots.slots.filter((s) => s.id !== id);
+    const activeSlotId = planSlots.activeSlotId === id ? (slots[0]?.id ?? null) : planSlots.activeSlotId;
+    setPlanSlots({ slots, activeSlotId });
+    if (planSlotId === id) {
+      applySlotToState(slots.find((s) => s.id === activeSlotId) ?? null);
+    }
+    trackEvent("plan_slot_removed");
+  };
+
+  // "Ещё один план" — в отличие от "Заново", НЕ трогает текущий слот, а
+  // заводит новый id заранее (до первой сборки) — handleFinish просто
+  // сохраняет результат под ним, ничего не зная про "новый это слот или
+  // пересборка старого". Доступность (canAddPlanSlot) проверяется в JSX —
+  // здесь предполагается, что кнопку уже не показали бы, если нельзя.
+  const startNewPlanSlot = () => {
+    hapticImpact("light");
+    setPlanSlotId(genSlotId());
+    setStep(0); setStore(null); setBudget(4000); setDone(false); setPlanState(null);
+    setOpenRecipe(null); setAssembling(false); setPools(null); setPriceByName(null);
+    trackEvent("plan_slot_add_started");
   };
 
   const handleSaveProfile = () => {
@@ -511,11 +631,12 @@ export default function MealPlanner() {
   };
   const handleClearProfile = () => {
     clearProfile();
-    // Текущий план тоже завязан на профиль (техника/аллергии/рацион, под
-    // которые он собирался) — оставлять его при полном сбросе профиля
-    // значило бы после сброса всё равно увидеть старый план, будто ничего
-    // не изменилось.
-    clearActivePlan();
+    // Все слоты плана тоже завязаны на профиль (техника/аллергии/рацион, под
+    // которые они собирались) — оставлять их при полном сбросе профиля
+    // значило бы после сброса всё равно увидеть старые планы, будто ничего
+    // не изменилось. Полный сброс (не "Заново" — тот трогает только один
+    // слот, см. reset()).
+    clearAllActivePlans();
     // после сброса про профиль приложение узнает заново только при перезагрузке
     // (hasProfile вычислен один раз при монтировании) — это ок, простое и
     // предсказуемое поведение, не тянет за собой сложную ре-синхронизацию стейта
@@ -759,7 +880,14 @@ export default function MealPlanner() {
           </div>
         )}
 
-        {!showAccount && !limitBlocked && !done && !assembling && (
+        {!showAccount && !limitBlocked && !done && lastPlanGate && (
+          <LastPlanGateView
+            latest={lastPlanGate.latest}
+            onOpenPro={() => { hapticImpact("light"); trackEvent("pro_modal_opened", { source: "last_plan_gate" }); setShowProModal(true); }}
+          />
+        )}
+
+        {!showAccount && !limitBlocked && !lastPlanGate && !done && !assembling && (
           <div style={styles.progressWrap}>
             {/* Раньше — одна сплошная полоска-заливка. Отдельный сегмент на
                 каждый шаг читается яснее ("вот сколько шагов всего, вот сколько
@@ -777,9 +905,9 @@ export default function MealPlanner() {
           </div>
         )}
 
-        {!showAccount && !limitBlocked && assembling && <SkeletonView />}
+        {!showAccount && !limitBlocked && !lastPlanGate && assembling && <SkeletonView />}
 
-        {!showAccount && !limitBlocked && !done && !assembling && (
+        {!showAccount && !limitBlocked && !lastPlanGate && !done && !assembling && (
           <div style={styles.stepBody} className="mp-step-body">
             {currentStepKey === "store" && (
               <StepShell icon={<Store size={20} />} title="Где вам удобно заказывать?" sub="Выберите магазин с доставкой в вашем районе">
@@ -949,6 +1077,17 @@ export default function MealPlanner() {
         )}
 
         {!showAccount && done && planView && (
+          <PlanSlotsBar
+            slots={planSlots.slots}
+            activeId={planSlotId}
+            onSwitch={switchToSlot}
+            onRemove={removeSlot}
+            onAdd={startNewPlanSlot}
+            canAdd={canAddPlanSlot}
+          />
+        )}
+
+        {!showAccount && done && planView && (
           <ResultView
             plan={planView}
             storeId={store}
@@ -1002,6 +1141,66 @@ function SkeletonView() {
           <div className="skeleton-bar" style={styles.skeletonBar(38)} />
         </div>
       ))}
+    </div>
+  );
+}
+
+// Просьба в чате: "показывался план при входе... и лаконично внизу кнопка
+// перейти на про режим" — рендерится вместо визарда, когда локального плана
+// нет, но по бэкенду ясно, что план на эту неделю уже собирали (см. эффект
+// lastPlanGate в App() выше). Данных для полноценного ResultView с реальным
+// списком покупок в истории НЕТ (savePlanToHistory сознательно хранит только
+// day/блюда + total — не сам сгруппированный список покупок, см. комментарий
+// там же) — здесь честный, более скромный экран: дни и блюда (кликабельные,
+// как в PlanHistorySection) и итоговая сумма, без попытки притвориться
+// полным ResultView.
+function LastPlanGateView({ latest, onOpenPro }) {
+  const [openRecipe, setOpenRecipe] = useState(null);
+  const dateLabel = new Date(latest.createdAt).toLocaleDateString("ru-RU", { day: "numeric", month: "long" });
+  return (
+    <div style={styles.stepBody} className="fade-in-up mp-step-body">
+      <StepShell icon={<Sparkles size={20} color={ACCENT} />} title="Ваш план на эту неделю" sub={`Собран ${dateLabel} · ${latest.storeName}`}>
+        <div style={styles.stack}>
+          {latest.plan?.days?.map((d) => (
+            <div key={d.day} style={styles.historyDay}>
+              <span style={styles.historyDayLabel}>День {d.day}</span>
+              <span>
+                {d.dayMeals.map((dm, i) => (
+                  <span key={i}>
+                    {i > 0 && " · "}
+                    {dm.ingr ? (
+                      <button
+                        className="recipe-row-btn"
+                        onClick={() =>
+                          setOpenRecipe({
+                            recipe: { name: dm.name, emoji: dm.emoji, photoUrl: dm.photoUrl, time: dm.time, ingr: dm.ingr, steps: dm.steps, nutritionPer100g: dm.nutritionPer100g },
+                            cost: dm.cost, isRealPrice: dm.isRealPrice, family: dm.family || latest.family || 1,
+                          })
+                        }
+                        style={styles.historyDishBtn}
+                      >
+                        {dm.emoji || HISTORY_DAY_EMOJI_FALLBACK} {dm.name}
+                      </button>
+                    ) : (
+                      <>{dm.emoji || HISTORY_DAY_EMOJI_FALLBACK} {dm.name}</>
+                    )}
+                  </span>
+                ))}
+              </span>
+            </div>
+          ))}
+        </div>
+        <p style={{ ...styles.acctSectionHint, marginTop: 14 }}>
+          {latest.totalCost != null ? `${latest.totalCost.toLocaleString("ru-RU")} ₽` : "без цены"} из {latest.budget.toLocaleString("ru-RU")} ₽ · на {latest.family} {latest.family === 1 ? "человека" : "человек"}
+        </p>
+        <p style={{ ...styles.acctSectionHint, marginTop: 0 }}>
+          Новый план по бесплатному тарифу будет доступен позже — с Pro можно пересобирать без ограничений.
+        </p>
+        <button onClick={onOpenPro} style={{ ...styles.navBtnPrimary, width: "100%", justifyContent: "center", marginTop: 8 }}>
+          Перейти на Pro
+        </button>
+      </StepShell>
+      {openRecipe && <RecipeModal dm={openRecipe} family={openRecipe.family} onClose={() => setOpenRecipe(null)} />}
     </div>
   );
 }
@@ -1140,7 +1339,7 @@ function AccountView({
         <div style={styles.acctSection}>
           <button
             className="chip"
-            onClick={() => {
+            onClick={async () => {
               hapticImpact("light");
               trackEvent("support_clicked");
               // Раньше — openTelegramLink(SUPPORT_URL). Жалоба в чате: "кнопка
@@ -1159,6 +1358,15 @@ function AccountView({
               // клиентах, а не только там, где openTelegramLink не игнорирует
               // ссылку на себя). Вне Telegram (локальный просмотр, close()
               // недоступен) — по-прежнему открываем как обычную ссылку.
+              //
+              // Просьба в чате: "чтобы высвечивалось, что напишите сейчас это
+              // обращение и мы отправим его в поддержку" — пустой чат сам по
+              // себе не объясняет, что теперь нужно просто написать
+              // сообщение. Ждём отправку подсказки (короткий таймаут внутри
+              // sendSupportPrompt — не best-effort, значит "не блокируем
+              // кнопку надолго"), чтобы пользователь увидел её уже открытым
+              // чатом, а не спустя секунду после того, как Mini App закрылся.
+              await sendSupportPrompt();
               const tg = window.Telegram?.WebApp;
               if (tg?.close) tg.close();
               else if (tg?.openTelegramLink) tg.openTelegramLink(SUPPORT_URL);
@@ -1413,12 +1621,21 @@ const SUBSCRIPTION_BENEFITS = [
   {
     title: "Несколько планов одновременно",
     short: "Свой план, план для родителей, план на праздник — раздельно",
-    detail: "Сейчас активен только один план — «заново» стирает предыдущий. С подпиской можно будет держать несколько планов и переключаться между ними, не теряя ни один.",
+    // Живой вывод из ревью в чате: текст говорил "можно будет" (обещание на
+    // будущее), хотя это уже реально работает — можно держать до 3 планов
+    // и переключаться между ними чипами над списком покупок (см. PlanSlotsBar).
+    detail: "На бесплатном тарифе активен только один план — «заново» стирает предыдущий. С Pro можно держать до 3 планов одновременно и переключаться между ними одним тапом, не теряя ни один.",
   },
   {
     title: "Напоминания от бота",
     short: "Бот сам напишет, когда пора готовить — не нужно открывать приложение",
-    detail: "За 30 минут до ужина (или другого приёма пищи) бот пришлёт сообщение с названием блюда прямо в чат — уже в разработке, скоро можно будет проверить на деле.",
+    // Живой вывод из ревью в чате: текст говорил "уже в разработке, скоро
+    // можно будет проверить", хотя напоминания уже реально отправляются
+    // (см. server/src/scheduler.js) — просто раньше отправлялись вообще
+    // всем, а не только Pro (см. findCandidateSlots в server/src/db.js,
+    // теперь фильтрует по is_pro/pro_until). Текст обновлён на настоящее
+    // время: это уже рабочая Pro-функция, а не обещание на будущее.
+    detail: "За 30 минут до ужина (или другого приёма пищи) бот пришлёт сообщение с названием блюда прямо в чат — уже работает, доступно сразу после оформления Pro.",
   },
   {
     title: "Общий список на семью",
@@ -1760,6 +1977,43 @@ function ProModal({ onClose }) {
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+// Живой вывод из ревью Pro-плюшек (чат): "Несколько планов одновременно" —
+// раньше активен был ровно один план, "заново" стирал предыдущий безвозвратно.
+// Строка переключения планов над списком покупок — по одному чипу на слот
+// (магазин + бюджет, чтобы отличать план от плана без открытия каждого),
+// крестик убирает слот, "+ Ещё план" виден только Pro и только пока слотов
+// меньше MAX_PRO_SLOTS. Ничего не показываем, если план всего один и
+// добавить ещё нельзя — не нагружаем экран лишним UI ради unlikely случая.
+function PlanSlotsBar({ slots, activeId, onSwitch, onRemove, onAdd, canAdd }) {
+  if (slots.length <= 1 && !canAdd) return null;
+  return (
+    <div style={styles.planSlotsBar}>
+      {slots.map((s) => (
+        <button key={s.id} className="chip" onClick={() => onSwitch(s.id)} style={styles.planSlotChip(s.id === activeId)}>
+          <span>{STORES.find((st) => st.id === s.store)?.name || "План"}</span>
+          {slots.length > 1 && (
+            <span
+              role="button"
+              tabIndex={0}
+              aria-label="Удалить этот план"
+              onClick={(e) => { e.stopPropagation(); onRemove(s.id); }}
+              onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.stopPropagation(); onRemove(s.id); } }}
+              style={styles.planSlotRemove}
+            >
+              <X size={11} />
+            </span>
+          )}
+        </button>
+      ))}
+      {canAdd && (
+        <button className="chip" onClick={onAdd} style={styles.planSlotAddChip}>
+          <Plus size={13} /> Ещё план
+        </button>
+      )}
     </div>
   );
 }
@@ -2406,6 +2660,18 @@ const styles = {
   // в шапке: раньше разной высоты пилюля и кружок в одном ряду выглядели
   // рассинхронизированно, хотя обе уже были "стеклянными".
   resetBtn: { display: "flex", alignItems: "center", gap: 5, height: 32, ...glass(0.5, 8), border: "1px solid var(--hairline)", borderRadius: 999, padding: "0 13px", fontSize: 12, fontWeight: 500, color: "var(--text-secondary)", cursor: "pointer" },
+  // Переключатель слотов плана (см. PlanSlotsBar) — компактный ряд чипов над
+  // списком покупок, тот же язык, что у storeChip/rowChip выше, но горизонтально
+  // и мельче (это навигация между уже собранными планами, не выбор в визарде).
+  planSlotsBar: { display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 14 },
+  planSlotChip: (active) => ({
+    display: "flex", alignItems: "center", gap: 6, height: 30, padding: "0 6px 0 12px", borderRadius: 999, cursor: "pointer",
+    border: active ? "1.5px solid rgba(10,132,255,0.55)" : "1px solid var(--hairline)",
+    ...glass(active ? 0.7 : 0.45, 8),
+    fontSize: 12.5, fontWeight: 600, color: active ? ACCENT : "var(--text-secondary)",
+  }),
+  planSlotRemove: { display: "flex", alignItems: "center", justifyContent: "center", width: 20, height: 20, borderRadius: "50%", color: "var(--text-tertiary)" },
+  planSlotAddChip: { display: "flex", alignItems: "center", gap: 5, height: 30, padding: "0 12px", borderRadius: 999, cursor: "pointer", border: "1px dashed var(--hairline)", background: "none", fontSize: 12.5, fontWeight: 600, color: ACCENT },
   accountBtn: { display: "flex", alignItems: "center", justifyContent: "center", width: 32, height: 32, ...glass(0.5, 8), border: "1px solid var(--hairline)", borderRadius: "50%", color: "var(--text-secondary)", cursor: "pointer" },
   // Раньше marginTop:10 — визуально впритык к кнопкам "назад"/"Далее" сразу
   // над ним (у них свой отступ всего 22px сверху, но снизу ничего не было).

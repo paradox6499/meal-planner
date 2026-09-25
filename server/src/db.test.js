@@ -13,6 +13,13 @@ import {
   getUsersWithProExpiringSoon,
 } from "./db.js";
 
+// Живой вывод из ревью Pro-плюшек (чат): "Напоминания от бота" рекламируются
+// как Pro-бонус, а фактически отправлялись вообще всем, независимо от
+// тарифа. findCandidateSlots теперь требует nowISO и фильтрует по Pro (см.
+// комментарий у неё в db.js) — поэтому тесты ниже, где напоминание должно
+// найтись, явно выдают пользователю Pro через setUserPro.
+const REMINDER_NOW = "2026-09-10T12:00:00Z";
+
 describe("db", () => {
   let db;
   beforeEach(() => {
@@ -28,7 +35,8 @@ describe("db", () => {
         { scheduledDate: "2026-09-10", mealType: "dinner", mealLabel: "Ужин", mealTime: "19:00", recipeName: "Паста" },
       ],
     });
-    const rows = findCandidateSlots(db, "2026-09-10", "2026-09-11");
+    setUserPro(db, 42, true);
+    const rows = findCandidateSlots(db, "2026-09-10", "2026-09-11", REMINDER_NOW);
     expect(rows).toHaveLength(1);
     expect(rows[0].recipe_name).toBe("Паста");
     expect(rows[0].timezone_offset_minutes).toBe(180);
@@ -44,8 +52,9 @@ describe("db", () => {
       telegramUserId: 42, timezoneOffsetMinutes: 180, reminderLeadMinutes: 45,
       mealSlots: [{ scheduledDate: "2026-09-17", mealType: "dinner", mealLabel: "Ужин", mealTime: "20:00", recipeName: "Новый план" }],
     });
-    const oldWeek = findCandidateSlots(db, "2026-09-10", "2026-09-11");
-    const newWeek = findCandidateSlots(db, "2026-09-17", "2026-09-18");
+    setUserPro(db, 42, true);
+    const oldWeek = findCandidateSlots(db, "2026-09-10", "2026-09-11", REMINDER_NOW);
+    const newWeek = findCandidateSlots(db, "2026-09-17", "2026-09-18", REMINDER_NOW);
     expect(oldWeek).toHaveLength(0);
     expect(newWeek).toHaveLength(1);
     expect(newWeek[0].recipe_name).toBe("Новый план");
@@ -55,28 +64,53 @@ describe("db", () => {
   it("не путает планы разных пользователей", () => {
     saveUserPlan(db, { telegramUserId: 1, timezoneOffsetMinutes: 180, reminderLeadMinutes: 30, mealSlots: [{ scheduledDate: "2026-09-10", mealType: "dinner", mealLabel: "Ужин", mealTime: "19:00", recipeName: "План юзера 1" }] });
     saveUserPlan(db, { telegramUserId: 2, timezoneOffsetMinutes: 180, reminderLeadMinutes: 30, mealSlots: [{ scheduledDate: "2026-09-10", mealType: "dinner", mealLabel: "Ужин", mealTime: "19:00", recipeName: "План юзера 2" }] });
-    const rows = findCandidateSlots(db, "2026-09-10", "2026-09-11");
+    setUserPro(db, 1, true);
+    setUserPro(db, 2, true);
+    const rows = findCandidateSlots(db, "2026-09-10", "2026-09-11", REMINDER_NOW);
     expect(rows.map((r) => r.recipe_name).sort()).toEqual(["План юзера 1", "План юзера 2"]);
   });
 
   it("markReminderSent исключает слот из следующей выборки кандидатов", () => {
     saveUserPlan(db, { telegramUserId: 42, timezoneOffsetMinutes: 180, reminderLeadMinutes: 30, mealSlots: [{ scheduledDate: "2026-09-10", mealType: "dinner", mealLabel: "Ужин", mealTime: "19:00", recipeName: "Паста" }] });
-    const [slot] = findCandidateSlots(db, "2026-09-10", "2026-09-11");
+    setUserPro(db, 42, true);
+    const [slot] = findCandidateSlots(db, "2026-09-10", "2026-09-11", REMINDER_NOW);
     markReminderSent(db, slot.id, new Date().toISOString());
-    expect(findCandidateSlots(db, "2026-09-10", "2026-09-11")).toHaveLength(0);
+    expect(findCandidateSlots(db, "2026-09-10", "2026-09-11", REMINDER_NOW)).toHaveLength(0);
   });
 
   it("не откатывает всё сохранение при ошибке (транзакция) — старый план остаётся нетронутым", () => {
     saveUserPlan(db, { telegramUserId: 42, timezoneOffsetMinutes: 180, reminderLeadMinutes: 30, mealSlots: [{ scheduledDate: "2026-09-10", mealType: "dinner", mealLabel: "Ужин", mealTime: "19:00", recipeName: "Рабочий план" }] });
+    setUserPro(db, 42, true);
     expect(() =>
       saveUserPlan(db, {
         telegramUserId: 42, timezoneOffsetMinutes: 180, reminderLeadMinutes: 30,
         mealSlots: [{ scheduledDate: "2026-09-17", mealType: null, mealLabel: "Ужин", mealTime: "20:00", recipeName: "Сломанный план" }], // meal_type NOT NULL — упадёт
       })
     ).toThrow();
-    const rows = findCandidateSlots(db, "2026-09-10", "2026-09-11");
+    const rows = findCandidateSlots(db, "2026-09-10", "2026-09-11", REMINDER_NOW);
     expect(rows).toHaveLength(1);
     expect(rows[0].recipe_name).toBe("Рабочий план");
+  });
+
+  // Регрессия на живой вывод из ревью: раньше free-пользователь с сохранённым
+  // планом ПОЛУЧАЛ бы напоминания наравне с Pro — теперь фильтр в SQL отсекает
+  // его целиком, до отправки, а не после (в отличие от точечных случаев,
+  // которые проверяются позже в других файлах).
+  it("free-пользователь (не Pro) НЕ попадает в кандидаты, даже если у него есть слот с планом", () => {
+    saveUserPlan(db, { telegramUserId: 42, timezoneOffsetMinutes: 180, reminderLeadMinutes: 30, mealSlots: [{ scheduledDate: "2026-09-10", mealType: "dinner", mealLabel: "Ужин", mealTime: "19:00", recipeName: "Паста" }] });
+    expect(findCandidateSlots(db, "2026-09-10", "2026-09-11", REMINDER_NOW)).toHaveLength(0);
+  });
+
+  it("Pro по оплаченному pro_until (не только ручной is_pro) тоже попадает в кандидаты", () => {
+    saveUserPlan(db, { telegramUserId: 42, timezoneOffsetMinutes: 180, reminderLeadMinutes: 30, mealSlots: [{ scheduledDate: "2026-09-10", mealType: "dinner", mealLabel: "Ужин", mealTime: "19:00", recipeName: "Паста" }] });
+    extendUserPro(db, 42, { fromISO: REMINDER_NOW, addDays: 30 });
+    expect(findCandidateSlots(db, "2026-09-10", "2026-09-11", REMINDER_NOW)).toHaveLength(1);
+  });
+
+  it("истёкший pro_until (подписка кончилась) -> снова не попадает в кандидаты", () => {
+    saveUserPlan(db, { telegramUserId: 42, timezoneOffsetMinutes: 180, reminderLeadMinutes: 30, mealSlots: [{ scheduledDate: "2026-09-10", mealType: "dinner", mealLabel: "Ужин", mealTime: "19:00", recipeName: "Паста" }] });
+    extendUserPro(db, 42, { fromISO: "2026-08-01T00:00:00Z", addDays: 30 }); // истёк задолго до REMINDER_NOW
+    expect(findCandidateSlots(db, "2026-09-10", "2026-09-11", REMINDER_NOW)).toHaveLength(0);
   });
 });
 
@@ -145,7 +179,7 @@ describe("Pro-статус", () => {
   it("setUserPro не затирает существующие настройки пользователя (timezone/reminderLead)", () => {
     saveUserPlan(db, { telegramUserId: 42, timezoneOffsetMinutes: 180, reminderLeadMinutes: 45, mealSlots: [{ scheduledDate: "2026-09-10", mealType: "dinner", mealLabel: "Ужин", mealTime: "19:00", recipeName: "Паста" }] });
     setUserPro(db, 42, true);
-    const rows = findCandidateSlots(db, "2026-09-10", "2026-09-11");
+    const rows = findCandidateSlots(db, "2026-09-10", "2026-09-11", REMINDER_NOW);
     expect(rows[0].reminder_lead_minutes).toBe(45); // не сброшено на дефолт
     expect(getUserPro(db, 42)).toBe(true);
   });
@@ -347,11 +381,12 @@ describe("updateMealTimesForUser", () => {
         { scheduledDate: "2026-09-11", mealType: "lunch", mealLabel: "Обед", mealTime: "13:00", recipeName: "Салат" },
       ],
     });
+    setUserPro(db, 42, true); // findCandidateSlots теперь фильтрует по Pro, см. REMINDER_NOW выше
   });
 
   it("обновляет meal_time для всех слотов указанного типа приёма пищи, не трогая остальные", () => {
     updateMealTimesForUser(db, 42, { lunch: "14:30" });
-    const rows = findCandidateSlots(db, "2026-09-10", "2026-09-11");
+    const rows = findCandidateSlots(db, "2026-09-10", "2026-09-11", REMINDER_NOW);
     const byType = Object.fromEntries(rows.map((r) => [`${r.scheduled_date}-${r.meal_type}`, r.meal_time]));
     expect(byType["2026-09-10-lunch"]).toBe("14:30");
     expect(byType["2026-09-11-lunch"]).toBe("14:30");
@@ -360,7 +395,7 @@ describe("updateMealTimesForUser", () => {
 
   it("можно обновить несколько типов приёма пищи за один вызов", () => {
     updateMealTimesForUser(db, 42, { lunch: "14:00", dinner: "20:00" });
-    const rows = findCandidateSlots(db, "2026-09-10", "2026-09-11");
+    const rows = findCandidateSlots(db, "2026-09-10", "2026-09-11", REMINDER_NOW);
     const byType = Object.fromEntries(rows.map((r) => [`${r.scheduled_date}-${r.meal_type}`, r.meal_time]));
     expect(byType["2026-09-10-lunch"]).toBe("14:00");
     expect(byType["2026-09-10-dinner"]).toBe("20:00");
@@ -376,8 +411,9 @@ describe("updateMealTimesForUser", () => {
       telegramUserId: 7, timezoneOffsetMinutes: 180, reminderLeadMinutes: 30,
       mealSlots: [{ scheduledDate: "2026-09-10", mealType: "lunch", mealLabel: "Обед", mealTime: "13:00", recipeName: "План юзера 7" }],
     });
+    setUserPro(db, 7, true);
     updateMealTimesForUser(db, 42, { lunch: "15:00" });
-    const rows = findCandidateSlots(db, "2026-09-10", "2026-09-11");
+    const rows = findCandidateSlots(db, "2026-09-10", "2026-09-11", REMINDER_NOW);
     const user7Row = rows.find((r) => r.telegram_user_id === 7);
     expect(user7Row.meal_time).toBe("13:00"); // не тронут
   });

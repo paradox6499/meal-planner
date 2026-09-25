@@ -18,7 +18,7 @@ function isoDate(d) {
 export async function runReminderTick(db, botToken, now = new Date()) {
   const today = isoDate(now);
   const tomorrow = isoDate(new Date(now.getTime() + 24 * 60 * 60 * 1000));
-  const candidates = findCandidateSlots(db, today, tomorrow);
+  const candidates = findCandidateSlots(db, today, tomorrow, now.toISOString());
   const due = findDueReminders(candidates, now);
 
   const results = [];

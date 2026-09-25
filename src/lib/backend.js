@@ -100,6 +100,40 @@ export async function checkPlanStatus() {
   }
 }
 
+/** Просит бота прислать пользователю подсказку "напишите сейчас, дойдёт до
+ * поддержки" ПЕРЕД тем, как приложение закроет себя кнопкой "Написать в
+ * поддержку" (см. AccountView в App.jsx) — иначе пользователь просто
+ * попадает в пустой чат с ботом, не понимая, что теперь нужно сделать.
+ * Best-effort, как и весь остальной этот файл: нет бэкенда/не в Telegram —
+ * тихо ничего не делаем, кнопка всё равно закрывает приложение. */
+export async function sendSupportPrompt() {
+  const backendUrl = getBackendUrl();
+  const initData = currentInitData();
+  if (!backendUrl || !initData) return false;
+
+  // Вызывающий код (кнопка "Написать в поддержку") ждёт этот вызов ПЕРЕД
+  // тем, как закрыть Mini App — короткий таймаут (не бесконечное ожидание
+  // fetch по умолчанию), чтобы медленный/недоступный бэкенд не превращал
+  // клик по кнопке в зависшую кнопку. Не критично, если не успели —
+  // sendSupportPrompt best-effort, приложение всё равно закроется.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 2500);
+  try {
+    const res = await fetch(`${backendUrl}/api/support/prompt`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ initData }),
+      signal: controller.signal,
+    });
+    return res.ok;
+  } catch (err) {
+    console.warn("Не удалось отправить подсказку поддержки:", err.message);
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** Создаёт платёж в ЮKassa (POST /api/pay/create) и возвращает checkout-
  * ссылку — открывается через Telegram.WebApp.openLink (см. App.jsx:
  * ProModal), не встраивается в само мини-приложение: ЮKassa не поддерживает

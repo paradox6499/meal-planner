@@ -12,7 +12,7 @@ import {
   createPendingPayment, getPaymentByYookassaId, updatePaymentStatus, extendUserPro,
   countRewardedReferrals,
 } from "./db.js";
-import { planReplyForUpdate, buildWelcomeText, buildFeedbackAckText, buildFeedbackListText, buildFeedbackAdminNotifyText } from "./webhook.js";
+import { planReplyForUpdate, buildWelcomeText, buildFeedbackAckText, buildFeedbackListText, buildFeedbackAdminNotifyText, buildSupportPromptText } from "./webhook.js";
 import { sendTelegramMessage } from "./telegram.js";
 import { sendDigestNow } from "./digest.js";
 import { sendBackupNow } from "./backup.js";
@@ -339,6 +339,30 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
       } catch (err) {
         console.error("[api/plan-status] ошибка:", err);
         sendJson(res, 500, { ok: false, error: "не удалось получить статус" });
+      }
+      return;
+    }
+
+    // Просьба в чате: "когда пользователь переходил в бота по кнопке
+    // 'написать в поддержку', ему должно высвечиваться, что напишите сейчас
+    // это обращение и мы отправим его в поддержку". Кнопка в AccountView
+    // закрывает Mini App (WebApp.close()), возвращая пользователя в пустой
+    // чат с ботом — этот эндпоинт шлёт объясняющий текст ПЕРЕД закрытием,
+    // чтобы пользователь увидел уже открытый чат с понятной подсказкой, а не
+    // пустой экран, где неясно, что теперь просто написать сообщение.
+    // telegram_user_id для личного чата с ботом совпадает с chat_id — тот же
+    // принцип, что и у остальной адресной рассылки в этом файле (напоминания,
+    // дайджест и т.п.), отдельного chat_id никто не передаёт.
+    if (req.method === "POST" && req.url === "/api/support/prompt") {
+      const auth = await readAuthenticatedBody(req, botToken);
+      if (!auth.ok) return sendJson(res, auth.status, { ok: false, error: auth.error });
+
+      try {
+        await sendTelegramMessage(botToken, auth.telegramUserId, buildSupportPromptText());
+        sendJson(res, 200, { ok: true });
+      } catch (err) {
+        console.error("[api/support/prompt] не удалось отправить:", err.message);
+        sendJson(res, 500, { ok: false, error: "не удалось отправить" });
       }
       return;
     }

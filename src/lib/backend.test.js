@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { buildMealSlots, todayPlusDays, checkPlanStatus, savePlanToHistory, fetchPlanHistory, updateMealTimes, resolvePricesViaBackend, createProPayment, claimReferral, fetchReferralStatus, getBackendUrl } from "./backend.js";
+import { buildMealSlots, todayPlusDays, checkPlanStatus, savePlanToHistory, fetchPlanHistory, updateMealTimes, resolvePricesViaBackend, createProPayment, claimReferral, fetchReferralStatus, getBackendUrl, sendSupportPrompt } from "./backend.js";
 
 function stubTelegram(initData) {
   vi.stubGlobal("window", { Telegram: initData !== undefined ? { WebApp: { initData } } : undefined });
@@ -151,6 +151,48 @@ describe("checkPlanStatus", () => {
 
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false }));
     expect(await checkPlanStatus()).toBeNull();
+  });
+});
+
+// Просьба в чате: "когда пользователь переходил в бота по кнопке 'написать
+// в поддержку', ему должно высвечиваться, что напишите сейчас это обращение"
+// — AccountView ждёт sendSupportPrompt() перед закрытием Mini App (см.
+// App.jsx), см. buildSupportPromptText в server/src/webhook.js за текстом.
+describe("sendSupportPrompt", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+  });
+
+  it("false без VITE_BACKEND_URL или вне Telegram — ничего не запрашивает", async () => {
+    vi.stubEnv("VITE_BACKEND_URL", "");
+    stubTelegram("x");
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    expect(await sendSupportPrompt()).toBe(false);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("бьёт по /api/support/prompt с initData, возвращает true на успех", async () => {
+    vi.stubEnv("VITE_BACKEND_URL", "https://api.example.com");
+    stubTelegram("initdata-blob");
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true });
+    vi.stubGlobal("fetch", fetchMock);
+    expect(await sendSupportPrompt()).toBe(true);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.example.com/api/support/prompt",
+      expect.objectContaining({ method: "POST", body: JSON.stringify({ initData: "initdata-blob" }) })
+    );
+  });
+
+  it("false при сетевой ошибке или не-200 ответе — не бросает исключение", async () => {
+    vi.stubEnv("VITE_BACKEND_URL", "https://api.example.com");
+    stubTelegram("x");
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("boom")));
+    expect(await sendSupportPrompt()).toBe(false);
+
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false }));
+    expect(await sendSupportPrompt()).toBe(false);
   });
 });
 

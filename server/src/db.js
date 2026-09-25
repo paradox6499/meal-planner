@@ -269,8 +269,16 @@ export function saveUserPlan(db, { telegramUserId, timezoneOffsetMinutes, remind
  * достаточно грубо, точная проверка окна — в reminderTiming.js) слоты, ещё
  * не отправленные, с настройками пользователя присоединёнными сразу через
  * JOIN — сама точная арифметика времени/часового пояса делается в чистой
- * функции reminderTiming.findDueReminders(), не в SQL. */
-export function findCandidateSlots(db, todayISO, tomorrowISO) {
+ * функции reminderTiming.findDueReminders(), не в SQL.
+ *
+ * nowISO обязателен и фильтрует по Pro — тот же вывод из ревью, что и в
+ * чате: "Напоминания от бота" рекламируются как Pro-бонус, а по факту
+ * отправлялись вообще всем, независимо от тарифа. Условие — то же самое,
+ * что в getUserPro (ручной тумблер is_pro ИЛИ действующий pro_until),
+ * продублировано здесь в SQL по той же причине, что и остальные подобные
+ * дубли в этом файле — простое JOIN-условие проще и быстрее одного SQL-
+ * запроса, чем тянуть все строки и фильтровать в JS построчно. */
+export function findCandidateSlots(db, todayISO, tomorrowISO, nowISO) {
   return db
     .prepare(
       `SELECT ms.id, ms.telegram_user_id, ms.scheduled_date, ms.meal_type, ms.meal_label, ms.meal_time, ms.recipe_name,
@@ -278,9 +286,10 @@ export function findCandidateSlots(db, todayISO, tomorrowISO) {
        FROM meal_slots ms
        JOIN users u ON u.telegram_user_id = ms.telegram_user_id
        WHERE ms.reminder_sent_at IS NULL
-         AND ms.scheduled_date IN (?, ?)`
+         AND ms.scheduled_date IN (?, ?)
+         AND (u.is_pro = 1 OR (u.pro_until IS NOT NULL AND u.pro_until > ?))`
     )
-    .all(todayISO, tomorrowISO);
+    .all(todayISO, tomorrowISO, nowISO);
 }
 
 export function markReminderSent(db, slotId, sentAtISO) {

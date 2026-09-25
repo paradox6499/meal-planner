@@ -20,6 +20,10 @@ function validInitData(userId = 42) {
 }
 
 const validSlot = { scheduledDate: "2026-09-10", mealType: "dinner", mealLabel: "Ужин", mealTime: "19:00", recipeName: "Паста" };
+// findCandidateSlots теперь требует nowISO и фильтрует по Pro (живой вывод
+// из ревью: напоминания рекламируются как Pro-бонус, а отправлялись всем) —
+// см. комментарий у неё в db.js.
+const REMINDER_NOW = "2026-09-10T12:00:00Z";
 
 describe("parsePlanRequest", () => {
   it("принимает корректное тело", () => {
@@ -185,7 +189,8 @@ describe("HTTP-сервер", () => {
       body: JSON.stringify({ initData: validInitData(42), timezoneOffsetMinutes: 180, mealSlots: [validSlot] }),
     });
     expect(res.status).toBe(200);
-    const rows = findCandidateSlots(db, "2026-09-10", "2026-09-11");
+    setUserPro(db, 42, true); // findCandidateSlots ниже фильтрует по Pro — сам факт сохранения плана от тарифа не зависит
+    const rows = findCandidateSlots(db, "2026-09-10", "2026-09-11", REMINDER_NOW);
     expect(rows).toHaveLength(1);
     expect(rows[0].telegram_user_id).toBe(42);
   });
@@ -197,7 +202,7 @@ describe("HTTP-сервер", () => {
       body: JSON.stringify({ timezoneOffsetMinutes: 180, mealSlots: [validSlot] }),
     });
     expect(res.status).toBe(401);
-    expect(findCandidateSlots(db, "2026-09-10", "2026-09-11")).toHaveLength(0);
+    expect(findCandidateSlots(db, "2026-09-10", "2026-09-11", REMINDER_NOW)).toHaveLength(0);
   });
 
   it("POST /api/plan с ПОДДЕЛЬНОЙ initData -> 401 (нельзя сохранить план за чужого пользователя)", async () => {
@@ -358,7 +363,8 @@ describe("HTTP-сервер", () => {
     const data = await res.json();
     expect(data).toEqual({ ok: true, updated: 1 });
 
-    const rows = findCandidateSlots(db, "2026-09-10", "2026-09-11");
+    setUserPro(db, 42, true); // findCandidateSlots ниже фильтрует по Pro — обновление времени от тарифа не зависит
+    const rows = findCandidateSlots(db, "2026-09-10", "2026-09-11", REMINDER_NOW);
     expect(rows[0].meal_time).toBe("20:30");
   });
 
@@ -906,6 +912,33 @@ describe("POST /telegram/webhook", () => {
   it("/backup от НЕ админа -> 200, ничего не отправляет", async () => {
     const res = await post({ message: { text: "/backup", chat: { id: 999 } } });
     expect(res.status).toBe(200);
+    expect(telegramCalls).toHaveLength(0);
+  });
+
+  // Просьба в чате: "когда пользователь переходил в бота по кнопке
+  // 'написать в поддержку', ему должно высвечиваться, что напишите сейчас
+  // это обращение" — фронтенд (sendSupportPrompt в lib/backend.js) зовёт этот
+  // эндпоинт ПЕРЕД закрытием Mini App.
+  it("POST /api/support/prompt с валидной initData -> шлёт подсказку тому же telegram_user_id", async () => {
+    const res = await realFetch(`${baseUrl}/api/support/prompt`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ initData: validInitData(42) }),
+    });
+    expect(res.status).toBe(200);
+    expect(telegramCalls).toHaveLength(1);
+    const sentBody = JSON.parse(telegramCalls[0][1].body);
+    expect(sentBody.chat_id).toBe(42);
+    expect(sentBody.text).toMatch(/напишите/i);
+  });
+
+  it("POST /api/support/prompt без initData -> 401, ничего не отправляет", async () => {
+    const res = await realFetch(`${baseUrl}/api/support/prompt`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    expect(res.status).toBe(401);
     expect(telegramCalls).toHaveLength(0);
   });
 
