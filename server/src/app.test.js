@@ -484,31 +484,37 @@ describe("POST /api/family/*", () => {
     expect(res.status).toBe(401);
   });
 
-  it("join по familyId от владельца-Pro добавляет участника без Pro у самого участника", async () => {
+  it("join по inviteCode от владельца-Pro добавляет участника без Pro у самого участника", async () => {
     setUserPro(db, 1, true);
     const createBody = await (await post("/api/family/create", { initData: validInitData(1) })).json();
-    const familyId = createBody.status.familyId;
+    const inviteCode = createBody.status.inviteCode;
+    expect(inviteCode).toBeTruthy();
+    // Регрессия на живую жалобу в чате: короткий id семьи легко перебираем —
+    // код приглашения не должен совпадать с id (тут он "1") и должен быть
+    // достаточно длинным, чтобы перебор был непрактичен.
+    expect(inviteCode).not.toBe(String(createBody.status.familyId));
+    expect(inviteCode.length).toBeGreaterThan(6);
 
-    const joinRes = await post("/api/family/join", { initData: validInitData(2), familyId });
+    const joinRes = await post("/api/family/join", { initData: validInitData(2), inviteCode });
     expect(joinRes.status).toBe(200);
     const joinBody = await joinRes.json();
     expect(joinBody.status.members.map((m) => m.telegramUserId).sort()).toEqual([1, 2]);
   });
 
-  it("join с несуществующим familyId -> 400", async () => {
-    const res = await post("/api/family/join", { initData: validInitData(2), familyId: 999999 });
+  it("join с несуществующим inviteCode -> 400", async () => {
+    const res = await post("/api/family/join", { initData: validInitData(2), inviteCode: "не-существует-такого-кода" });
     expect(res.status).toBe(400);
   });
 
-  it("join без familyId -> 400", async () => {
+  it("join без inviteCode -> 400", async () => {
     const res = await post("/api/family/join", { initData: validInitData(2) });
     expect(res.status).toBe(400);
   });
 
   it("leave владельцем распускает семью — второй участник тоже выходит", async () => {
     setUserPro(db, 1, true);
-    const familyId = (await (await post("/api/family/create", { initData: validInitData(1) })).json()).status.familyId;
-    await post("/api/family/join", { initData: validInitData(2), familyId });
+    const inviteCode = (await (await post("/api/family/create", { initData: validInitData(1) })).json()).status.inviteCode;
+    await post("/api/family/join", { initData: validInitData(2), inviteCode });
 
     const leaveRes = await post("/api/family/leave", { initData: validInitData(1) });
     expect(leaveRes.status).toBe(200);
@@ -528,8 +534,8 @@ describe("POST /api/family/*", () => {
 
   it("pantry: отметка одним участником видна в статусе другого", async () => {
     setUserPro(db, 1, true);
-    const familyId = (await (await post("/api/family/create", { initData: validInitData(1) })).json()).status.familyId;
-    await post("/api/family/join", { initData: validInitData(2), familyId });
+    const inviteCode = (await (await post("/api/family/create", { initData: validInitData(1) })).json()).status.inviteCode;
+    await post("/api/family/join", { initData: validInitData(2), inviteCode });
 
     const toggleRes = await post("/api/family/pantry", { initData: validInitData(1), name: "Мука", present: true });
     expect(toggleRes.status).toBe(200);

@@ -211,15 +211,18 @@ export default function MealPlanner() {
     fetchFamilyStatus().then((r) => { if (r?.ok) setFamilyStatus(r.status); });
   }, [showAccount]);
 
-  // "Общий список на семью" — вступление по ссылке t.me/s_edim_bot?startapp=fam_<id>
-  // (см. AccountView: FamilySection, "Пригласить"), та же startapp-схема,
-  // что уже работает у рефералов (см. эффект claimReferral ниже). Best-effort,
-  // один раз при монтировании — сервер сам решает, принять ли (лимит
-  // участников, уже состоит в другой семье и т.п., см. server/src/family.js).
+  // "Общий список на семью" — вступление по ссылке
+  // t.me/s_edim_bot?startapp=fam_<inviteCode> (см. AccountView: FamilySection,
+  // "Пригласить"), та же startapp-схема, что уже работает у рефералов (см.
+  // эффект claimReferral ниже). Код приглашения, не id семьи — живая жалоба
+  // в чате: короткий id легко перебираем (см. genInviteCode в
+  // server/src/db.js). Best-effort, один раз при монтировании — сервер сам
+  // решает, принять ли (лимит участников, уже состоит в другой семье и т.п.,
+  // см. server/src/family.js).
   useEffect(() => {
     const startParam = window.Telegram?.WebApp?.initDataUnsafe?.start_param;
-    const match = /^fam_(\d+)$/.exec(startParam || "");
-    if (match) joinFamily(Number(match[1])).then((r) => { if (r?.ok) setFamilyStatus(r.status); });
+    const match = /^fam_([A-Za-z0-9_-]+)$/.exec(startParam || "");
+    if (match) joinFamily(match[1]).then((r) => { if (r?.ok) setFamilyStatus(r.status); });
   }, []);
 
   const handleCreateFamily = async () => {
@@ -1371,6 +1374,15 @@ function AccountView({
           первой настройки — посмотреть, что уже собирали, поэтому теперь
           это первое, что видно, без прокрутки. */}
       <PlanHistorySection planHistory={planHistory} />
+      {/* Жалоба в чате: "История планов близко к самому плану находится" —
+          дальше сразу шли настройки без какой-либо визуальной паузы. Тот же
+          разделитель, что уже стоит между "Профиль для плана" и карточками
+          ниже (styles.acctDivider) — история чётко отделена как отдельный,
+          самостоятельный блок, а не хвост настроек профиля. planHistory===null
+          (нечем спросить/бэкенд недоступен) — тот же случай, когда сам
+          PlanHistorySection ничего не рендерит (см. её же условие ниже),
+          разделитель тогда тоже лишний — висел бы прямо под заголовком. */}
+      {planHistory !== null && <div style={styles.acctDivider} />}
 
       <div style={styles.acctSection}>
         <div style={styles.acctLabel}>Как к вам обращаться</div>
@@ -1814,7 +1826,10 @@ function FamilySection({ familyStatus, isPro, actionState, onCreate, onLeave }) 
     );
   }
 
-  const inviteLink = `${BOT_SHARE_URL}?startapp=fam_${familyStatus.familyId}`;
+  // inviteCode, не familyId — живая жалоба в чате: id семьи маленький и
+  // предсказуемый (AUTOINCREMENT), можно перебрать и напроситься в чужую
+  // семью. inviteCode — случайный (см. genInviteCode в server/src/db.js).
+  const inviteLink = `${BOT_SHARE_URL}?startapp=fam_${familyStatus.inviteCode}`;
   const shareText = "Присоединяйся к нашей семье в «Съедим» — увидим один и тот же список покупок, отметил кто-то одно — увидят все.";
   return (
     <div style={styles.acctSection}>
@@ -2866,7 +2881,12 @@ const styles = {
   // интервалами в карточке (18-22px), а не выбивается мелким зазором.
   quickHint: { fontSize: 12, color: "var(--text-tertiary)", textAlign: "center", marginTop: 24, paddingTop: 4, lineHeight: 1.4 },
   inlineLinkBtn: { background: "none", border: "none", padding: 0, color: ACCENT, fontWeight: 600, fontSize: 12, cursor: "pointer", textDecoration: "underline" },
-  accountHeaderRow: { display: "flex", alignItems: "center", marginBottom: 2 },
+  // Живая жалоба в чате: "надпись Аккаунт близко к кнопке" — marginBottom
+  // был всего 2px, заголовок практически прилипал к пилюле "Назад" сразу
+  // над ним. 14 — тот же отступ, что у resultHeader (шапка ResultView),
+  // единообразно с остальными местами, где заголовок идёт после отдельного
+  // управляющего элемента.
+  accountHeaderRow: { display: "flex", alignItems: "center", marginBottom: 14 },
   acctSection: { marginTop: 18 },
   acctSectionTitle: { fontSize: 15, fontWeight: 700, marginBottom: 4 },
   acctSectionHint: { fontSize: 12.5, color: "var(--text-tertiary)", lineHeight: 1.45, margin: "0 0 12px 0" },
@@ -3019,8 +3039,11 @@ const styles = {
   // что у navBtn (display/alignItems/gap/lineHeight), но плотнее по padding:
   // navBtn рассчитан на пару с navBtnPrimary в одном ряду, эта кнопка стоит
   // одна, без пары, и с тем же padding выглядела непропорционально широкой.
+  // Живая жалоба в чате: "чеврон далеко от слова 'Назад'" — было gap:4,
+  // визуально терялось на реальном экране; gap:6 — тот же зазор, что и у
+  // остальных пар иконка+текст в этом файле (retryPricesBtn, storeChip и т.п.).
   acctBackBtn: {
-    display: "flex", alignItems: "center", gap: 4, lineHeight: 1, ...glass(0.4, 8), border: "1px solid var(--hairline)",
+    display: "flex", alignItems: "center", gap: 6, lineHeight: 1, ...glass(0.4, 8), border: "1px solid var(--hairline)",
     color: "var(--text-secondary)", fontSize: 13.5, fontWeight: 500, cursor: "pointer", padding: "8px 13px", borderRadius: 999,
   },
   resultHeader: { marginBottom: 14 },

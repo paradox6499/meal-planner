@@ -3,11 +3,13 @@
 // синхронизации между устройствами). Семья тут не про родство, а про группу
 // Telegram-аккаунтов, которые видят один и тот же "уже есть дома" (см.
 // db.js: family_pantry, src/lib/pantry.js на фронтенде за тем же смыслом
-// без семьи). Приглашение — та же схема, что уже работает у рефералов
-// (referrals.js): ссылка t.me/s_edim_bot?startapp=fam_<id>, id семьи и есть
-// код приглашения, отдельный код не заводим.
+// без семьи). Приглашение — ссылка t.me/s_edim_bot?startapp=fam_<invite_code>
+// — случайный код (db.js: genInviteCode/families.invite_code), НЕ id семьи:
+// сам нашёл до жалобы в чате, пока строил — id это маленькое предсказуемое
+// AUTOINCREMENT-число, подставить соседнее и напроситься в чужую семью было
+// бы совсем не сложно.
 import {
-  createFamily as dbCreateFamily, getFamilyById, getFamilyForUser, getFamilyMembers, countFamilyMembers,
+  createFamily as dbCreateFamily, getFamilyByInviteCode, getFamilyForUser, getFamilyMembers, countFamilyMembers,
   addFamilyMember, removeFamilyMember, dissolveFamily, getFamilyPantry, setFamilyPantryItem,
 } from "./db.js";
 
@@ -28,20 +30,22 @@ export function createFamily(db, { ownerTelegramId, ownerDisplayName, nowISO }) 
   return { ok: true, familyId };
 }
 
-/** referredTelegramId уже переиспользуется в других файлах как имя для "тот,
- * кто сейчас выполняет действие" — здесь называю его joiningTelegramId для
- * ясности, семантика та же. */
-export function joinFamily(db, { familyId, joiningTelegramId, displayName, nowISO }) {
-  const family = getFamilyById(db, familyId);
+/** inviteCode — из ссылки t.me/s_edim_bot?startapp=fam_<invite_code> (см.
+ * шапку файла за тем, почему это код, а не id семьи). referredTelegramId
+ * уже переиспользуется в других файлах как имя для "тот, кто сейчас
+ * выполняет действие" — здесь называю его joiningTelegramId для ясности,
+ * семантика та же. */
+export function joinFamily(db, { inviteCode, joiningTelegramId, displayName, nowISO }) {
+  const family = getFamilyByInviteCode(db, inviteCode);
   if (!family) return { ok: false, reason: "приглашение недействительно — семья не найдена" };
   if (getFamilyForUser(db, joiningTelegramId)) {
     return { ok: false, reason: "вы уже состоите в семье — сначала покиньте текущую" };
   }
-  if (countFamilyMembers(db, familyId) >= MAX_FAMILY_MEMBERS) {
+  if (countFamilyMembers(db, family.id) >= MAX_FAMILY_MEMBERS) {
     return { ok: false, reason: `в семье уже максимум участников (${MAX_FAMILY_MEMBERS})` };
   }
-  addFamilyMember(db, { familyId, telegramUserId: joiningTelegramId, displayName, nowISO });
-  return { ok: true, familyId };
+  addFamilyMember(db, { familyId: family.id, telegramUserId: joiningTelegramId, displayName, nowISO });
+  return { ok: true, familyId: family.id };
 }
 
 /** Владелец покидает — семья распускается целиком (см. dissolveFamily в
@@ -66,6 +70,12 @@ export function getFamilyStatus(db, telegramUserId) {
   return {
     inFamily: true,
     familyId: family.id,
+    // inviteCode — фронтенд строит ссылку t.me/s_edim_bot?startapp=fam_<inviteCode>
+    // (см. AccountView: FamilySection, кнопка "Пригласить ещё" — только у
+    // владельца). Отдаём его любому участнику, не только владельцу — сама
+    // ссылка не секретна для УЖЕ состоящих в семье, секретность держится на
+    // непредсказуемости кода, а не на том, кто его видит внутри семьи.
+    inviteCode: family.invite_code,
     isOwner: family.owner_telegram_id === telegramUserId,
     members: getFamilyMembers(db, family.id).map((m) => ({ telegramUserId: m.telegram_user_id, displayName: m.display_name, joinedAt: m.joined_at })),
     pantryNames: getFamilyPantry(db, family.id),

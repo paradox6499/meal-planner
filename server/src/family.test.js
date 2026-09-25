@@ -3,6 +3,10 @@ import { openDb, getFamilyForUser } from "./db.js";
 import { createFamily, joinFamily, leaveFamily, getFamilyStatus, toggleFamilyPantryItem, MAX_FAMILY_MEMBERS } from "./family.js";
 
 const NOW_ISO = "2026-09-10T09:00:00.000Z";
+// joinFamily теперь ищет по коду приглашения, не по id семьи (живая жалоба
+// в чате: короткий id легко перебираемый) — этот хелпер достаёт код так же,
+// как это делал бы реальный фронтенд (через getFamilyStatus владельца).
+const inviteCodeOf = (db, ownerTelegramId) => getFamilyStatus(db, ownerTelegramId).inviteCode;
 
 describe("createFamily", () => {
   let db;
@@ -28,14 +32,15 @@ describe("createFamily", () => {
 });
 
 describe("joinFamily", () => {
-  let db, familyId;
+  let db, inviteCode;
   beforeEach(() => {
     db = openDb(":memory:");
-    familyId = createFamily(db, { ownerTelegramId: 1, ownerDisplayName: "Владелец", nowISO: NOW_ISO }).familyId;
+    createFamily(db, { ownerTelegramId: 1, ownerDisplayName: "Владелец", nowISO: NOW_ISO });
+    inviteCode = inviteCodeOf(db, 1);
   });
 
   it("добавляет нового участника", () => {
-    const result = joinFamily(db, { familyId, joiningTelegramId: 2, displayName: "Друг", nowISO: NOW_ISO });
+    const result = joinFamily(db, { inviteCode, joiningTelegramId: 2, displayName: "Друг", nowISO: NOW_ISO });
     expect(result.ok).toBe(true);
     const status = getFamilyStatus(db, 2);
     expect(status.inFamily).toBe(true);
@@ -43,36 +48,42 @@ describe("joinFamily", () => {
     expect(status.members.map((m) => m.telegramUserId).sort()).toEqual([1, 2]);
   });
 
-  it("недействительный id семьи -> явный отказ, не падает", () => {
-    const result = joinFamily(db, { familyId: 999999, joiningTelegramId: 2, displayName: null, nowISO: NOW_ISO });
+  it("недействительный код приглашения -> явный отказ, не падает", () => {
+    const result = joinFamily(db, { inviteCode: "не-существует-такого-кода", joiningTelegramId: 2, displayName: null, nowISO: NOW_ISO });
     expect(result.ok).toBe(false);
   });
 
-  it("уже состоит в какой-то семье (в том числе в этой же) -> отказ", () => {
-    joinFamily(db, { familyId, joiningTelegramId: 2, displayName: null, nowISO: NOW_ISO });
-    expect(joinFamily(db, { familyId, joiningTelegramId: 2, displayName: null, nowISO: NOW_ISO }).ok).toBe(false);
+  it("код действительно случайный, не совпадает с id семьи (регрессия на живую жалобу — id легко перебираемый)", () => {
+    expect(inviteCode).not.toBe("1");
+    expect(inviteCode.length).toBeGreaterThan(6);
+  });
 
-    const otherFamilyId = createFamily(db, { ownerTelegramId: 3, ownerDisplayName: null, nowISO: NOW_ISO }).familyId;
-    expect(joinFamily(db, { familyId: otherFamilyId, joiningTelegramId: 2, displayName: null, nowISO: NOW_ISO }).ok).toBe(false);
+  it("уже состоит в какой-то семье (в том числе в этой же) -> отказ", () => {
+    joinFamily(db, { inviteCode, joiningTelegramId: 2, displayName: null, nowISO: NOW_ISO });
+    expect(joinFamily(db, { inviteCode, joiningTelegramId: 2, displayName: null, nowISO: NOW_ISO }).ok).toBe(false);
+
+    createFamily(db, { ownerTelegramId: 3, ownerDisplayName: null, nowISO: NOW_ISO });
+    const otherInviteCode = inviteCodeOf(db, 3);
+    expect(joinFamily(db, { inviteCode: otherInviteCode, joiningTelegramId: 2, displayName: null, nowISO: NOW_ISO }).ok).toBe(false);
   });
 
   it(`лимит участников (${MAX_FAMILY_MEMBERS}) — дальше отказ`, () => {
     for (let i = 2; i < 2 + MAX_FAMILY_MEMBERS - 1; i++) {
-      expect(joinFamily(db, { familyId, joiningTelegramId: i, displayName: null, nowISO: NOW_ISO }).ok).toBe(true);
+      expect(joinFamily(db, { inviteCode, joiningTelegramId: i, displayName: null, nowISO: NOW_ISO }).ok).toBe(true);
     }
     // сейчас ровно MAX_FAMILY_MEMBERS участников (владелец + остальные)
     const overflowId = 2 + MAX_FAMILY_MEMBERS - 1 + 100;
-    const result = joinFamily(db, { familyId, joiningTelegramId: overflowId, displayName: null, nowISO: NOW_ISO });
+    const result = joinFamily(db, { inviteCode, joiningTelegramId: overflowId, displayName: null, nowISO: NOW_ISO });
     expect(result.ok).toBe(false);
   });
 });
 
 describe("leaveFamily", () => {
-  let db, familyId;
+  let db;
   beforeEach(() => {
     db = openDb(":memory:");
-    familyId = createFamily(db, { ownerTelegramId: 1, ownerDisplayName: null, nowISO: NOW_ISO }).familyId;
-    joinFamily(db, { familyId, joiningTelegramId: 2, displayName: null, nowISO: NOW_ISO });
+    createFamily(db, { ownerTelegramId: 1, ownerDisplayName: null, nowISO: NOW_ISO });
+    joinFamily(db, { inviteCode: inviteCodeOf(db, 1), joiningTelegramId: 2, displayName: null, nowISO: NOW_ISO });
   });
 
   it("обычный участник выходит — семья остаётся с остальными", () => {
@@ -110,11 +121,11 @@ describe("getFamilyStatus", () => {
 // член семьи — увидят все". family_pantry — тот же смысл, что и локальный
 // pantry.js на фронтенде (src/lib/pantry.js), но общий на всю семью.
 describe("toggleFamilyPantryItem", () => {
-  let db, familyId;
+  let db;
   beforeEach(() => {
     db = openDb(":memory:");
-    familyId = createFamily(db, { ownerTelegramId: 1, ownerDisplayName: null, nowISO: NOW_ISO }).familyId;
-    joinFamily(db, { familyId, joiningTelegramId: 2, displayName: null, nowISO: NOW_ISO });
+    createFamily(db, { ownerTelegramId: 1, ownerDisplayName: null, nowISO: NOW_ISO });
+    joinFamily(db, { inviteCode: inviteCodeOf(db, 1), joiningTelegramId: 2, displayName: null, nowISO: NOW_ISO });
   });
 
   it("отмечает товар — виден в статусе ЛЮБОГО участника семьи", () => {

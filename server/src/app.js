@@ -240,12 +240,16 @@ export function parseReferralClaimRequest(body) {
   return { ok: true, value: { referrerTelegramId } };
 }
 
+// Разумный потолок длины — genInviteCode в db.js генерирует 12 символов,
+// с запасом на случай смены длины кода в будущем; не пропускаем что попало.
+const MAX_FAMILY_INVITE_CODE_LENGTH = 64;
+
 export function parseFamilyJoinRequest(body) {
-  const { familyId } = body;
-  if (typeof familyId !== "number" || !Number.isFinite(familyId)) {
-    return { ok: false, error: "familyId отсутствует или некорректен" };
+  const { inviteCode } = body;
+  if (typeof inviteCode !== "string" || !inviteCode.trim() || inviteCode.length > MAX_FAMILY_INVITE_CODE_LENGTH) {
+    return { ok: false, error: "inviteCode отсутствует или некорректен" };
   }
-  return { ok: true, value: { familyId } };
+  return { ok: true, value: { inviteCode: inviteCode.trim() } };
 }
 
 const MAX_FAMILY_PANTRY_NAME_LENGTH = 200; // тот же порядок, что MAX_EVENT_NAME_LENGTH — с запасом под любое реальное название ингредиента
@@ -508,10 +512,11 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
       return;
     }
 
-    // Вступление по ссылке t.me/s_edim_bot?startapp=fam_<id> — та же схема,
-    // что уже работает у рефералов (см. /api/referral/claim выше): id семьи
-    // и есть код приглашения, вступление не требует Pro (Pro нужен только
-    // тому, кто СОЗДАЁТ семью — "один подписчик, вся семья пользуется").
+    // Вступление по ссылке t.me/s_edim_bot?startapp=fam_<invite_code> —
+    // случайный код (db.js: genInviteCode), не id семьи (см. комментарий у
+    // CREATE TABLE families в db.js — id был бы легко перебираемым). Вступление
+    // не требует Pro (Pro нужен только тому, кто СОЗДАЁТ семью — "один
+    // подписчик, вся семья пользуется").
     if (req.method === "POST" && req.url === "/api/family/join") {
       const auth = await readAuthenticatedBody(req, botToken);
       if (!auth.ok) return sendJson(res, auth.status, { ok: false, error: auth.error });
@@ -520,7 +525,7 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
       if (!parsed.ok) return sendJson(res, 400, { ok: false, error: parsed.error });
 
       try {
-        const result = joinFamily(db, { familyId: parsed.value.familyId, joiningTelegramId: auth.telegramUserId, displayName: auth.firstName, nowISO: new Date().toISOString() });
+        const result = joinFamily(db, { inviteCode: parsed.value.inviteCode, joiningTelegramId: auth.telegramUserId, displayName: auth.firstName, nowISO: new Date().toISOString() });
         if (!result.ok) return sendJson(res, 400, { ok: false, error: result.reason });
         sendJson(res, 200, { ok: true, status: getFamilyStatus(db, auth.telegramUserId) });
       } catch (err) {

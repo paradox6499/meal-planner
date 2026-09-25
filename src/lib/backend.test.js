@@ -499,15 +499,15 @@ describe("createFamily / joinFamily / leaveFamily / fetchFamilyStatus / toggleFa
     expect(await createFamily()).toEqual({ ok: false, error: "создание семьи доступно только на Pro" });
   });
 
-  it("joinFamily шлёт POST /api/family/join с initData и familyId", async () => {
+  it("joinFamily шлёт POST /api/family/join с initData и inviteCode", async () => {
     vi.stubEnv("VITE_BACKEND_URL", "https://api.example.com");
     stubTelegram("initdata-blob");
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ ok: true, status: { inFamily: true } }) });
     vi.stubGlobal("fetch", fetchMock);
-    await joinFamily(42);
+    await joinFamily("abc123XYZ_-");
     const [url, opts] = fetchMock.mock.calls[0];
     expect(url).toBe("https://api.example.com/api/family/join");
-    expect(JSON.parse(opts.body)).toEqual({ initData: "initdata-blob", familyId: 42 });
+    expect(JSON.parse(opts.body)).toEqual({ initData: "initdata-blob", inviteCode: "abc123XYZ_-" });
   });
 
   it("leaveFamily шлёт POST /api/family/leave", async () => {

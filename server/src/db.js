@@ -1,6 +1,18 @@
 // node:sqlite — встроен в Node (LTS 22.5+/24+), отдельная зависимость не
 // нужна ни на разработке, ни на хостинге.
 import { DatabaseSync } from "node:sqlite";
+import { randomBytes } from "node:crypto";
+
+// Код приглашения в семью (см. CREATE TABLE families ниже) — 12 символов
+// base64url (A-Za-z0-9-_), это ровно тот алфавит, что Telegram разрешает в
+// start_param (^[A-Za-z0-9_-]{1,64}$, см. официальную документацию Mini
+// Apps) — код можно класть прямо в ссылку без дополнительного кодирования.
+// 9 случайных байт ~ 72 бита энтропии, переборать на практике невозможно (в
+// отличие от прежнего варианта — AUTOINCREMENT id семьи, маленькое
+// предсказуемое число).
+function genInviteCode() {
+  return randomBytes(9).toString("base64url");
+}
 
 // ALTER TABLE ... ADD COLUMN IF NOT EXISTS не поддержан версией SQLite,
 // встроенной в node:sqlite (проверено вживую — синтаксическая ошибка) —
@@ -151,13 +163,18 @@ export function openDb(path) {
     CREATE INDEX IF NOT EXISTS idx_referrals_referrer ON referrals (referrer_telegram_id, rewarded_at);
 
     -- "Общий список на семью" (Pro-бонус) — семья тут просто группа Telegram-
-    -- аккаунтов, не обязательно родственники. Приглашение — тот же приём, что
-    -- уже работает для рефералов (see referrals.js): ссылка
-    -- t.me/s_edim_bot?startapp=fam_<id>, id семьи и есть код приглашения,
-    -- отдельного invite_code не заводим. family_members.telegram_user_id —
-    -- PRIMARY KEY, а не составной (family_id, telegram_user_id) — так
-    -- "один человек одновременно только в одной семье" гарантируется на
-    -- уровне схемы, а не проверкой в коде (нельзя случайно забыть).
+    -- аккаунтов, не обязательно родственники. Приглашение — та же ссылка-схема,
+    -- что уже работает для рефералов (см. referrals.js):
+    -- t.me/s_edim_bot?startapp=fam_<invite_code>. Живая жалоба в чате (сам
+    -- нашёл до неё, пока строил): id семьи — короткое AUTOINCREMENT-число,
+    -- предсказуемое и перебираемое — раньше именно оно шло в ссылку. invite_code
+    -- ниже — отдельное случайное значение специально под это (id остаётся
+    -- внутренним, в URL больше не участвует, см. ensureColumn/backfill ниже —
+    -- таблица создана раньше этой колонки, ALTER TABLE отдельно).
+    -- family_members.telegram_user_id — PRIMARY KEY, а не составной
+    -- (family_id, telegram_user_id) — так "один человек одновременно только в
+    -- одной семье" гарантируется на уровне схемы, а не проверкой в коде
+    -- (нельзя случайно забыть).
     CREATE TABLE IF NOT EXISTS families (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       owner_telegram_id INTEGER NOT NULL,
@@ -221,6 +238,21 @@ export function openDb(path) {
   // "шт" без веса, а он не совпадает с граммами/мл в рецепте почти никогда.
   ensureColumn(db, "ingredient_prices", "package_amount", "REAL");
   ensureColumn(db, "ingredient_prices", "package_unit", "TEXT");
+
+  // invite_code — см. комментарий у CREATE TABLE families выше. Добавлен уже
+  // ПОСЛЕ первого деплоя "Общего списка на семью" (тот же паттерн ensureColumn,
+  // что и выше в этом файле) — на проде к этому моменту families уже могла
+  // существовать без этой колонки. Бэкфилл + уникальный индекс СОЗДАЮТСЯ
+  // здесь же: ALTER TABLE ADD COLUMN не может добавить UNIQUE сам по себе,
+  // а частично заполненная таблица (старые строки с NULL) не должна ломать
+  // сам факт создания индекса — SQLite разрешает сколько угодно NULL в
+  // UNIQUE-индексе, это не нарушение уникальности.
+  ensureColumn(db, "families", "invite_code", "TEXT");
+  const rowsWithoutCode = db.prepare("SELECT id FROM families WHERE invite_code IS NULL").all();
+  for (const row of rowsWithoutCode) {
+    db.prepare("UPDATE families SET invite_code = ? WHERE id = ?").run(genInviteCode(), row.id);
+  }
+  db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_families_invite_code ON families (invite_code)");
 
   return db;
 }
@@ -541,7 +573,8 @@ export function countRewardedReferrals(db, referrerTelegramId) {
 // семье") живут в server/src/family.js, эти функции — только чтение/запись.
 
 export function createFamily(db, { ownerTelegramId, ownerDisplayName, nowISO }) {
-  const { lastInsertRowid } = db.prepare("INSERT INTO families (owner_telegram_id, created_at) VALUES (?, ?)").run(ownerTelegramId, nowISO);
+  const inviteCode = genInviteCode();
+  const { lastInsertRowid } = db.prepare("INSERT INTO families (owner_telegram_id, created_at, invite_code) VALUES (?, ?, ?)").run(ownerTelegramId, nowISO, inviteCode);
   db.prepare("INSERT INTO family_members (telegram_user_id, family_id, display_name, joined_at) VALUES (?, ?, ?, ?)").run(
     ownerTelegramId, lastInsertRowid, ownerDisplayName ?? null, nowISO
   );
@@ -549,7 +582,14 @@ export function createFamily(db, { ownerTelegramId, ownerDisplayName, nowISO }) 
 }
 
 export function getFamilyById(db, familyId) {
-  return db.prepare("SELECT id, owner_telegram_id, created_at FROM families WHERE id = ?").get(familyId) ?? null;
+  return db.prepare("SELECT id, owner_telegram_id, created_at, invite_code FROM families WHERE id = ?").get(familyId) ?? null;
+}
+
+/** Вступление по ссылке (см. family.js: joinFamily) ищет семью ПО КОДУ, не по
+ * id — см. комментарий у CREATE TABLE families/genInviteCode выше за тем,
+ * почему id больше не годится для этого. */
+export function getFamilyByInviteCode(db, inviteCode) {
+  return db.prepare("SELECT id, owner_telegram_id, created_at, invite_code FROM families WHERE invite_code = ?").get(inviteCode) ?? null;
 }
 
 /** Семья текущего пользователя, если он в какой-то состоит — telegram_user_id

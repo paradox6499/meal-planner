@@ -428,9 +428,11 @@ export async function createFamily() {
   }
 }
 
-/** familyId — из ссылки t.me/s_edim_bot?startapp=fam_<id> (см. App.jsx —
- * тот же startapp-механизм, что уже работает у claimReferral выше). */
-export async function joinFamily(familyId) {
+/** inviteCode — из ссылки t.me/s_edim_bot?startapp=fam_<inviteCode> (см.
+ * App.jsx — тот же startapp-механизм, что уже работает у claimReferral
+ * выше). Код, не id семьи — живая жалоба в чате: короткий id легко
+ * перебираемый (см. комментарий у genInviteCode в server/src/db.js). */
+export async function joinFamily(inviteCode) {
   const backendUrl = getBackendUrl();
   const initData = currentInitData();
   if (!backendUrl || !initData) return null;
@@ -439,7 +441,7 @@ export async function joinFamily(familyId) {
     const res = await fetch(`${backendUrl}/api/family/join`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ initData, familyId }),
+      body: JSON.stringify({ initData, inviteCode }),
     });
     return await res.json();
   } catch (err) {
