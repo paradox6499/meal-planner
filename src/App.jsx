@@ -1221,6 +1221,12 @@ function SkeletonView() {
 function LastPlanGateView({ latest, onOpenPro }) {
   const [openRecipe, setOpenRecipe] = useState(null);
   const dateLabel = new Date(latest.createdAt).toLocaleDateString("ru-RU", { day: "numeric", month: "long" });
+  // Живая жалоба в чате: "не могу провалиться в план, увидеть КБЖУ,
+  // ингредиенты" — планы, собранные ДО того, как история стала хранить
+  // полный рецепт (см. handleFinish), физически не несут dm.ingr — блюдо
+  // остаётся простым текстом ниже, без объяснения почему. Раньше это просто
+  // выглядело как "ничего не происходит по клику", теперь — явная подсказка.
+  const anyMissingRecipe = latest.plan?.days?.some((d) => d.dayMeals.some((dm) => !dm.ingr));
   return (
     <div style={styles.stepBody} className="fade-in-up mp-step-body">
       <StepShell icon={<Sparkles size={20} color={ACCENT} />} title="Ваш план на эту неделю" sub={`Собран ${dateLabel} · ${latest.storeName}`}>
@@ -1257,6 +1263,11 @@ function LastPlanGateView({ latest, onOpenPro }) {
         <p style={{ ...styles.acctSectionHint, marginTop: 14 }}>
           {latest.totalCost != null ? `${latest.totalCost.toLocaleString("ru-RU")} ₽` : "без цены"} из {latest.budget.toLocaleString("ru-RU")} ₽ · на {latest.family} {latest.family === 1 ? "человека" : "человек"}
         </p>
+        {anyMissingRecipe && (
+          <p style={{ ...styles.acctSectionHint, marginTop: 0, color: "var(--warning-text)" }}>
+            Блюда без подчёркивания — рецепт для них не сохранён (план собран до обновления). У новых планов рецепт открывается по клику на каждое блюдо.
+          </p>
+        )}
         <p style={{ ...styles.acctSectionHint, marginTop: 0 }}>
           Новый план по бесплатному тарифу будет доступен позже — с Pro можно пересобирать без ограничений.
         </p>
@@ -2024,6 +2035,11 @@ function PlanHistorySection({ planHistory }) {
                         </span>
                       </div>
                     ))}
+                    {p.plan?.days?.some((d) => d.dayMeals.some((dm) => !dm.ingr)) && (
+                      <p style={{ ...styles.chipHint, color: "var(--warning-text)", margin: "4px 0 0" }}>
+                        Блюда без подчёркивания — рецепт для них не сохранён (план собран до обновления)
+                      </p>
+                    )}
                   </div>
                 )}
               </div>
