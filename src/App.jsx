@@ -6,7 +6,7 @@ import { fetchVkusvillPools, getSubstituteOptions, attachRealCosts } from "./lib
 import { loadProfile, saveProfile, clearProfile, loadTheme, saveTheme } from "./lib/profile.js";
 import { loadActivePlanSlots, saveActivePlanSlot, setActiveSlotId, removeActivePlanSlot, clearAllActivePlans, genSlotId, MAX_PRO_SLOTS } from "./lib/activePlan.js";
 import { buildPools, buildInitialPlan, buildPlanView, interleaveGroups, computeBudgetStreak, computeRecentSavings } from "./lib/planLogic.js";
-import { submitPlanToBackend, checkPlanStatus, savePlanToHistory, fetchPlanHistory, updateMealTimes, createProPayment, claimReferral, fetchReferralStatus, getBackendUrl, sendSupportPrompt } from "./lib/backend.js";
+import { submitPlanToBackend, checkPlanStatus, savePlanToHistory, fetchPlanHistory, updateMealTimes, createProPayment, claimReferral, fetchReferralStatus, getBackendUrl, sendSupportPrompt, createFamily, joinFamily, leaveFamily, fetchFamilyStatus, toggleFamilyPantryItem } from "./lib/backend.js";
 import { loadPantryStaples, savePantryStaples } from "./lib/pantry.js";
 import { loadPayerEmail, savePayerEmail } from "./lib/payerContact.js";
 import { trackEvent } from "./lib/analytics.js";
@@ -192,15 +192,70 @@ export default function MealPlanner() {
   const [planStatus, setPlanStatus] = useState(null);
   const [planHistory, setPlanHistory] = useState(null);
   const [referralStatus, setReferralStatus] = useState(null);
+  // familyStatus — null (ещё не спрашивали/нечем спросить) | {inFamily:false}
+  // | {inFamily:true, isOwner, familyId, members, pantryNames}. Нужен на
+  // мониторинге сразу, не только при открытии Аккаунта — ResultView
+  // подмешивает pantryNames в локальный "уже есть дома" (см. ниже), это
+  // должно случиться независимо от того, открывал ли человек Аккаунт в этой
+  // сессии вообще.
+  const [familyStatus, setFamilyStatus] = useState(null);
   useEffect(() => {
     checkPlanStatus().then(setPlanStatus);
+    fetchFamilyStatus().then((r) => { if (r?.ok) setFamilyStatus(r.status); });
   }, []);
   useEffect(() => {
     if (!showAccount) return;
     checkPlanStatus().then(setPlanStatus);
     fetchPlanHistory().then(setPlanHistory);
     fetchReferralStatus().then(setReferralStatus);
+    fetchFamilyStatus().then((r) => { if (r?.ok) setFamilyStatus(r.status); });
   }, [showAccount]);
+
+  // "Общий список на семью" — вступление по ссылке t.me/s_edim_bot?startapp=fam_<id>
+  // (см. AccountView: FamilySection, "Пригласить"), та же startapp-схема,
+  // что уже работает у рефералов (см. эффект claimReferral ниже). Best-effort,
+  // один раз при монтировании — сервер сам решает, принять ли (лимит
+  // участников, уже состоит в другой семье и т.п., см. server/src/family.js).
+  useEffect(() => {
+    const startParam = window.Telegram?.WebApp?.initDataUnsafe?.start_param;
+    const match = /^fam_(\d+)$/.exec(startParam || "");
+    if (match) joinFamily(Number(match[1])).then((r) => { if (r?.ok) setFamilyStatus(r.status); });
+  }, []);
+
+  const handleCreateFamily = async () => {
+    hapticImpact("light");
+    setFamilyActionState({ status: "loading" });
+    const result = await createFamily();
+    if (result?.ok) {
+      setFamilyStatus(result.status);
+      setFamilyActionState({ status: "idle" });
+      trackEvent("family_created");
+    } else {
+      setFamilyActionState({ status: "error", message: result?.error || "Не удалось создать семью" });
+    }
+  };
+  const handleLeaveFamily = async () => {
+    hapticImpact("light");
+    setFamilyActionState({ status: "loading" });
+    const result = await leaveFamily();
+    if (result?.ok) {
+      setFamilyStatus({ inFamily: false });
+      setFamilyActionState({ status: "idle" });
+      trackEvent("family_left");
+    } else {
+      setFamilyActionState({ status: "error", message: result?.error || "Не удалось покинуть семью" });
+    }
+  };
+  const [familyActionState, setFamilyActionState] = useState({ status: "idle" }); // idle | loading | error
+
+  // "Отметил купленное один член семьи — увидят все" — пуш серверу best-effort
+  // при каждом клике по "уже есть дома" в ResultView (см. проп onToggleFamilyPantry
+  // ниже), сервер отвечает актуальным полным набором сразу же — не нужно
+  // отдельно перезапрашивать весь статус семьи ради одного изменения.
+  const handleToggleFamilyPantry = async (name, present) => {
+    const result = await toggleFamilyPantryItem(name, present);
+    if (result?.ok) setFamilyStatus((prev) => (prev?.inFamily ? { ...prev, pantryNames: result.pantryNames } : prev));
+  };
 
   // Блокировка "бесплатный лимит исчерпан" — раньше узнавали об этом только
   // после ответа бэкенда на попытку "Собрать список" (см. handleFinish),
@@ -860,6 +915,10 @@ export default function MealPlanner() {
             planStatus={planStatus}
             planHistory={planHistory}
             referralStatus={referralStatus}
+            familyStatus={familyStatus}
+            familyActionState={familyActionState}
+            onCreateFamily={handleCreateFamily}
+            onLeaveFamily={handleLeaveFamily}
           />
         )}
 
@@ -1102,6 +1161,8 @@ export default function MealPlanner() {
             onRetryPrices={handleRetryPrices}
             retryingPrices={retryingPrices}
             priceRetryFailed={priceRetryFailed}
+            familyPantryNames={familyStatus?.inFamily ? familyStatus.pantryNames : null}
+            onToggleFamilyPantry={familyStatus?.inFamily ? handleToggleFamilyPantry : null}
           />
         )}
       </div>
@@ -1226,6 +1287,7 @@ function AccountView({
   toggleSimple, toggleCuisine, hasProfile, onSave, onClear, onClose, onOpenPro,
   homeScreenStatus, onAddToHomeScreen,
   planStatus, planHistory, referralStatus,
+  familyStatus, familyActionState, onCreateFamily, onLeaveFamily,
 }) {
   const [saved, setSaved] = useState(false);
   const handleSave = () => {
@@ -1599,6 +1661,13 @@ function AccountView({
       <div style={styles.acctDivider} />
       <ProgressSection planHistory={planHistory} />
       <AccountSubscriptionCard onOpenPro={onOpenPro} planStatus={planStatus} />
+      <FamilySection
+        familyStatus={familyStatus}
+        isPro={!!planStatus?.isPro}
+        actionState={familyActionState}
+        onCreate={onCreateFamily}
+        onLeave={onLeaveFamily}
+      />
       <ReferralSection referralStatus={referralStatus} />
     </div>
   );
@@ -1639,8 +1708,14 @@ const SUBSCRIPTION_BENEFITS = [
   },
   {
     title: "Общий список на семью",
-    short: "Все видят один и тот же план и список покупок в реальном времени",
-    detail: "Отметил купленное один член семьи — увидят все. Меньше дублирующихся покупок и созвонов «а ты купил...».",
+    short: "Отметил «уже есть дома» один — увидят все, до 6 человек",
+    // Живой вывод из ревью в чате: текст обещал общий ПЛАН и "реальное
+    // время" — по факту делится общим "уже есть дома" (см. AccountView:
+    // FamilySection, server/src/family.js), а обновление приходит при
+    // следующем открытии списка, не мгновенным пушем на чужой открытый
+    // экран (нет вебсокетов/пушей — сознательный компромисс сложности vs
+    // пользы, честно не обещаем то, чего нет).
+    detail: "Пригласите семью (Аккаунт → «Общий список на семью») — отметил кто-то товар как «уже есть дома», остальные увидят это при следующем открытии списка покупок. Меньше дублирующихся покупок.",
   },
 ];
 
@@ -1689,6 +1764,92 @@ function AccountSubscriptionCard({ onOpenPro, planStatus }) {
 // произошло, неизбежно живёт на фронтенде отдельной строкой от источника
 // истины на сервере — держите их в синхроне вручную, если поменяются).
 const REFERRAL_REWARD_DAYS_LABEL = 7;
+
+// Живой вывод из ревью Pro-плюшек (чат): "Общий список на семью"
+// рекламировался, а по факту не существовал вообще. Дублирует
+// MAX_FAMILY_MEMBERS из server/src/family.js — тот же принцип, что и у
+// REFERRAL_REWARD_DAYS_LABEL выше (цифра для текста на фронтенде неизбежно
+// живёт отдельной строкой от источника истины на сервере). Название секции
+// в Аккаунте — намеренно НЕ "Семья" (эта подпись уже занята счётчиком "на
+// скольких человек считать план" в "Профиль для плана" выше) — чтобы не
+// путать два разных смысла одного слова.
+const MAX_FAMILY_MEMBERS_LABEL = 6;
+
+function pluralPeople(n) {
+  const mod10 = n % 10, mod100 = n % 100;
+  if (mod10 === 1 && mod100 !== 11) return "участник";
+  if ([2, 3, 4].includes(mod10) && ![12, 13, 14].includes(mod100)) return "участника";
+  return "участников";
+}
+
+function FamilySection({ familyStatus, isPro, actionState, onCreate, onLeave }) {
+  // Вне Telegram (обычный браузер) initDataUnsafe.user не существует —
+  // ссылка вида "?startapp=fam_undefined" никуда не привела бы осмысленно,
+  // тот же принцип, что и у ReferralSection ниже.
+  const myTelegramId = window.Telegram?.WebApp?.initDataUnsafe?.user?.id;
+  if (!myTelegramId || familyStatus === null) return null; // ещё не спрашивали/бэкенд недоступен — честнее не показывать, чем нерабочую заглушку
+
+  if (!familyStatus.inFamily) {
+    if (!isPro) return null; // сам бонус уже описан в карточке подписки/ProModal — не дублируем нерабочую кнопку для тех, кому ещё нечем ей воспользоваться
+    return (
+      <div style={styles.acctSection}>
+        <div style={styles.subCard}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+            <Users size={16} color={ACCENT} />
+            <span style={{ fontWeight: 700, fontSize: 15 }}>Общий список на семью</span>
+          </div>
+          <p style={styles.acctSectionHint}>
+            Пригласите до {MAX_FAMILY_MEMBERS_LABEL} человек — отметил кто-то из семьи "уже есть дома", увидят все остальные.
+          </p>
+          <button
+            onClick={onCreate}
+            disabled={actionState.status === "loading"}
+            style={{ ...styles.orderBtn, marginTop: 4, opacity: actionState.status === "loading" ? 0.6 : 1 }}
+          >
+            {actionState.status === "loading" ? "Создаём…" : "Создать семью"}
+          </button>
+          {actionState.status === "error" && <p style={styles.acctWarnHint}>{actionState.message}</p>}
+        </div>
+      </div>
+    );
+  }
+
+  const inviteLink = `${BOT_SHARE_URL}?startapp=fam_${familyStatus.familyId}`;
+  const shareText = "Присоединяйся к нашей семье в «Съедим» — увидим один и тот же список покупок, отметил кто-то одно — увидят все.";
+  return (
+    <div style={styles.acctSection}>
+      <div style={styles.subCard}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+          <Users size={16} color={ACCENT} />
+          <span style={{ fontWeight: 700, fontSize: 15 }}>Общий список на семью</span>
+        </div>
+        <p style={styles.acctSectionHint}>
+          {familyStatus.members.length} {pluralPeople(familyStatus.members.length)} — общий "уже есть дома" в списке покупок.
+        </p>
+        <div style={styles.stack}>
+          {familyStatus.members.map((m) => (
+            <div key={m.telegramUserId} style={styles.familyMemberRow}>
+              {m.displayName || `Участник ${m.telegramUserId}`}
+              {m.telegramUserId === myTelegramId ? " (вы)" : ""}
+            </div>
+          ))}
+        </div>
+        {familyStatus.isOwner && familyStatus.members.length < MAX_FAMILY_MEMBERS_LABEL && (
+          <button
+            onClick={() => { hapticImpact("light"); trackEvent("family_invite_shared"); shareViaTelegram(shareText, inviteLink); }}
+            style={{ ...styles.orderBtn, marginTop: 10, display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}
+          >
+            <Share2 size={15} /> Пригласить ещё
+          </button>
+        )}
+        <button onClick={onLeave} disabled={actionState.status === "loading"} style={styles.acctClearBtn}>
+          {actionState.status === "loading" ? "Выходим…" : familyStatus.isOwner ? "Распустить семью" : "Покинуть семью"}
+        </button>
+        {actionState.status === "error" && <p style={styles.acctWarnHint}>{actionState.message}</p>}
+      </div>
+    </div>
+  );
+}
 
 function ReferralSection({ referralStatus }) {
   // Вне Telegram (обычный браузер) initDataUnsafe.user не существует —
@@ -2018,7 +2179,7 @@ function PlanSlotsBar({ slots, activeId, onSwitch, onRemove, onAdd, canAdd }) {
   );
 }
 
-function ResultView({ plan, storeId, storeName, budget, family, mealsCount, diet, allergies, onSwap, onOpenRecipe, onRetryPrices, retryingPrices, priceRetryFailed }) {
+function ResultView({ plan, storeId, storeName, budget, family, mealsCount, diet, allergies, onSwap, onOpenRecipe, onRetryPrices, retryingPrices, priceRetryFailed, familyPantryNames, onToggleFamilyPantry }) {
   const [orderState, setOrderState] = useState({ status: "idle" }); // idle | loading | error
   // Отделы списка покупок сворачиваемые — по умолчанию все раскрыты (старое
   // поведение не меняется для короткого списка), но для семьи с 3+ приёмами
@@ -2085,14 +2246,40 @@ function ResultView({ plan, storeId, storeName, budget, family, mealsCount, diet
   useEffect(() => {
     savePantryStaples(pantryStaples);
   }, [pantryStaples]);
-  const toggleHaveAlready = (itemName) => {
-    hapticSelect();
+
+  // "Общий список на семью" — живой вывод из ревью в чате: раньше
+  // рекламировался, а по факту не было ни общего списка, ни синхронизации
+  // между аккаунтами вообще. familyPantryNames — общий набор с сервера (см.
+  // App.jsx: familyStatus.pantryNames), null — не состоит в семье, тогда
+  // ничего не подмешиваем, поведение как раньше. Сервер — источник истины
+  // для ОБЩИХ позиций: то, что отметил кто-то из семьи, подмешивается в
+  // локальный набор (не заменяет его целиком — свои личные "уже есть дома"
+  // до вступления в семью не должны пропасть).
+  useEffect(() => {
+    if (!familyPantryNames) return;
     setPantryStaples((prev) => {
       const next = new Set(prev);
-      if (next.has(itemName)) next.delete(itemName);
-      else next.add(itemName);
+      let changed = false;
+      for (const name of familyPantryNames) {
+        if (!next.has(name)) { next.add(name); changed = true; }
+      }
+      return changed ? next : prev;
+    });
+  }, [familyPantryNames]);
+
+  const toggleHaveAlready = (itemName) => {
+    hapticSelect();
+    const nowPresent = !pantryStaples.has(itemName);
+    setPantryStaples((prev) => {
+      const next = new Set(prev);
+      if (nowPresent) next.add(itemName);
+      else next.delete(itemName);
       return next;
     });
+    // Пуш в общий список семьи (best-effort, см. App.jsx:handleToggleFamilyPantry) —
+    // ТОЛЬКО когда реально состоим в семье (проп передаётся null иначе,
+    // см. App.jsx), локальное поведение вне семьи не меняется ни на йоту.
+    onToggleFamilyPantry?.(itemName, nowPresent);
   };
 
   // name -> исходная позиция списка покупок (amount/unit/cost) — нужна и
@@ -2726,6 +2913,11 @@ const styles = {
     color: active ? ACCENT : "var(--text-secondary)", fontSize: 11.5, fontWeight: 600,
   }),
   subCard: { border: "1px solid var(--hairline)", borderRadius: 20, padding: "16px 16px 18px", ...glass(0.5, 12) },
+  // Строка участника семьи (см. FamilySection) — простой список имён, не
+  // интерактивная (нет кнопок на строку — единственное управляющее действие
+  // тут "Покинуть семью" целиком, не по одному участнику), поэтому обычный
+  // текст того же веса, что и chipHint, а не rowChip-кнопка.
+  familyMemberRow: { fontSize: 13, color: "var(--text-secondary)", padding: "4px 0" },
   progressCardsRow: { display: "flex", gap: 10 },
   progressCard: { flex: 1, minWidth: 0, border: "1px solid var(--hairline)", borderRadius: 16, padding: "14px 12px", ...glass(0.45, 10) },
   progressCardValue: { fontSize: 20, fontWeight: 700, marginTop: 8, letterSpacing: "-0.01em" },

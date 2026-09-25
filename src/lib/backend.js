@@ -398,3 +398,111 @@ export async function fetchReferralStatus() {
     return null;
   }
 }
+
+// "Общий список на семью" (Pro-бонус, живой вывод из ревью в чате: раньше
+// рекламировался, а по факту не существовал) — 4 функции ниже зеркалят
+// server/src/family.js один в один, тот же принцип "бэкенд опционален", что
+// и у остального этого файла: без бэкенда/вне Telegram просто null/false, ни
+// одна не блокирует основной сценарий приложения.
+
+/** Полный ответ сервера как есть ({ok, status:{inFamily,...}} либо
+ * {ok:false, error}), а не только status — вызывающему коду (App.jsx) нужно
+ * различать "создать не вышло, потому что не Pro/уже в семье" (ok:false,
+ * error) от "создали успешно" (ok:true, status), а не только знать
+ * итоговый статус. */
+export async function createFamily() {
+  const backendUrl = getBackendUrl();
+  const initData = currentInitData();
+  if (!backendUrl || !initData) return null;
+
+  try {
+    const res = await fetch(`${backendUrl}/api/family/create`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ initData }),
+    });
+    return await res.json();
+  } catch (err) {
+    console.warn("Не удалось создать семью:", err.message);
+    return null;
+  }
+}
+
+/** familyId — из ссылки t.me/s_edim_bot?startapp=fam_<id> (см. App.jsx —
+ * тот же startapp-механизм, что уже работает у claimReferral выше). */
+export async function joinFamily(familyId) {
+  const backendUrl = getBackendUrl();
+  const initData = currentInitData();
+  if (!backendUrl || !initData) return null;
+
+  try {
+    const res = await fetch(`${backendUrl}/api/family/join`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ initData, familyId }),
+    });
+    return await res.json();
+  } catch (err) {
+    console.warn("Не удалось вступить в семью:", err.message);
+    return null;
+  }
+}
+
+export async function leaveFamily() {
+  const backendUrl = getBackendUrl();
+  const initData = currentInitData();
+  if (!backendUrl || !initData) return null;
+
+  try {
+    const res = await fetch(`${backendUrl}/api/family/leave`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ initData }),
+    });
+    return await res.json();
+  } catch (err) {
+    console.warn("Не удалось покинуть семью:", err.message);
+    return null;
+  }
+}
+
+export async function fetchFamilyStatus() {
+  const backendUrl = getBackendUrl();
+  const initData = currentInitData();
+  if (!backendUrl || !initData) return null;
+
+  try {
+    const res = await fetch(`${backendUrl}/api/family/status`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ initData }),
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (err) {
+    console.warn("Не удалось получить статус семьи:", err.message);
+    return null;
+  }
+}
+
+/** "Отметил купленное один член семьи — увидят все" — возвращает актуальный
+ * pantryNames сервера сразу же (не нужно отдельно перезапрашивать статус),
+ * null — нечем спросить, вызывающий код (App.jsx) тогда просто не трогает
+ * общий список, локальный pantry.js остаётся источником истины как обычно. */
+export async function toggleFamilyPantryItem(name, present) {
+  const backendUrl = getBackendUrl();
+  const initData = currentInitData();
+  if (!backendUrl || !initData) return null;
+
+  try {
+    const res = await fetch(`${backendUrl}/api/family/pantry`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ initData, name, present }),
+    });
+    return await res.json();
+  } catch (err) {
+    console.warn("Не удалось обновить общий список семьи:", err.message);
+    return null;
+  }
+}

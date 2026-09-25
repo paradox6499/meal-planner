@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { buildMealSlots, todayPlusDays, checkPlanStatus, savePlanToHistory, fetchPlanHistory, updateMealTimes, resolvePricesViaBackend, createProPayment, claimReferral, fetchReferralStatus, getBackendUrl, sendSupportPrompt } from "./backend.js";
+import { buildMealSlots, todayPlusDays, checkPlanStatus, savePlanToHistory, fetchPlanHistory, updateMealTimes, resolvePricesViaBackend, createProPayment, claimReferral, fetchReferralStatus, getBackendUrl, sendSupportPrompt, createFamily, joinFamily, leaveFamily, fetchFamilyStatus, toggleFamilyPantryItem } from "./backend.js";
 
 function stubTelegram(initData) {
   vi.stubGlobal("window", { Telegram: initData !== undefined ? { WebApp: { initData } } : undefined });
@@ -456,5 +456,88 @@ describe("fetchReferralStatus", () => {
 
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 500 }));
     expect(await fetchReferralStatus()).toBeNull();
+  });
+});
+
+// Живой вывод из ревью Pro-плюшек: "Общий список на семью" — 4 функции ниже
+// зеркалят server/src/family.js, тот же принцип "бэкенд опционален", что и у
+// остальных функций этого файла (claimReferral/fetchReferralStatus выше).
+describe("createFamily / joinFamily / leaveFamily / fetchFamilyStatus / toggleFamilyPantryItem", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+  });
+
+  it("null без бэкенда/вне Telegram — ни одна функция не запрашивает", async () => {
+    vi.stubEnv("VITE_BACKEND_URL", "");
+    stubTelegram("x");
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    expect(await createFamily()).toBeNull();
+    expect(await joinFamily(1)).toBeNull();
+    expect(await leaveFamily()).toBeNull();
+    expect(await fetchFamilyStatus()).toBeNull();
+    expect(await toggleFamilyPantryItem("Мука", true)).toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("createFamily шлёт POST /api/family/create с initData, возвращает ответ как есть", async () => {
+    vi.stubEnv("VITE_BACKEND_URL", "https://api.example.com");
+    stubTelegram("initdata-blob");
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ ok: true, status: { inFamily: true, isOwner: true } }) });
+    vi.stubGlobal("fetch", fetchMock);
+    expect(await createFamily()).toEqual({ ok: true, status: { inFamily: true, isOwner: true } });
+    const [url, opts] = fetchMock.mock.calls[0];
+    expect(url).toBe("https://api.example.com/api/family/create");
+    expect(JSON.parse(opts.body)).toEqual({ initData: "initdata-blob" });
+  });
+
+  it("createFamily: сервер отказал (не Pro) -> отдаёт {ok:false, error} как есть, не бросает", async () => {
+    vi.stubEnv("VITE_BACKEND_URL", "https://api.example.com");
+    stubTelegram("x");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 403, json: async () => ({ ok: false, error: "создание семьи доступно только на Pro" }) }));
+    expect(await createFamily()).toEqual({ ok: false, error: "создание семьи доступно только на Pro" });
+  });
+
+  it("joinFamily шлёт POST /api/family/join с initData и familyId", async () => {
+    vi.stubEnv("VITE_BACKEND_URL", "https://api.example.com");
+    stubTelegram("initdata-blob");
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ ok: true, status: { inFamily: true } }) });
+    vi.stubGlobal("fetch", fetchMock);
+    await joinFamily(42);
+    const [url, opts] = fetchMock.mock.calls[0];
+    expect(url).toBe("https://api.example.com/api/family/join");
+    expect(JSON.parse(opts.body)).toEqual({ initData: "initdata-blob", familyId: 42 });
+  });
+
+  it("leaveFamily шлёт POST /api/family/leave", async () => {
+    vi.stubEnv("VITE_BACKEND_URL", "https://api.example.com");
+    stubTelegram("initdata-blob");
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ ok: true }) });
+    vi.stubGlobal("fetch", fetchMock);
+    expect(await leaveFamily()).toEqual({ ok: true });
+    expect(fetchMock.mock.calls[0][0]).toBe("https://api.example.com/api/family/leave");
+  });
+
+  it("fetchFamilyStatus: null при сетевой ошибке или не-200 ответе", async () => {
+    vi.stubEnv("VITE_BACKEND_URL", "https://api.example.com");
+    stubTelegram("x");
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("boom")));
+    expect(await fetchFamilyStatus()).toBeNull();
+
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 500 }));
+    expect(await fetchFamilyStatus()).toBeNull();
+  });
+
+  it("toggleFamilyPantryItem шлёт name и present, возвращает pantryNames из ответа", async () => {
+    vi.stubEnv("VITE_BACKEND_URL", "https://api.example.com");
+    stubTelegram("initdata-blob");
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ ok: true, pantryNames: ["Мука", "Соль"] }) });
+    vi.stubGlobal("fetch", fetchMock);
+    const result = await toggleFamilyPantryItem("Мука", true);
+    expect(result).toEqual({ ok: true, pantryNames: ["Мука", "Соль"] });
+    const [url, opts] = fetchMock.mock.calls[0];
+    expect(url).toBe("https://api.example.com/api/family/pantry");
+    expect(JSON.parse(opts.body)).toEqual({ initData: "initdata-blob", name: "Мука", present: true });
   });
 });

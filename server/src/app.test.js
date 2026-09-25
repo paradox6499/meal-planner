@@ -445,6 +445,113 @@ describe("POST /api/referral/claim и /api/referral/status", () => {
   });
 });
 
+// Живой вывод из ревью Pro-плюшек (чат): "Общий список на семью" —
+// рекламировался, а не существовал. POST /api/family/* — см. family.js за
+// бизнес-правилами (лимит участников, роспуск при выходе владельца и т.п.),
+// здесь — только HTTP-обвязка (авторизация, Pro-гейт на создание, коды ответов).
+describe("POST /api/family/*", () => {
+  let db, server, baseUrl;
+
+  beforeEach(async () => {
+    db = openDb(":memory:");
+    server = createApp(db, { botToken: BOT_TOKEN });
+    await new Promise((resolve) => server.listen(0, resolve));
+    baseUrl = `http://127.0.0.1:${server.address().port}`;
+  });
+  afterEach(() => new Promise((resolve) => server.close(resolve)));
+
+  const post = (path, body) => fetch(`${baseUrl}${path}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+
+  it("create без Pro -> 403, семья не создаётся", async () => {
+    const res = await post("/api/family/create", { initData: validInitData(1) });
+    expect(res.status).toBe(403);
+    const statusRes = await post("/api/family/status", { initData: validInitData(1) });
+    expect((await statusRes.json()).status).toEqual({ inFamily: false });
+  });
+
+  it("create с Pro -> 200, владелец сразу в семье как единственный участник", async () => {
+    setUserPro(db, 1, true);
+    const res = await post("/api/family/create", { initData: validInitData(1) });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.status.inFamily).toBe(true);
+    expect(body.status.isOwner).toBe(true);
+    expect(body.status.members).toHaveLength(1);
+  });
+
+  it("create без initData -> 401", async () => {
+    const res = await post("/api/family/create", {});
+    expect(res.status).toBe(401);
+  });
+
+  it("join по familyId от владельца-Pro добавляет участника без Pro у самого участника", async () => {
+    setUserPro(db, 1, true);
+    const createBody = await (await post("/api/family/create", { initData: validInitData(1) })).json();
+    const familyId = createBody.status.familyId;
+
+    const joinRes = await post("/api/family/join", { initData: validInitData(2), familyId });
+    expect(joinRes.status).toBe(200);
+    const joinBody = await joinRes.json();
+    expect(joinBody.status.members.map((m) => m.telegramUserId).sort()).toEqual([1, 2]);
+  });
+
+  it("join с несуществующим familyId -> 400", async () => {
+    const res = await post("/api/family/join", { initData: validInitData(2), familyId: 999999 });
+    expect(res.status).toBe(400);
+  });
+
+  it("join без familyId -> 400", async () => {
+    const res = await post("/api/family/join", { initData: validInitData(2) });
+    expect(res.status).toBe(400);
+  });
+
+  it("leave владельцем распускает семью — второй участник тоже выходит", async () => {
+    setUserPro(db, 1, true);
+    const familyId = (await (await post("/api/family/create", { initData: validInitData(1) })).json()).status.familyId;
+    await post("/api/family/join", { initData: validInitData(2), familyId });
+
+    const leaveRes = await post("/api/family/leave", { initData: validInitData(1) });
+    expect(leaveRes.status).toBe(200);
+    expect((await (await post("/api/family/status", { initData: validInitData(2) })).json()).status).toEqual({ inFamily: false });
+  });
+
+  it("leave, не состоя в семье -> 400", async () => {
+    const res = await post("/api/family/leave", { initData: validInitData(1) });
+    expect(res.status).toBe(400);
+  });
+
+  it("status без семьи -> {inFamily:false}", async () => {
+    const res = await post("/api/family/status", { initData: validInitData(1) });
+    expect(res.status).toBe(200);
+    expect((await res.json()).status).toEqual({ inFamily: false });
+  });
+
+  it("pantry: отметка одним участником видна в статусе другого", async () => {
+    setUserPro(db, 1, true);
+    const familyId = (await (await post("/api/family/create", { initData: validInitData(1) })).json()).status.familyId;
+    await post("/api/family/join", { initData: validInitData(2), familyId });
+
+    const toggleRes = await post("/api/family/pantry", { initData: validInitData(1), name: "Мука", present: true });
+    expect(toggleRes.status).toBe(200);
+    expect((await toggleRes.json()).pantryNames).toEqual(["Мука"]);
+
+    const status2 = await (await post("/api/family/status", { initData: validInitData(2) })).json();
+    expect(status2.status.pantryNames).toEqual(["Мука"]);
+  });
+
+  it("pantry без семьи -> 400", async () => {
+    const res = await post("/api/family/pantry", { initData: validInitData(1), name: "Мука", present: true });
+    expect(res.status).toBe(400);
+  });
+
+  it("pantry с некорректным телом (нет present) -> 400", async () => {
+    setUserPro(db, 1, true);
+    await post("/api/family/create", { initData: validInitData(1) });
+    const res = await post("/api/family/pantry", { initData: validInitData(1), name: "Мука" });
+    expect(res.status).toBe(400);
+  });
+});
+
 // Отдельный describe — реальная сборка плана приглашённым должна начислить
 // награду ОБЕИМ сторонам (см. referrals.js) — тут нужен замоканный вызов к
 // Telegram (уведомление пригласившему), поэтому не в "HTTP-сервер" выше, тот

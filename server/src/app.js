@@ -19,6 +19,7 @@ import { sendBackupNow } from "./backup.js";
 import { resolveIngredientPricesWithCache } from "./vkusvillPrices.js";
 import { createPayment, fetchPaymentStatus } from "./yookassa.js";
 import { claimReferral, maybeRewardReferral, REFERRAL_REWARD_DAYS } from "./referrals.js";
+import { createFamily, joinFamily, leaveFamily, getFamilyStatus, toggleFamilyPantryItem } from "./family.js";
 
 const MEAL_TYPES = new Set(["breakfast", "lunch", "dinner", "snack"]);
 const MAX_EVENT_NAME_LENGTH = 64;
@@ -143,7 +144,11 @@ async function readAuthenticatedBody(req, botToken) {
   }
   const auth = validateInitData(body.initData, botToken);
   if (!auth.ok) return { ok: false, status: 401, error: auth.error };
-  return { ok: true, body, telegramUserId: auth.user.id };
+  // firstName — best-effort отображаемое имя (для /api/family/*: "кто есть в
+  // семье"), не участвует в авторизации. Telegram не гарантирует его наличие
+  // у каждого пользователя, поэтому не required нигде, где уже используется
+  // readAuthenticatedBody.
+  return { ok: true, body, telegramUserId: auth.user.id, firstName: auth.user.first_name ?? null };
 }
 
 /** Чистая функция — сколько ещё бесплатных сборок доступно прямо сейчас.
@@ -233,6 +238,27 @@ export function parseReferralClaimRequest(body) {
     return { ok: false, error: "referrerTelegramId отсутствует или некорректен" };
   }
   return { ok: true, value: { referrerTelegramId } };
+}
+
+export function parseFamilyJoinRequest(body) {
+  const { familyId } = body;
+  if (typeof familyId !== "number" || !Number.isFinite(familyId)) {
+    return { ok: false, error: "familyId отсутствует или некорректен" };
+  }
+  return { ok: true, value: { familyId } };
+}
+
+const MAX_FAMILY_PANTRY_NAME_LENGTH = 200; // тот же порядок, что MAX_EVENT_NAME_LENGTH — с запасом под любое реальное название ингредиента
+
+export function parseFamilyPantryRequest(body) {
+  const { name, present } = body;
+  if (typeof name !== "string" || !name.trim() || name.length > MAX_FAMILY_PANTRY_NAME_LENGTH) {
+    return { ok: false, error: "name отсутствует или некорректен" };
+  }
+  if (typeof present !== "boolean") {
+    return { ok: false, error: "present должен быть true/false" };
+  }
+  return { ok: true, value: { name: name.trim(), present } };
 }
 
 export function createApp(db, { botToken, adminTelegramId = null, webhookSecret = null, yookassa = null }) {
@@ -455,6 +481,100 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
       } catch (err) {
         console.error("[api/referral/status] ошибка:", err);
         sendJson(res, 500, { ok: false, error: "не удалось получить статус рефералов" });
+      }
+      return;
+    }
+
+    // "Общий список на семью" (Pro-бонус, см. family.js) — создать может
+    // только Pro (проверка здесь, не в family.js — та же граница
+    // ответственности, что и везде: бизнес-правила про саму семью в
+    // family.js, "хватает ли тарифа" решает вызывающий HTTP-слой).
+    if (req.method === "POST" && req.url === "/api/family/create") {
+      const auth = await readAuthenticatedBody(req, botToken);
+      if (!auth.ok) return sendJson(res, auth.status, { ok: false, error: auth.error });
+
+      if (!getUserPro(db, auth.telegramUserId, new Date().toISOString())) {
+        return sendJson(res, 403, { ok: false, error: "создание семьи доступно только на Pro" });
+      }
+
+      try {
+        const result = createFamily(db, { ownerTelegramId: auth.telegramUserId, ownerDisplayName: auth.firstName, nowISO: new Date().toISOString() });
+        if (!result.ok) return sendJson(res, 400, { ok: false, error: result.reason });
+        sendJson(res, 200, { ok: true, status: getFamilyStatus(db, auth.telegramUserId) });
+      } catch (err) {
+        console.error("[api/family/create] ошибка:", err);
+        sendJson(res, 500, { ok: false, error: "не удалось создать семью" });
+      }
+      return;
+    }
+
+    // Вступление по ссылке t.me/s_edim_bot?startapp=fam_<id> — та же схема,
+    // что уже работает у рефералов (см. /api/referral/claim выше): id семьи
+    // и есть код приглашения, вступление не требует Pro (Pro нужен только
+    // тому, кто СОЗДАЁТ семью — "один подписчик, вся семья пользуется").
+    if (req.method === "POST" && req.url === "/api/family/join") {
+      const auth = await readAuthenticatedBody(req, botToken);
+      if (!auth.ok) return sendJson(res, auth.status, { ok: false, error: auth.error });
+
+      const parsed = parseFamilyJoinRequest(auth.body);
+      if (!parsed.ok) return sendJson(res, 400, { ok: false, error: parsed.error });
+
+      try {
+        const result = joinFamily(db, { familyId: parsed.value.familyId, joiningTelegramId: auth.telegramUserId, displayName: auth.firstName, nowISO: new Date().toISOString() });
+        if (!result.ok) return sendJson(res, 400, { ok: false, error: result.reason });
+        sendJson(res, 200, { ok: true, status: getFamilyStatus(db, auth.telegramUserId) });
+      } catch (err) {
+        console.error("[api/family/join] ошибка:", err);
+        sendJson(res, 500, { ok: false, error: "не удалось вступить в семью" });
+      }
+      return;
+    }
+
+    if (req.method === "POST" && req.url === "/api/family/leave") {
+      const auth = await readAuthenticatedBody(req, botToken);
+      if (!auth.ok) return sendJson(res, auth.status, { ok: false, error: auth.error });
+
+      try {
+        const result = leaveFamily(db, auth.telegramUserId);
+        if (!result.ok) return sendJson(res, 400, { ok: false, error: result.reason });
+        sendJson(res, 200, { ok: true });
+      } catch (err) {
+        console.error("[api/family/leave] ошибка:", err);
+        sendJson(res, 500, { ok: false, error: "не удалось покинуть семью" });
+      }
+      return;
+    }
+
+    if (req.method === "POST" && req.url === "/api/family/status") {
+      const auth = await readAuthenticatedBody(req, botToken);
+      if (!auth.ok) return sendJson(res, auth.status, { ok: false, error: auth.error });
+
+      try {
+        sendJson(res, 200, { ok: true, status: getFamilyStatus(db, auth.telegramUserId) });
+      } catch (err) {
+        console.error("[api/family/status] ошибка:", err);
+        sendJson(res, 500, { ok: false, error: "не удалось получить статус семьи" });
+      }
+      return;
+    }
+
+    // "Отметил купленное один член семьи — увидят все" — общий family_pantry
+    // (см. family.js), тот же смысл, что и локальный src/lib/pantry.js на
+    // фронтенде, только на всех участников сразу.
+    if (req.method === "POST" && req.url === "/api/family/pantry") {
+      const auth = await readAuthenticatedBody(req, botToken);
+      if (!auth.ok) return sendJson(res, auth.status, { ok: false, error: auth.error });
+
+      const parsed = parseFamilyPantryRequest(auth.body);
+      if (!parsed.ok) return sendJson(res, 400, { ok: false, error: parsed.error });
+
+      try {
+        const result = toggleFamilyPantryItem(db, { telegramUserId: auth.telegramUserId, name: parsed.value.name, present: parsed.value.present });
+        if (!result.ok) return sendJson(res, 400, { ok: false, error: result.reason });
+        sendJson(res, 200, { ok: true, pantryNames: result.pantryNames });
+      } catch (err) {
+        console.error("[api/family/pantry] ошибка:", err);
+        sendJson(res, 500, { ok: false, error: "не удалось обновить общий список" });
       }
       return;
     }

@@ -149,6 +149,38 @@ export function openDb(path) {
       rewarded_at TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_referrals_referrer ON referrals (referrer_telegram_id, rewarded_at);
+
+    -- "Общий список на семью" (Pro-бонус) — семья тут просто группа Telegram-
+    -- аккаунтов, не обязательно родственники. Приглашение — тот же приём, что
+    -- уже работает для рефералов (see referrals.js): ссылка
+    -- t.me/s_edim_bot?startapp=fam_<id>, id семьи и есть код приглашения,
+    -- отдельного invite_code не заводим. family_members.telegram_user_id —
+    -- PRIMARY KEY, а не составной (family_id, telegram_user_id) — так
+    -- "один человек одновременно только в одной семье" гарантируется на
+    -- уровне схемы, а не проверкой в коде (нельзя случайно забыть).
+    CREATE TABLE IF NOT EXISTS families (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      owner_telegram_id INTEGER NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS family_members (
+      telegram_user_id INTEGER PRIMARY KEY,
+      family_id INTEGER NOT NULL,
+      display_name TEXT,
+      joined_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_family_members_family ON family_members (family_id);
+
+    -- Общий "уже есть дома" (см. src/lib/pantry.js на фронтенде — тот же
+    -- смысл, отметил один член семьи — не нужно покупать снова, увидят все
+    -- при следующем открытии списка). Как и family_members, ключ по
+    -- (family_id, name) — один и тот же товар в одной семье либо отмечен,
+    -- либо нет, дублей быть не может.
+    CREATE TABLE IF NOT EXISTS family_pantry (
+      family_id INTEGER NOT NULL,
+      name TEXT NOT NULL,
+      PRIMARY KEY (family_id, name)
+    );
   `);
 
   // НАЙДЕНО ЖИВЬЁМ НА PRODUCTION (лог Render: "no such column: is_pro"):
@@ -502,6 +534,74 @@ export function markReferralRewarded(db, referredTelegramId, rewardedAtISO) {
 export function countRewardedReferrals(db, referrerTelegramId) {
   const row = db.prepare("SELECT COUNT(*) AS count FROM referrals WHERE referrer_telegram_id = ? AND rewarded_at IS NOT NULL").get(referrerTelegramId);
   return row.count;
+}
+
+// "Общий список на семью" (см. комментарий у CREATE TABLE families выше) —
+// бизнес-правила (Pro-only создание, лимит участников, "уже кто-то есть в
+// семье") живут в server/src/family.js, эти функции — только чтение/запись.
+
+export function createFamily(db, { ownerTelegramId, ownerDisplayName, nowISO }) {
+  const { lastInsertRowid } = db.prepare("INSERT INTO families (owner_telegram_id, created_at) VALUES (?, ?)").run(ownerTelegramId, nowISO);
+  db.prepare("INSERT INTO family_members (telegram_user_id, family_id, display_name, joined_at) VALUES (?, ?, ?, ?)").run(
+    ownerTelegramId, lastInsertRowid, ownerDisplayName ?? null, nowISO
+  );
+  return lastInsertRowid;
+}
+
+export function getFamilyById(db, familyId) {
+  return db.prepare("SELECT id, owner_telegram_id, created_at FROM families WHERE id = ?").get(familyId) ?? null;
+}
+
+/** Семья текущего пользователя, если он в какой-то состоит — telegram_user_id
+ * PRIMARY KEY в family_members гарантирует не больше одной строки. */
+export function getFamilyForUser(db, telegramUserId) {
+  const membership = db.prepare("SELECT family_id FROM family_members WHERE telegram_user_id = ?").get(telegramUserId);
+  if (!membership) return null;
+  return getFamilyById(db, membership.family_id);
+}
+
+export function getFamilyMembers(db, familyId) {
+  return db.prepare("SELECT telegram_user_id, display_name, joined_at FROM family_members WHERE family_id = ? ORDER BY joined_at ASC").all(familyId);
+}
+
+export function countFamilyMembers(db, familyId) {
+  const row = db.prepare("SELECT COUNT(*) AS count FROM family_members WHERE family_id = ?").get(familyId);
+  return row.count;
+}
+
+/** telegram_user_id PRIMARY KEY в family_members — если человек уже состоит
+ * в какой-то семье (в том числе в этой же), INSERT бросит исключение;
+ * вызывающий код (family.js) ловит и превращает в понятную причину отказа,
+ * не падает. */
+export function addFamilyMember(db, { familyId, telegramUserId, displayName, nowISO }) {
+  db.prepare("INSERT INTO family_members (telegram_user_id, family_id, display_name, joined_at) VALUES (?, ?, ?, ?)").run(
+    telegramUserId, familyId, displayName ?? null, nowISO
+  );
+}
+
+export function removeFamilyMember(db, telegramUserId) {
+  db.prepare("DELETE FROM family_members WHERE telegram_user_id = ?").run(telegramUserId);
+}
+
+/** Владелец покинул семью (или удалил её сам) — семья распускается целиком:
+ * все участники, сама запись и общий "уже есть дома" удаляются. Проще и
+ * честнее, чем передавать владение кому-то другому без явного согласия. */
+export function dissolveFamily(db, familyId) {
+  db.prepare("DELETE FROM family_members WHERE family_id = ?").run(familyId);
+  db.prepare("DELETE FROM family_pantry WHERE family_id = ?").run(familyId);
+  db.prepare("DELETE FROM families WHERE id = ?").run(familyId);
+}
+
+export function getFamilyPantry(db, familyId) {
+  return db.prepare("SELECT name FROM family_pantry WHERE family_id = ?").all(familyId).map((r) => r.name);
+}
+
+export function setFamilyPantryItem(db, familyId, name, present) {
+  if (present) {
+    db.prepare("INSERT OR IGNORE INTO family_pantry (family_id, name) VALUES (?, ?)").run(familyId, name);
+  } else {
+    db.prepare("DELETE FROM family_pantry WHERE family_id = ? AND name = ?").run(familyId, name);
+  }
 }
 
 /** Считаем через events, а не отдельный счётчик — событие "plan_generated"
