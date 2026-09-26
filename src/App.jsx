@@ -6,7 +6,7 @@ import { fetchVkusvillPools, getSubstituteOptions, attachRealCosts } from "./lib
 import { loadProfile, saveProfile, clearProfile, loadTheme, saveTheme } from "./lib/profile.js";
 import { loadActivePlanSlots, saveActivePlanSlot, setActiveSlotId, removeActivePlanSlot, clearAllActivePlans, genSlotId, MAX_PRO_SLOTS } from "./lib/activePlan.js";
 import { buildPools, buildInitialPlan, buildPlanView, interleaveGroups, computeBudgetStreak, computeRecentSavings } from "./lib/planLogic.js";
-import { submitPlanToBackend, checkPlanStatus, savePlanToHistory, fetchPlanHistory, updateMealTimes, createProPayment, claimReferral, fetchReferralStatus, getBackendUrl, sendSupportPrompt, createFamily, joinFamily, leaveFamily, fetchFamilyStatus, toggleFamilyPantryItem } from "./lib/backend.js";
+import { submitPlanToBackend, checkPlanStatus, savePlanToHistory, fetchPlanHistory, updateMealTimes, createProPayment, createExtraPlanPayment, claimReferral, fetchReferralStatus, getBackendUrl, sendSupportPrompt, createFamily, joinFamily, leaveFamily, fetchFamilyStatus, toggleFamilyPantryItem } from "./lib/backend.js";
 import { loadPantryStaples, savePantryStaples } from "./lib/pantry.js";
 import { loadPayerEmail, savePayerEmail } from "./lib/payerContact.js";
 import { trackEvent } from "./lib/analytics.js";
@@ -177,6 +177,12 @@ export default function MealPlanner() {
   const [planState, setPlanState] = useState(initialActiveSlot?.planState ?? null);
   const [openRecipe, setOpenRecipe] = useState(null);
   const [showProModal, setShowProModal] = useState(false);
+  // "Ещё один план на этой неделе" — разовая дешёвая покупка, ступенька перед
+  // полной подпиской (живой вывод из ревью в чате). Отдельный modal, не режим
+  // ProModal — цена/текст/сама механика оплаты (product: "extra_plan")
+  // достаточно разные, чтобы не городить условную логику внутри одного
+  // большого компонента.
+  const [showExtraPlanModal, setShowExtraPlanModal] = useState(false);
   const [showAccount, setShowAccount] = useState(false);
   const [displayName, setDisplayName] = useState(savedProfile?.displayName ?? "");
   const [mealTimes, setMealTimes] = useState(savedProfile?.mealTimes ?? DEFAULT_MEAL_TIMES);
@@ -929,8 +935,18 @@ export default function MealPlanner() {
           <div style={styles.stepBody} className="mp-step-body">
             <StepShell icon={<Sparkles size={20} color={ACCENT} />} title="Бесплатный лимит на этой неделе исчерпан" sub="На бесплатном тарифе доступен 1 план в неделю">
               <p style={{ ...styles.acctSectionHint, marginTop: 0 }}>
-                Новый план будет доступен позже — или оформите Pro прямо сейчас, чтобы собирать план без ограничений.
+                Новый план будет доступен позже — или соберите ещё один прямо сейчас, разово или без ограничений вообще.
               </p>
+              {/* Живой вывод из ревью: "разовая дешёвая покупка ещё одного
+                  плана на этой неделе как ступенька перед полной подпиской" —
+                  показываем ПЕРЕД "Открыть Pro" (более лёгкое решение сначала,
+                  не обязательство на месяц). */}
+              <button
+                onClick={() => { hapticImpact("light"); trackEvent("extra_plan_modal_opened", { source: "limit_blocked" }); setShowExtraPlanModal(true); }}
+                style={styles.extraPlanBtn}
+              >
+                Купить ещё один план — {EXTRA_PLAN_PRICE_RUB} ₽
+              </button>
               <button
                 onClick={() => { hapticImpact("light"); trackEvent("pro_modal_opened", { source: "limit_blocked" }); setShowProModal(true); }}
                 style={{ ...styles.navBtnPrimary, width: "100%", justifyContent: "center", marginTop: 8 }}
@@ -946,6 +962,7 @@ export default function MealPlanner() {
           <LastPlanGateView
             latest={lastPlanGate.latest}
             onOpenPro={() => { hapticImpact("light"); trackEvent("pro_modal_opened", { source: "last_plan_gate" }); setShowProModal(true); }}
+            onOpenExtraPlan={() => { hapticImpact("light"); trackEvent("extra_plan_modal_opened", { source: "last_plan_gate" }); setShowExtraPlanModal(true); }}
           />
         )}
 
@@ -1174,6 +1191,12 @@ export default function MealPlanner() {
         <RecipeModal dm={openRecipe} family={openRecipe.family ?? family} onClose={() => setOpenRecipe(null)} />
       )}
       {showProModal && <ProModal onClose={() => setShowProModal(false)} />}
+      {showExtraPlanModal && (
+        <ExtraPlanModal
+          onClose={() => setShowExtraPlanModal(false)}
+          onOpenPro={() => { setShowExtraPlanModal(false); trackEvent("pro_modal_opened", { source: "extra_plan_modal" }); setShowProModal(true); }}
+        />
+      )}
     </div>
   );
 }
@@ -1218,7 +1241,7 @@ function SkeletonView() {
 // там же) — здесь честный, более скромный экран: дни и блюда (кликабельные,
 // как в PlanHistorySection) и итоговая сумма, без попытки притвориться
 // полным ResultView.
-function LastPlanGateView({ latest, onOpenPro }) {
+function LastPlanGateView({ latest, onOpenPro, onOpenExtraPlan }) {
   const [openRecipe, setOpenRecipe] = useState(null);
   const dateLabel = new Date(latest.createdAt).toLocaleDateString("ru-RU", { day: "numeric", month: "long" });
   // Живая жалоба в чате: "не могу провалиться в план, увидеть КБЖУ,
@@ -1269,8 +1292,11 @@ function LastPlanGateView({ latest, onOpenPro }) {
           </p>
         )}
         <p style={{ ...styles.acctSectionHint, marginTop: 0 }}>
-          Новый план по бесплатному тарифу будет доступен позже — с Pro можно пересобирать без ограничений.
+          Новый план по бесплатному тарифу будет доступен позже — соберите ещё один прямо сейчас, разово или без ограничений вообще.
         </p>
+        <button onClick={onOpenExtraPlan} style={styles.extraPlanBtn}>
+          Купить ещё один план — {EXTRA_PLAN_PRICE_RUB} ₽
+        </button>
         <button onClick={onOpenPro} style={{ ...styles.navBtnPrimary, width: "100%", justifyContent: "center", marginTop: 8 }}>
           Перейти на Pro
         </button>
@@ -1695,6 +1721,14 @@ function AccountView({
     </div>
   );
 }
+
+// Живой вывод из ревью Pro-плюшек (чат): "разовая дешёвая покупка ещё одного
+// плана на этой неделе как ступенька перед полной подпиской". Дублирует
+// EXTRA_PLAN_PRICE_RUB из server/src/app.js — тот же принцип, что и у
+// REFERRAL_REWARD_DAYS_LABEL/MAX_FAMILY_MEMBERS_LABEL выше: цифра для текста
+// на фронтенде неизбежно живёт отдельной строкой от источника истины на
+// сервере, держите их в синхроне вручную, если поменяются.
+const EXTRA_PLAN_PRICE_RUB = 59;
 
 // Реальная оплата подключена — ЮKassa (см. server/src/yookassa.js,
 // POST /api/pay/create). Одноразовый платёж на 30 дней, не автопродление
@@ -2168,6 +2202,93 @@ function ProModal({ onClose }) {
             </p>
           )}
         </div>
+      </div>
+    </div>
+  );
+}
+
+// "Ещё один план на этой неделе" — разовая дешёвая покупка, ступенька перед
+// полной подпиской (живой вывод из ревью в чате: "многим проще заплатить
+// один раз 50-70 ₽, чем сразу оформить месячную подписку"). Сильно короче
+// ProModal выше — не продающий экран с перечислением всех Pro-плюшек, а
+// быстрая одноразовая покупка ровно того, что нужно прямо сейчас. email —
+// тот же email для чека (54-ФЗ), что и у Pro, см. lib/payerContact.js.
+function ExtraPlanModal({ onClose, onOpenPro }) {
+  const [paymentState, setPaymentState] = useState("idle");
+  const [errorDetail, setErrorDetail] = useState(null);
+  const [email, setEmail] = useState(loadPayerEmail);
+  const emailValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
+
+  const handleBuy = async () => {
+    if (!emailValid) return;
+    hapticImpact("light");
+    trackEvent("extra_plan_buy_clicked");
+    setPaymentState("loading");
+    setErrorDetail(null);
+
+    const trimmedEmail = email.trim();
+    savePayerEmail(trimmedEmail);
+    const result = await createExtraPlanPayment(trimmedEmail);
+    if (!result.ok) {
+      hapticNotify("error");
+      setPaymentState("error");
+      setErrorDetail(result.detail || result.reason);
+      return;
+    }
+    hapticNotify("success");
+    window.Telegram?.WebApp?.openLink ? window.Telegram.WebApp.openLink(result.confirmationUrl) : window.open(result.confirmationUrl, "_blank");
+    onClose();
+  };
+
+  return (
+    <div style={styles.modalOverlay} className="modal-overlay-in" onClick={onClose}>
+      <div style={styles.modalCard} className="modal-card-in" onClick={(e) => e.stopPropagation()}>
+        <button onClick={onClose} title="Закрыть" aria-label="Закрыть" style={styles.modalClose}>
+          <X size={16} />
+        </button>
+
+        <div style={styles.proHero}>
+          <Sparkles size={32} color={ACCENT} />
+        </div>
+        <h2 style={{ ...styles.stepTitle, textAlign: "center" }}>Ещё один план на этой неделе</h2>
+        <p style={{ ...styles.stepSub, textAlign: "center" }}>
+          Разовая покупка, без месячной подписки — добавляет ровно один план сверх бесплатного лимита.
+        </p>
+
+        <div style={styles.proPriceBox}>
+          <div style={styles.proPriceRow}>
+            <span style={styles.proPriceNew}>{EXTRA_PLAN_PRICE_RUB} ₽</span>
+            <span style={styles.proPricePeriod}>разово</span>
+          </div>
+          <div style={{ ...styles.acctLabel, marginTop: 12, textAlign: "left" }}>Email для чека</div>
+          <input
+            type="email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && e.currentTarget.blur()}
+            placeholder="you@example.com"
+            enterKeyHint="done"
+            autoComplete="email"
+            style={styles.textInput}
+          />
+          <p style={{ ...styles.acctSectionHint, margin: "6px 0 0 0" }}>Нужен по закону — на него ЮKassa пришлёт кассовый чек.</p>
+          <button
+            onClick={handleBuy}
+            disabled={paymentState === "loading" || !emailValid}
+            style={{ ...styles.navBtnPrimary, width: "100%", justifyContent: "center", marginTop: 12, opacity: paymentState === "loading" || !emailValid ? 0.6 : 1 }}
+          >
+            {paymentState === "loading" ? <><Loader2 size={16} className="spin" /> Готовим оплату…</> : "Купить план"}
+          </button>
+          {paymentState === "error" && (
+            <p style={{ ...styles.acctSectionHint, textAlign: "center", margin: "12px 0 0 0" }}>
+              Не удалось начать оплату. Попробуйте ещё раз через минуту — если не поможет, напишите в поддержку (Аккаунт → «Написать в поддержку»).
+              {errorDetail && <><br /><span style={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: 11 }}>{errorDetail}</span></>}
+            </p>
+          )}
+        </div>
+        <button onClick={onOpenPro} style={{ ...styles.linkBtn, width: "100%", textAlign: "center", marginTop: 14 }}>
+          Или оформить Pro — без ограничений вообще
+        </button>
       </div>
     </div>
   );
@@ -2916,6 +3037,10 @@ const styles = {
   // "Открыть Pro" над ней (padding-top 10px у acctClearBtn) — увеличил
   // отступ и убрал ложный красный акцент.
   limitBackBtn: { width: "100%", background: "none", border: "none", color: "var(--text-tertiary)", fontSize: 13, fontWeight: 500, cursor: "pointer", padding: "20px 0 0 0" },
+  // "Купить ещё один план" — сознательно НЕ такой же заливкой, как
+  // navBtnPrimary ("Открыть Pro") — более лёгкое, менее обязывающее решение
+  // должно и выглядеть менее весомым, обводка вместо заливки.
+  extraPlanBtn: { width: "100%", padding: "13px 0", background: "none", border: `1.5px solid ${ACCENT}`, borderRadius: 18, color: ACCENT, fontSize: 14, fontWeight: 600, cursor: "pointer", marginTop: 4 },
   acctWarnHint: { fontSize: 12, color: "var(--warning-text)", textAlign: "center", marginTop: 8 },
   homeScreenAddedRow: {
     display: "flex", alignItems: "center", gap: 10, padding: "13px 15px", borderRadius: 18,

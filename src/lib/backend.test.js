@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { buildMealSlots, todayPlusDays, checkPlanStatus, savePlanToHistory, fetchPlanHistory, updateMealTimes, resolvePricesViaBackend, createProPayment, claimReferral, fetchReferralStatus, getBackendUrl, sendSupportPrompt, createFamily, joinFamily, leaveFamily, fetchFamilyStatus, toggleFamilyPantryItem } from "./backend.js";
+import { buildMealSlots, todayPlusDays, checkPlanStatus, savePlanToHistory, fetchPlanHistory, updateMealTimes, resolvePricesViaBackend, createProPayment, createExtraPlanPayment, claimReferral, fetchReferralStatus, getBackendUrl, sendSupportPrompt, createFamily, joinFamily, leaveFamily, fetchFamilyStatus, toggleFamilyPantryItem } from "./backend.js";
 
 function stubTelegram(initData) {
   vi.stubGlobal("window", { Telegram: initData !== undefined ? { WebApp: { initData } } : undefined });
@@ -392,6 +392,47 @@ describe("createProPayment", () => {
     stubTelegram("x");
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({ ok: true }) }));
     expect(await createProPayment()).toEqual({ ok: false, reason: "no_url" });
+  });
+
+  it("шлёт product:'pro' в теле запроса", async () => {
+    vi.stubEnv("VITE_BACKEND_URL", "https://api.example.com");
+    stubTelegram("initdata-blob");
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ ok: true, confirmationUrl: "https://yookassa.ru/checkout/pay-1" }) });
+    vi.stubGlobal("fetch", fetchMock);
+    await createProPayment("user@example.com");
+    const [, opts] = fetchMock.mock.calls[0];
+    expect(JSON.parse(opts.body)).toEqual({ initData: "initdata-blob", email: "user@example.com", product: "pro" });
+  });
+});
+
+// Живой вывод из ревью: "разовая дешёвая покупка ещё одного плана на этой
+// неделе как ступенька перед полной подпиской" — тот же эндпоинт, что и
+// createProPayment, отличается только product в теле.
+describe("createExtraPlanPayment", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+  });
+
+  it("шлёт product:'extra_plan' в теле запроса", async () => {
+    vi.stubEnv("VITE_BACKEND_URL", "https://api.example.com");
+    stubTelegram("initdata-blob");
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ ok: true, confirmationUrl: "https://yookassa.ru/checkout/pay-extra-1" }) });
+    vi.stubGlobal("fetch", fetchMock);
+    const result = await createExtraPlanPayment("user@example.com");
+    expect(result).toEqual({ ok: true, confirmationUrl: "https://yookassa.ru/checkout/pay-extra-1" });
+    const [url, opts] = fetchMock.mock.calls[0];
+    expect(url).toBe("https://api.example.com/api/pay/create");
+    expect(JSON.parse(opts.body)).toEqual({ initData: "initdata-blob", email: "user@example.com", product: "extra_plan" });
+  });
+
+  it("{ok:false, reason:'no_backend_or_initdata'} без бэкенда/вне Telegram", async () => {
+    vi.stubEnv("VITE_BACKEND_URL", "");
+    stubTelegram("x");
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    expect(await createExtraPlanPayment("user@example.com")).toEqual({ ok: false, reason: "no_backend_or_initdata" });
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
 

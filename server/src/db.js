@@ -254,6 +254,31 @@ export function openDb(path) {
   }
   db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_families_invite_code ON families (invite_code)");
 
+  // "Ещё один план на этой неделе" — разовая дешёвая покупка как ступенька
+  // перед полной подпиской (живой вывод из ревью в чате: "многим проще
+  // заплатить один раз 50-70 ₽, чем сразу оформить месячную подписку").
+  // extra_plan_credits — сколько таких разовых сборок ещё не использовано;
+  // computePlanStatus в app.js прибавляет их к базовому бесплатному лимиту.
+  // Не сгорают сами по себе — списываются РОВНО когда реально использованы
+  // (см. /events в app.js: событие plan_generated при уже исчерпанном
+  // базовом лимите списывает один кредит), а не по времени.
+  ensureColumn(db, "users", "extra_plan_credits", "INTEGER NOT NULL DEFAULT 0");
+
+  // free_nudge_sent_at — "лёгкое бесплатное напоминание вернуться" (живой
+  // вывод из ревью: бесплатный лимит сбрасывается тихо, никто не подсказывает
+  // пользователю, что можно прийти собрать план снова — человек просто
+  // забывает про приложение). Отдельно от renewal_reminder_sent_at выше:
+  // тот про истечение ПЛАТНОЙ подписки, этот — про сброс БЕСПЛАТНОГО лимита,
+  // разная аудитория и разная периодичность. См. getUsersDueForFreeNudge.
+  ensureColumn(db, "users", "free_nudge_sent_at", "TEXT");
+
+  // product — что именно куплено этим платежом ("pro" | "extra_plan", см.
+  // EXTRA_PLAN_PRODUCT в app.js). Добавлена ПОСЛЕ первого запуска оплаты —
+  // тот же ensureColumn-паттерн, что и везде в этом файле; DEFAULT 'pro'
+  // корректно доразмечает все платежи, сделанные до этой колонки (тогда
+  // существовал только один продукт).
+  ensureColumn(db, "payments", "product", "TEXT NOT NULL DEFAULT 'pro'");
+
   return db;
 }
 
@@ -462,12 +487,40 @@ export function extendUserPro(db, telegramUserId, { fromISO, addDays }) {
 /** Создаёт "ожидающую" запись сразу после создания платежа в ЮKassa (см.
  * app.js: POST /api/pay/create) — до подтверждения вебхуком/повторной
  * проверкой статуса (см. yookassa.js). Позволяет увидеть в БД даже те
- * платежи, которые пользователь так и не завершил. */
-export function createPendingPayment(db, { yookassaPaymentId, telegramUserId, amountRub, createdAtISO }) {
+ * платежи, которые пользователь так и не завершил. product — "pro" по
+ * умолчанию (единственный продукт до "ещё одного плана на неделю", см.
+ * EXTRA_PLAN_PRODUCT в app.js) — вебхук решает по нему, extendUserPro
+ * вызывать или addExtraPlanCredit. */
+export function createPendingPayment(db, { yookassaPaymentId, telegramUserId, amountRub, createdAtISO, product = "pro" }) {
   db.prepare(
-    `INSERT INTO payments (yookassa_payment_id, telegram_user_id, amount_rub, status, created_at)
-     VALUES (?, ?, ?, 'pending', ?)`
-  ).run(yookassaPaymentId, telegramUserId, amountRub, createdAtISO);
+    `INSERT INTO payments (yookassa_payment_id, telegram_user_id, amount_rub, status, created_at, product)
+     VALUES (?, ?, ?, 'pending', ?, ?)`
+  ).run(yookassaPaymentId, telegramUserId, amountRub, createdAtISO, product);
+}
+
+/** Разовая покупка "ещё один план на этой неделе" (см. комментарий у
+ * ensureColumn extra_plan_credits выше) — начисляется по факту оплаты
+ * (yookassa/webhook), списывается по факту реального использования (см.
+ * consumeExtraPlanCredit ниже и /events в app.js). count — почти всегда 1
+ * (один платёж = один кредит), параметр всё равно есть на случай, если
+ * когда-нибудь продадим пачку сразу. */
+export function addExtraPlanCredit(db, telegramUserId, count = 1) {
+  db.prepare(
+    `INSERT INTO users (telegram_user_id, extra_plan_credits) VALUES (?, ?)
+     ON CONFLICT(telegram_user_id) DO UPDATE SET extra_plan_credits = extra_plan_credits + excluded.extra_plan_credits`
+  ).run(telegramUserId, count);
+}
+
+export function getExtraPlanCredits(db, telegramUserId) {
+  const row = db.prepare("SELECT extra_plan_credits FROM users WHERE telegram_user_id = ?").get(telegramUserId);
+  return row?.extra_plan_credits ?? 0;
+}
+
+/** MAX(0, credits - 1) прямо в SQL — защита от гонки/повторного вызова
+ * (например аналитика best-effort продублировала событие) уводящей кредиты в
+ * минус, не отдельная проверка "хватает ли" перед списанием. */
+export function consumeExtraPlanCredit(db, telegramUserId) {
+  db.prepare("UPDATE users SET extra_plan_credits = MAX(0, extra_plan_credits - 1) WHERE telegram_user_id = ?").run(telegramUserId);
 }
 
 export function getPaymentByYookassaId(db, yookassaPaymentId) {
@@ -520,6 +573,45 @@ export function getUsersWithProExpiringSoon(db, { nowISO, windowMs }) {
 
 export function markRenewalReminderSent(db, telegramUserId, sentAtISO) {
   db.prepare("UPDATE users SET renewal_reminder_sent_at = ? WHERE telegram_user_id = ?").run(sentAtISO, telegramUserId);
+}
+
+/** "Лёгкое бесплатное напоминание вернуться" (живой вывод из ревью в чате —
+ * см. ensureColumn free_nudge_sent_at выше) — free-пользователи, у кого
+ * бесплатный лимит только что снова стал доступен (последний plan_generated
+ * старше freeWindowMs), но не СЛИШКОМ давно (не старше freeWindowMs+graceMs
+ * — иначе слали бы уведомление всем, кто хоть раз в жизни построил план,
+ * бесконечно). Та же техника дедупликации "напоминали ли уже про ЭТОТ
+ * конкретный сброс", что у getUsersWithProExpiringSoon — free_nudge_sent_at
+ * старше last_plan_at значит "напоминание было про предыдущий цикл", новый
+ * plan_generated (после которого last_plan_at сдвигается вперёд) сам
+ * открывает право на следующее напоминание. Pro/оплаченный период —
+ * отфильтровываются, им бесплатный лимит не актуален вообще. */
+export function getUsersDueForFreeNudge(db, { nowISO, freeWindowMs, graceMs }) {
+  const eligibleUntil = new Date(new Date(nowISO).getTime() - freeWindowMs).toISOString();
+  const eligibleSince = new Date(new Date(nowISO).getTime() - freeWindowMs - graceMs).toISOString();
+  const rows = db
+    .prepare(
+      `SELECT e.telegram_user_id AS telegram_user_id, MAX(e.created_at) AS last_plan_at,
+              u.is_pro AS is_pro, u.pro_until AS pro_until, u.free_nudge_sent_at AS free_nudge_sent_at
+       FROM events e
+       LEFT JOIN users u ON u.telegram_user_id = e.telegram_user_id
+       WHERE e.event_name = 'plan_generated'
+       GROUP BY e.telegram_user_id
+       HAVING last_plan_at <= ? AND last_plan_at > ?`
+    )
+    .all(eligibleUntil, eligibleSince);
+
+  return rows
+    .filter((r) => !r.is_pro && !(r.pro_until && r.pro_until > nowISO))
+    .filter((r) => !r.free_nudge_sent_at || r.free_nudge_sent_at < r.last_plan_at)
+    .map((r) => ({ telegram_user_id: r.telegram_user_id, last_plan_at: r.last_plan_at }));
+}
+
+export function markFreeNudgeSent(db, telegramUserId, sentAtISO) {
+  db.prepare(
+    `INSERT INTO users (telegram_user_id, free_nudge_sent_at) VALUES (?, ?)
+     ON CONFLICT(telegram_user_id) DO UPDATE SET free_nudge_sent_at = excluded.free_nudge_sent_at`
+  ).run(telegramUserId, sentAtISO);
 }
 
 /** Для дневного отчёта админу (см. digest.js) — сколько платежей завершилось

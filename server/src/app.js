@@ -11,6 +11,7 @@ import {
   saveFeedback, listRecentFeedback, updateMealTimesForUser,
   createPendingPayment, getPaymentByYookassaId, updatePaymentStatus, extendUserPro,
   countRewardedReferrals,
+  getExtraPlanCredits, addExtraPlanCredit, consumeExtraPlanCredit,
 } from "./db.js";
 import { planReplyForUpdate, buildWelcomeText, buildFeedbackAckText, buildFeedbackListText, buildFeedbackAdminNotifyText, buildSupportPromptText } from "./webhook.js";
 import { sendTelegramMessage } from "./telegram.js";
@@ -40,7 +41,10 @@ const MAX_PROPS_JSON_LENGTH = 4000;
 // текстом в SUBSCRIPTION_BENEFITS (src/App.jsx) задолго до того, как он
 // реально стал работать технически.
 export const FREE_PLANS_PER_WEEK = 1;
-const FREE_WINDOW_MS = 7 * 24 * 3_600_000;
+// export — scheduler.js переиспользует то же значение для "лёгкого
+// бесплатного напоминания вернуться" (runFreeNudgeTick), чтобы окно сброса
+// лимита не разъезжалось между двумя местами при будущей правке.
+export const FREE_WINDOW_MS = 7 * 24 * 3_600_000;
 const MAX_PLAN_JSON_LENGTH = 200_000; // с запасом на неделю рецептов+список покупок, но не резиновое
 
 // Цена и срок — те же 299 ₽/мес, что уже показаны на ProModal (src/App.jsx)
@@ -50,6 +54,15 @@ const MAX_PLAN_JSON_LENGTH = 200_000; // с запасом на неделю р�
 // "а как быть с февралём").
 export const PRO_PRICE_RUB = 299;
 export const PRO_PERIOD_DAYS = 30;
+
+// "Ещё один план на этой неделе" — разовая дешёвая покупка, ступенька перед
+// полной подпиской (живой вывод из ревью в чате: "многим проще заплатить
+// один раз 50-70 ₽, чем сразу оформить месячную подписку"). Не отдельная
+// таблица тарифов — просто второй "product" у того же /api/pay/create,
+// см. parsePayCreateRequest и ветку в /yookassa/webhook.
+export const EXTRA_PLAN_PRODUCT = "extra_plan";
+export const EXTRA_PLAN_PRICE_RUB = 59;
+const PRO_PRODUCT = "pro";
 
 function readJsonBody(req) {
   return new Promise((resolve, reject) => {
@@ -153,13 +166,17 @@ async function readAuthenticatedBody(req, botToken) {
 
 /** Чистая функция — сколько ещё бесплатных сборок доступно прямо сейчас.
  * Вынесена отдельно от HTTP, чтобы тестировать без реального запроса и без
- * реальных дат (принимает now параметром). */
-export function computePlanStatus(isPro, usedThisWeek, now) {
-  const canGenerate = isPro || usedThisWeek < FREE_PLANS_PER_WEEK;
+ * реальных дат (принимает now параметром). extraPlanCredits — разовые
+ * покупки "ещё один план на этой неделе" (см. EXTRA_PLAN_PRODUCT) — просто
+ * прибавляются к базовому бесплатному лимиту, списываются по факту
+ * использования отдельно (см. /events ниже), не здесь. */
+export function computePlanStatus(isPro, usedThisWeek, now, extraPlanCredits = 0) {
+  const canGenerate = isPro || usedThisWeek < FREE_PLANS_PER_WEEK + extraPlanCredits;
   return {
     isPro,
     freeLimitPerWeek: FREE_PLANS_PER_WEEK,
     usedThisWeek,
+    extraPlanCredits,
     canGenerate,
     // Не "через 7 дней от последнего плана", а просто "через 7 дней от
     // сейчас" — раз лимит скользящий (countPlanGenerationsSince), а не
@@ -349,6 +366,18 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
 
       try {
         insertEvent(db, { ...parsed.value, createdAtISO: new Date().toISOString() });
+        // Списание разового кредита "ещё один план на этой неделе" (см.
+        // EXTRA_PLAN_PRODUCT выше) — ровно в момент реального использования,
+        // не в момент покупки. plan_generated — тот же analytics-сигнал,
+        // которым уже считается usedThisWeek (countPlanGenerationsSince), так
+        // что это событие И ЕСТЬ факт "план собран", а не отдельная догадка.
+        // usedBefore считаем ДО только что вставленного события — вычитаем 1
+        // из счётчика, который теперь уже включает его.
+        if (parsed.value.eventName === "plan_generated" && !getUserPro(db, auth.user.id, new Date().toISOString())) {
+          const sinceISO = new Date(Date.now() - FREE_WINDOW_MS).toISOString();
+          const usedBefore = countPlanGenerationsSince(db, auth.user.id, sinceISO) - 1;
+          if (usedBefore >= FREE_PLANS_PER_WEEK) consumeExtraPlanCredit(db, auth.user.id);
+        }
         sendJson(res, 200, { ok: true });
       } catch (err) {
         console.error("[events] ошибка сохранения:", err);
@@ -365,7 +394,8 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
         const isPro = getUserPro(db, auth.telegramUserId, new Date().toISOString());
         const sinceISO = new Date(Date.now() - FREE_WINDOW_MS).toISOString();
         const usedThisWeek = countPlanGenerationsSince(db, auth.telegramUserId, sinceISO);
-        sendJson(res, 200, { ok: true, ...computePlanStatus(isPro, usedThisWeek, new Date()) });
+        const extraPlanCredits = getExtraPlanCredits(db, auth.telegramUserId);
+        sendJson(res, 200, { ok: true, ...computePlanStatus(isPro, usedThisWeek, new Date(), extraPlanCredits) });
       } catch (err) {
         console.error("[api/plan-status] ошибка:", err);
         sendJson(res, 500, { ok: false, error: "не удалось получить статус" });
@@ -643,11 +673,21 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
         return sendJson(res, 400, { ok: false, error: "нужен email для чека" });
       }
 
+      // Разовая покупка "ещё один план на этой неделе" (см. EXTRA_PLAN_PRODUCT
+      // выше) — второй product у того же эндпоинта, а не отдельный маршрут:
+      // авторизация/email/идемпотентность одинаковые, отличается только
+      // цена/описание/что происходит по факту оплаты (см. /yookassa/webhook).
+      // Не пришёл product вообще — старое поведение (Pro), фронтенд до этой
+      // правки его не отправлял.
+      const product = auth.body.product === EXTRA_PLAN_PRODUCT ? EXTRA_PLAN_PRODUCT : PRO_PRODUCT;
+      const amountRub = product === EXTRA_PLAN_PRODUCT ? EXTRA_PLAN_PRICE_RUB : PRO_PRICE_RUB;
+      const description = product === EXTRA_PLAN_PRODUCT ? "Съедим — ещё один план на этой неделе" : `Съедим Pro — ${PRO_PERIOD_DAYS} дней`;
+
       try {
         const idempotenceKey = randomUUID();
         const payment = await createPayment(yookassa, {
-          amountRub: PRO_PRICE_RUB,
-          description: `Съедим Pro — ${PRO_PERIOD_DAYS} дней`,
+          amountRub,
+          description,
           returnUrl: "https://t.me/s_edim_bot",
           telegramUserId: auth.telegramUserId,
           idempotenceKey,
@@ -655,7 +695,7 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
         });
         createPendingPayment(db, {
           yookassaPaymentId: payment.id, telegramUserId: auth.telegramUserId,
-          amountRub: PRO_PRICE_RUB, createdAtISO: new Date().toISOString(),
+          amountRub, createdAtISO: new Date().toISOString(), product,
         });
         // Раньше успешный путь не оставлял НИ ОДНОЙ строки в логах — тот же
         // класс путаницы, что и с отказом авторизации выше: диагностика
@@ -665,7 +705,7 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
         // строки не будет), либо платёж СОЗДАЁТСЯ успешно, а страница оплаты
         // просто не открывается (Telegram.WebApp.openLink на фронтенде) —
         // раньше эти два случая было решительно нечем отличить.
-        console.log(`[api/pay/create] платёж создан: id=${payment.id}, telegram_user_id=${auth.telegramUserId}`);
+        console.log(`[api/pay/create] платёж создан: id=${payment.id}, telegram_user_id=${auth.telegramUserId}, product=${product}`);
         sendJson(res, 200, { ok: true, confirmationUrl: payment.confirmationUrl });
       } catch (err) {
         console.error("[api/pay/create] ошибка создания платежа:", err.message);
@@ -706,11 +746,17 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
         }
         // Идемпотентность: ЮKassa может прислать одно и то же уведомление
         // несколько раз — если платёж УЖЕ отмечен успешным, не продлеваем
-        // Pro повторно на те же деньги.
+        // Pro/не начисляем кредит повторно на те же деньги. existing.product
+        // — что именно куплено (см. createPendingPayment/EXTRA_PLAN_PRODUCT
+        // выше), старые платежи до этой колонки читаются как 'pro' (DEFAULT).
         if (status.status === "succeeded" && existing.status !== "succeeded") {
           const nowISO = new Date().toISOString();
           updatePaymentStatus(db, { yookassaPaymentId: status.id, status: "succeeded", confirmedAtISO: nowISO });
-          extendUserPro(db, existing.telegram_user_id, { fromISO: nowISO, addDays: PRO_PERIOD_DAYS });
+          if (existing.product === EXTRA_PLAN_PRODUCT) {
+            addExtraPlanCredit(db, existing.telegram_user_id);
+          } else {
+            extendUserPro(db, existing.telegram_user_id, { fromISO: nowISO, addDays: PRO_PERIOD_DAYS });
+          }
         } else if (status.status !== existing.status) {
           updatePaymentStatus(db, { yookassaPaymentId: status.id, status: status.status, confirmedAtISO: null });
         }

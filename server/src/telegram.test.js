@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { sendTelegramMessage, buildReminderText, sendTelegramDocument } from "./telegram.js";
+import { sendTelegramMessage, buildReminderText, buildFreeNudgeText, sendTelegramDocument } from "./telegram.js";
 
 describe("sendTelegramMessage", () => {
   afterEach(() => vi.unstubAllGlobals());
@@ -64,5 +64,16 @@ describe("buildReminderText", () => {
     const text = buildReminderText("Ужин", "Паста с томатным соусом");
     expect(text).toContain("ужин");
     expect(text).toContain("Паста с томатным соусом");
+  });
+});
+
+// Живой вывод из ревью: "лёгкое бесплатное напоминание вернуться" — намеренно
+// без конкретного блюда/времени (это остаётся Pro-бонусом, buildReminderText
+// выше), просто нейтральный крючок вернуться в приложение.
+describe("buildFreeNudgeText", () => {
+  it("непустой текст, упоминает бесплатный план", () => {
+    const text = buildFreeNudgeText();
+    expect(text.length).toBeGreaterThan(0);
+    expect(text).toMatch(/план/i);
   });
 });

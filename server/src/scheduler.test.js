@@ -1,10 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { openDb, saveUserPlan, findCandidateSlots, setUserPro } from "./db.js";
-import { runReminderTick } from "./scheduler.js";
+import { openDb, saveUserPlan, findCandidateSlots, setUserPro, insertEvent, extendUserPro, getUsersDueForFreeNudge } from "./db.js";
+import { runReminderTick, runFreeNudgeTick } from "./scheduler.js";
 
 vi.mock("./telegram.js", () => ({
   sendTelegramMessage: vi.fn(),
   buildReminderText: (label, recipe) => `напоминание: ${label} — ${recipe}`,
+  buildFreeNudgeText: () => "бесплатный план снова доступен",
 }));
 import { sendTelegramMessage } from "./telegram.js";
 
@@ -85,5 +86,64 @@ describe("runReminderTick", () => {
     const results = await runReminderTick(db, "BOT:TOKEN", now);
     expect(results).toEqual([]);
     expect(sendTelegramMessage).not.toHaveBeenCalled();
+  });
+});
+
+// Живой вывод из ревью: "лёгкое бесплатное напоминание вернуться" — раньше
+// сброс бесплатного лимита проходил тихо, никто не подсказывал пользователю
+// прийти собрать план снова.
+describe("runFreeNudgeTick", () => {
+  let db;
+  beforeEach(() => {
+    db = openDb(":memory:");
+    vi.clearAllMocks();
+  });
+
+  it("отправляет напоминание тому, у кого лимит только что сбросился, и помечает отправленным", async () => {
+    insertEvent(db, { telegramUserId: 1, eventName: "plan_generated", props: null, createdAtISO: "2026-09-03T09:00:00.000Z" }); // ровно 7 дней назад
+    sendTelegramMessage.mockResolvedValue({ message_id: 1 });
+
+    const now = new Date("2026-09-10T09:00:00.000Z");
+    const results = await runFreeNudgeTick(db, "BOT:TOKEN", now);
+
+    expect(results).toEqual([{ telegramUserId: 1, ok: true }]);
+    expect(sendTelegramMessage).toHaveBeenCalledWith("BOT:TOKEN", 1, "бесплатный план снова доступен");
+
+    // повторный тик той же минутой позже не должен слать снова — уже отмечено
+    const secondTick = await runFreeNudgeTick(db, "BOT:TOKEN", new Date(now.getTime() + 60000));
+    expect(secondTick).toEqual([]);
+    expect(sendTelegramMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it("не отправляет, если лимит ещё не сбросился (план был недавно)", async () => {
+    insertEvent(db, { telegramUserId: 1, eventName: "plan_generated", props: null, createdAtISO: "2026-09-09T09:00:00.000Z" }); // 1 день назад
+    const results = await runFreeNudgeTick(db, "BOT:TOKEN", new Date("2026-09-10T09:00:00.000Z"));
+    expect(results).toEqual([]);
+    expect(sendTelegramMessage).not.toHaveBeenCalled();
+  });
+
+  it("не отправляет Pro-пользователю, даже если формально попадает в окно", async () => {
+    insertEvent(db, { telegramUserId: 1, eventName: "plan_generated", props: null, createdAtISO: "2026-09-03T09:00:00.000Z" });
+    setUserPro(db, 1, true);
+    const results = await runFreeNudgeTick(db, "BOT:TOKEN", new Date("2026-09-10T09:00:00.000Z"));
+    expect(results).toEqual([]);
+    expect(sendTelegramMessage).not.toHaveBeenCalled();
+  });
+
+  it("ошибка отправки одному пользователю не мешает остальным и не помечает отправленным", async () => {
+    insertEvent(db, { telegramUserId: 1, eventName: "plan_generated", props: null, createdAtISO: "2026-09-03T09:00:00.000Z" });
+    insertEvent(db, { telegramUserId: 2, eventName: "plan_generated", props: null, createdAtISO: "2026-09-03T09:00:00.000Z" });
+    sendTelegramMessage.mockImplementation(async (token, chatId) => {
+      if (chatId === 1) throw new Error("Forbidden: bot was blocked by the user");
+      return { message_id: 1 };
+    });
+
+    const now = new Date("2026-09-10T09:00:00.000Z");
+    const results = await runFreeNudgeTick(db, "BOT:TOKEN", now);
+    expect(results.find((r) => r.telegramUserId === 1)).toMatchObject({ ok: false });
+    expect(results.find((r) => r.telegramUserId === 2)).toMatchObject({ ok: true });
+
+    const stillDue = getUsersDueForFreeNudge(db, { nowISO: now.toISOString(), freeWindowMs: 7 * 24 * 3_600_000, graceMs: 3 * 24 * 3_600_000 });
+    expect(stillDue.map((r) => r.telegram_user_id)).toEqual([1]); // не помечен — сможет повториться
   });
 });

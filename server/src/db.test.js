@@ -11,6 +11,8 @@ import {
   saveFeedback, listRecentFeedback, updateMealTimesForUser,
   extendUserPro, createPendingPayment, updatePaymentStatus, summarizePaymentsSince,
   getUsersWithProExpiringSoon,
+  addExtraPlanCredit, getExtraPlanCredits, consumeExtraPlanCredit,
+  getUsersDueForFreeNudge, markFreeNudgeSent,
 } from "./db.js";
 
 // Живой вывод из ревью Pro-плюшек (чат): "Напоминания от бота" рекламируются
@@ -416,5 +418,123 @@ describe("updateMealTimesForUser", () => {
     const rows = findCandidateSlots(db, "2026-09-10", "2026-09-11", REMINDER_NOW);
     const user7Row = rows.find((r) => r.telegram_user_id === 7);
     expect(user7Row.meal_time).toBe("13:00"); // не тронут
+  });
+});
+
+// Живой вывод из ревью: "разовая дешёвая покупка ещё одного плана на этой
+// неделе как ступенька перед полной подпиской" — extra_plan_credits хранит,
+// сколько таких разовых сборок ещё не использовано (см. app.js:
+// computePlanStatus/EXTRA_PLAN_PRODUCT).
+describe("extra_plan_credits (разовая покупка 'ещё один план')", () => {
+  let db;
+  beforeEach(() => {
+    db = openDb(":memory:");
+  });
+
+  it("по умолчанию 0, в том числе у не существующего вовсе пользователя", () => {
+    expect(getExtraPlanCredits(db, 999)).toBe(0);
+  });
+
+  it("addExtraPlanCredit создаёт строку пользователя, если её ещё не было", () => {
+    addExtraPlanCredit(db, 42);
+    expect(getExtraPlanCredits(db, 42)).toBe(1);
+  });
+
+  it("несколько покупок подряд суммируются", () => {
+    addExtraPlanCredit(db, 42);
+    addExtraPlanCredit(db, 42);
+    expect(getExtraPlanCredits(db, 42)).toBe(2);
+  });
+
+  it("consumeExtraPlanCredit списывает ровно один", () => {
+    addExtraPlanCredit(db, 42, 2);
+    consumeExtraPlanCredit(db, 42);
+    expect(getExtraPlanCredits(db, 42)).toBe(1);
+  });
+
+  it("consumeExtraPlanCredit на нуле не уходит в минус", () => {
+    consumeExtraPlanCredit(db, 42);
+    expect(getExtraPlanCredits(db, 42)).toBe(0);
+  });
+
+  it("addExtraPlanCredit не затирает существующие настройки пользователя (timezone/reminderLead)", () => {
+    saveUserPlan(db, { telegramUserId: 42, timezoneOffsetMinutes: 180, reminderLeadMinutes: 45, mealSlots: [{ scheduledDate: "2026-09-10", mealType: "dinner", mealLabel: "Ужин", mealTime: "19:00", recipeName: "Паста" }] });
+    addExtraPlanCredit(db, 42);
+    setUserPro(db, 42, true); // не мешает тесту, просто чтобы findCandidateSlots ниже не отфильтровал
+    const rows = findCandidateSlots(db, "2026-09-10", "2026-09-11", "2026-09-10T12:00:00Z");
+    expect(rows[0].reminder_lead_minutes).toBe(45);
+  });
+});
+
+// Живой вывод из ревью: "лёгкое бесплатное напоминание вернуться" — раньше
+// сброс бесплатного лимита проходил тихо, никто не подсказывал пользователю
+// прийти собрать план снова.
+describe("getUsersDueForFreeNudge / markFreeNudgeSent", () => {
+  let db;
+  const FREE_WINDOW_MS = 7 * 24 * 3_600_000;
+  const GRACE_MS = 3 * 24 * 3_600_000;
+  const NOW_ISO = "2026-09-17T09:00:00.000Z";
+
+  beforeEach(() => {
+    db = openDb(":memory:");
+  });
+
+  function planGeneratedAt(telegramUserId, daysAgo) {
+    insertEvent(db, {
+      telegramUserId, eventName: "plan_generated", props: null,
+      createdAtISO: new Date(new Date(NOW_ISO).getTime() - daysAgo * 24 * 3_600_000).toISOString(),
+    });
+  }
+
+  it("лимит только что сбросился (план ровно 7 дней назад) -> кандидат на напоминание", () => {
+    planGeneratedAt(1, 7);
+    const due = getUsersDueForFreeNudge(db, { nowISO: NOW_ISO, freeWindowMs: FREE_WINDOW_MS, graceMs: GRACE_MS });
+    expect(due.map((r) => r.telegram_user_id)).toEqual([1]);
+  });
+
+  it("план был недавно (лимит ещё не сбросился) -> не кандидат", () => {
+    planGeneratedAt(1, 2);
+    const due = getUsersDueForFreeNudge(db, { nowISO: NOW_ISO, freeWindowMs: FREE_WINDOW_MS, graceMs: GRACE_MS });
+    expect(due).toHaveLength(0);
+  });
+
+  it("план сброшен слишком давно (за пределами grace-окна) -> уже не кандидат, не шлём вечно", () => {
+    planGeneratedAt(1, 30);
+    const due = getUsersDueForFreeNudge(db, { nowISO: NOW_ISO, freeWindowMs: FREE_WINDOW_MS, graceMs: GRACE_MS });
+    expect(due).toHaveLength(0);
+  });
+
+  it("Pro-пользователь не кандидат, даже если формально попадает в окно", () => {
+    planGeneratedAt(1, 7);
+    setUserPro(db, 1, true);
+    const due = getUsersDueForFreeNudge(db, { nowISO: NOW_ISO, freeWindowMs: FREE_WINDOW_MS, graceMs: GRACE_MS });
+    expect(due).toHaveLength(0);
+  });
+
+  it("действующий оплаченный период (pro_until в будущем) -> тоже не кандидат", () => {
+    planGeneratedAt(1, 7);
+    extendUserPro(db, 1, { fromISO: NOW_ISO, addDays: 10 });
+    const due = getUsersDueForFreeNudge(db, { nowISO: NOW_ISO, freeWindowMs: FREE_WINDOW_MS, graceMs: GRACE_MS });
+    expect(due).toHaveLength(0);
+  });
+
+  it("уже отправляли напоминание про ЭТОТ сброс -> не дублируем", () => {
+    planGeneratedAt(1, 7);
+    markFreeNudgeSent(db, 1, NOW_ISO);
+    const due = getUsersDueForFreeNudge(db, { nowISO: NOW_ISO, freeWindowMs: FREE_WINDOW_MS, graceMs: GRACE_MS });
+    expect(due).toHaveLength(0);
+  });
+
+  it("после НОВОГО plan_generated (следующий цикл) напоминание снова можно отправить", () => {
+    planGeneratedAt(1, 14); // старый цикл
+    markFreeNudgeSent(db, 1, new Date(new Date(NOW_ISO).getTime() - 14 * 24 * 3_600_000 + 1000).toISOString()); // напомнили про тот цикл
+    planGeneratedAt(1, 7); // новый план, новый цикл сброса
+    const due = getUsersDueForFreeNudge(db, { nowISO: NOW_ISO, freeWindowMs: FREE_WINDOW_MS, graceMs: GRACE_MS });
+    expect(due.map((r) => r.telegram_user_id)).toEqual([1]);
+  });
+
+  it("никогда не строил план -> не кандидат (нечего напоминать)", () => {
+    const due = getUsersDueForFreeNudge(db, { nowISO: NOW_ISO, freeWindowMs: FREE_WINDOW_MS, graceMs: GRACE_MS });
+    expect(due).toHaveLength(0);
   });
 });

@@ -156,7 +156,12 @@ export async function sendSupportPrompt() {
  * причину прямо в интерфейсе: "нет интернета", "сервер ответил 503" и т.п. —
  * следующий круг диагностики не должен снова упираться в "а в логах пусто".
  */
-export async function createProPayment(email) {
+/** product: "pro" | "extra_plan" (см. server/src/app.js: EXTRA_PLAN_PRODUCT —
+ * "ещё один план на этой неделе", разовая дешёвая покупка как ступенька
+ * перед полной подпиской, живой вывод из ревью в чате). Один общий эндпоинт
+ * на оба продукта — авторизация/email/идемпотентность одинаковые, отличается
+ * только цена и что происходит по факту оплаты на сервере. */
+export async function createPayment(product, email) {
   const backendUrl = getBackendUrl();
   const initData = currentInitData();
   if (!backendUrl || !initData) {
@@ -168,7 +173,7 @@ export async function createProPayment(email) {
     const res = await fetch(`${backendUrl}/api/pay/create`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ initData, email }),
+      body: JSON.stringify({ initData, email, product }),
     });
     if (!res.ok) {
       const data = await res.json().catch(() => null);
@@ -185,6 +190,14 @@ export async function createProPayment(email) {
     console.warn("Не удалось создать платёж: сетевая ошибка", err.message);
     return { ok: false, reason: "network_error", detail: err.message };
   }
+}
+
+export function createProPayment(email) {
+  return createPayment("pro", email);
+}
+
+export function createExtraPlanPayment(email) {
+  return createPayment("extra_plan", email);
 }
 
 /** Как resolvePrices (vkusvillMcp.js), но через ОБЩИЙ серверный кэш цен

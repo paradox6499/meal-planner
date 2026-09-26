@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { createHmac } from "node:crypto";
-import { openDb, findCandidateSlots, summarizeEventsSince, setUserPro, insertEvent, listPlanHistory, listRecentFeedback, createPendingPayment, getPaymentByYookassaId, getUserPro } from "./db.js";
-import { createApp, parsePlanRequest, parseEventRequest, parseSavePlanRequest, parseMealTimesRequest, parsePricesRequest, computePlanStatus, FREE_PLANS_PER_WEEK } from "./app.js";
+import { openDb, findCandidateSlots, summarizeEventsSince, setUserPro, insertEvent, listPlanHistory, listRecentFeedback, createPendingPayment, getPaymentByYookassaId, getUserPro, getExtraPlanCredits, addExtraPlanCredit } from "./db.js";
+import { createApp, parsePlanRequest, parseEventRequest, parseSavePlanRequest, parseMealTimesRequest, parsePricesRequest, computePlanStatus, FREE_PLANS_PER_WEEK, EXTRA_PLAN_PRODUCT, EXTRA_PLAN_PRICE_RUB, PRO_PRICE_RUB } from "./app.js";
 
 const BOT_TOKEN = "123456:TEST-TOKEN";
 
@@ -98,6 +98,24 @@ describe("computePlanStatus", () => {
     const status = computePlanStatus(false, FREE_PLANS_PER_WEEK, new Date("2026-09-10T09:00:00Z"));
     expect(status.canGenerate).toBe(false);
     expect(status.nextResetHint).toBe("2026-09-17T09:00:00.000Z");
+  });
+
+  // Живой вывод из ревью: "разовая дешёвая покупка ещё одного плана на этой
+  // неделе" — extraPlanCredits прибавляется к базовому бесплатному лимиту.
+  it("extraPlanCredits расширяет лимит — можно генерировать сверх базового", () => {
+    const status = computePlanStatus(false, FREE_PLANS_PER_WEEK, new Date("2026-09-10T09:00:00Z"), 1);
+    expect(status.canGenerate).toBe(true);
+    expect(status.extraPlanCredits).toBe(1);
+  });
+
+  it("extraPlanCredits тоже кончаются — на лимит+кредиты снова заблокировано", () => {
+    const status = computePlanStatus(false, FREE_PLANS_PER_WEEK + 1, new Date("2026-09-10T09:00:00Z"), 1);
+    expect(status.canGenerate).toBe(false);
+  });
+
+  it("без extraPlanCredits (не передан) — поведение как раньше, extraPlanCredits:0", () => {
+    const status = computePlanStatus(false, 0, new Date("2026-09-10T09:00:00Z"));
+    expect(status.extraPlanCredits).toBe(0);
   });
 });
 
@@ -257,6 +275,41 @@ describe("HTTP-сервер", () => {
       body: JSON.stringify({ initData: validInitData(42) }),
     });
     expect(res.status).toBe(400);
+  });
+
+  // Живой вывод из ревью: "разовая покупка ещё одного плана" — кредит
+  // списывается ровно тогда, когда реально использован (это событие —
+  // единственный сигнал "план собран"), не в момент покупки.
+  it("plan_generated ПОСЛЕ исчерпания базового лимита списывает один extra_plan_credit", async () => {
+    addExtraPlanCredit(db, 42, 2);
+    // Первая сборка — в пределах базового лимита (FREE_PLANS_PER_WEEK=1), кредит не трогаем
+    await fetch(`${baseUrl}/events`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ initData: validInitData(42), eventName: "plan_generated" }) });
+    expect(getExtraPlanCredits(db, 42)).toBe(2);
+
+    // Вторая сборка на этой же неделе — сверх базового лимита, идёт за счёт кредита
+    await fetch(`${baseUrl}/events`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ initData: validInitData(42), eventName: "plan_generated" }) });
+    expect(getExtraPlanCredits(db, 42)).toBe(1);
+  });
+
+  it("plan_generated в пределах базового лимита не трогает кредиты", async () => {
+    addExtraPlanCredit(db, 42, 1);
+    await fetch(`${baseUrl}/events`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ initData: validInitData(42), eventName: "plan_generated" }) });
+    expect(getExtraPlanCredits(db, 42)).toBe(1);
+  });
+
+  it("Pro-пользователь никогда не расходует extra_plan_credits (лимит на него не действует)", async () => {
+    setUserPro(db, 42, true);
+    addExtraPlanCredit(db, 42, 1);
+    for (let i = 0; i < 3; i++) {
+      await fetch(`${baseUrl}/events`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ initData: validInitData(42), eventName: "plan_generated" }) });
+    }
+    expect(getExtraPlanCredits(db, 42)).toBe(1);
+  });
+
+  it("другие события (не plan_generated) не трогают кредиты", async () => {
+    addExtraPlanCredit(db, 42, 1);
+    await fetch(`${baseUrl}/events`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ initData: validInitData(42), eventName: "support_clicked" }) });
+    expect(getExtraPlanCredits(db, 42)).toBe(1);
   });
 
   it("POST /api/plan-status: free-пользователь без сборок за неделю — можно генерировать", async () => {
@@ -764,6 +817,43 @@ describe("POST /api/pay/create", () => {
     expect(yookassaFetch).not.toHaveBeenCalled();
   });
 
+  // Живой вывод из ревью: "разовая дешёвая покупка ещё одного плана на этой
+  // неделе" — второй product у того же эндпоинта, дешевле и не тарифный.
+  it("product:'extra_plan' -> платёж на EXTRA_PLAN_PRICE_RUB, а не на цену Pro", async () => {
+    await startServer({ botToken: BOT_TOKEN, yookassa: YOOKASSA_CREDS });
+    let capturedBody;
+    stubYookassaFetch(async (url, opts) => {
+      capturedBody = JSON.parse(opts.body);
+      return { ok: true, json: async () => ({ id: "pay-extra-1", status: "pending", confirmation: { confirmation_url: "https://yookassa.ru/checkout/pay-extra-1" } }) };
+    });
+
+    const res = await fetch(`${baseUrl}/api/pay/create`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ initData: validInitData(42), email: "user@example.com", product: "extra_plan" }),
+    });
+    expect(res.status).toBe(200);
+    expect(capturedBody.amount.value).toBe(EXTRA_PLAN_PRICE_RUB.toFixed(2));
+    expect(capturedBody.amount.value).not.toBe(PRO_PRICE_RUB.toFixed(2));
+
+    const payment = getPaymentByYookassaId(db, "pay-extra-1");
+    expect(payment).toMatchObject({ telegram_user_id: 42, amount_rub: EXTRA_PLAN_PRICE_RUB, product: "extra_plan" });
+  });
+
+  it("product не передан -> как раньше, product:'pro' в записи платежа", async () => {
+    await startServer({ botToken: BOT_TOKEN, yookassa: YOOKASSA_CREDS });
+    stubYookassaFetch(async () => ({
+      ok: true,
+      json: async () => ({ id: "pay-default", status: "pending", confirmation: { confirmation_url: "https://yookassa.ru/checkout/pay-default" } }),
+    }));
+    await fetch(`${baseUrl}/api/pay/create`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ initData: validInitData(42), email: "user@example.com" }),
+    });
+    expect(getPaymentByYookassaId(db, "pay-default")).toMatchObject({ product: "pro" });
+  });
+
   it("email не похож на email (нет @/домена) -> 400", async () => {
     await startServer({ botToken: BOT_TOKEN, yookassa: YOOKASSA_CREDS });
     const res = await fetch(`${baseUrl}/api/pay/create`, {
@@ -812,6 +902,24 @@ describe("POST /yookassa/webhook", () => {
 
     expect(getPaymentByYookassaId(db, "pay-1")).toMatchObject({ status: "succeeded" });
     expect(getUserPro(db, 42, "2026-09-10T09:00:01.000Z")).toBe(true);
+  });
+
+  // Живой вывод из ревью: "разовая покупка ещё одного плана" — succeeded по
+  // платежу с product:'extra_plan' должен начислить кредит, а НЕ продлить Pro.
+  it("succeeded с product:'extra_plan' -> начисляет кредит, НЕ делает пользователя Pro", async () => {
+    createPendingPayment(db, { yookassaPaymentId: "pay-extra-1", telegramUserId: 42, amountRub: EXTRA_PLAN_PRICE_RUB, createdAtISO: "2026-09-10T09:00:00.000Z", product: "extra_plan" });
+    stubYookassaFetch(async () => ({
+      ok: true,
+      json: async () => ({ id: "pay-extra-1", status: "succeeded", paid: true, amount: { value: `${EXTRA_PLAN_PRICE_RUB}.00` }, metadata: { telegram_user_id: "42" } }),
+    }));
+
+    const res = await fetch(`${baseUrl}/yookassa/webhook`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ object: { id: "pay-extra-1" } }),
+    });
+    expect(res.status).toBe(200);
+    expect(getPaymentByYookassaId(db, "pay-extra-1")).toMatchObject({ status: "succeeded" });
+    expect(getExtraPlanCredits(db, 42)).toBe(1);
+    expect(getUserPro(db, 42, "2026-09-10T09:00:01.000Z")).toBe(false);
   });
 
   it("повторное уведомление об УЖЕ succeeded платеже не продлевает Pro второй раз", async () => {

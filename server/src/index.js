@@ -4,7 +4,7 @@
 // порта/файла/окружения.
 import { openDb } from "./db.js";
 import { createApp } from "./app.js";
-import { runReminderTick } from "./scheduler.js";
+import { runReminderTick, runFreeNudgeTick } from "./scheduler.js";
 import { runDigest } from "./digest.js";
 import { runBackup } from "./backup.js";
 import { runProRenewalTick } from "./proRenewal.js";
@@ -40,6 +40,11 @@ const YOOKASSA_SHOP_ID = process.env.YOOKASSA_SHOP_ID || null;
 const YOOKASSA_SECRET_KEY = process.env.YOOKASSA_SECRET_KEY || null;
 const YOOKASSA = YOOKASSA_SHOP_ID && YOOKASSA_SECRET_KEY ? { shopId: YOOKASSA_SHOP_ID, secretKey: YOOKASSA_SECRET_KEY } : null;
 const PRO_RENEWAL_CHECK_INTERVAL_MS = 60 * 60 * 1000; // раз в час достаточно — окно напоминания (3 дня) намного шире
+// "Лёгкое бесплатное напоминание вернуться" (см. scheduler.js:
+// runFreeNudgeTick) — тот же порядок величины, что и у proRenewalTick: сброс
+// бесплатного лимита не может случиться чаще раза в неделю, часовой тик с
+// огромным запасом успевает поймать нужное окно.
+const FREE_NUDGE_CHECK_INTERVAL_MS = 60 * 60 * 1000;
 
 if (!BOT_TOKEN) {
   console.error("TELEGRAM_BOT_TOKEN не задан — без него нельзя ни проверить initData, ни отправить напоминание. Задайте переменную окружения и перезапустите.");
@@ -120,3 +125,23 @@ async function proRenewalTick() {
 }
 setInterval(proRenewalTick, PRO_RENEWAL_CHECK_INTERVAL_MS);
 proRenewalTick();
+
+// Живой вывод из ревью Pro-плюшек (чат): "лёгкое бесплатное напоминание
+// вернуться" — раньше сброс бесплатного лимита проходил тихо, никто не
+// подсказывал пользователю прийти собрать план снова, человек просто
+// забывал про приложение. Не привязано ни к ADMIN_TELEGRAM_ID (это
+// сообщение реальным пользователям, не отчёт админу), ни к YOOKASSA
+// (напоминание про бесплатный лимит не имеет отношения к оплате).
+async function freeNudgeTick() {
+  try {
+    const results = await runFreeNudgeTick(db, BOT_TOKEN);
+    if (results.length > 0) {
+      const sent = results.filter((r) => r.ok).length;
+      console.log(`[freeNudge] тик: ${sent}/${results.length} бесплатных напоминаний отправлено`);
+    }
+  } catch (err) {
+    console.error("[freeNudge] ошибка тика:", err);
+  }
+}
+setInterval(freeNudgeTick, FREE_NUDGE_CHECK_INTERVAL_MS);
+freeNudgeTick();
