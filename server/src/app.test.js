@@ -1,9 +1,20 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { createHmac } from "node:crypto";
 import { openDb, findCandidateSlots, summarizeEventsSince, setUserPro, insertEvent, listPlanHistory, listRecentFeedback, createPendingPayment, getPaymentByYookassaId, getUserPro, getExtraPlanCredits, addExtraPlanCredit } from "./db.js";
-import { createApp, parsePlanRequest, parseEventRequest, parseSavePlanRequest, parseMealTimesRequest, parsePricesRequest, computePlanStatus, FREE_PLANS_PER_WEEK, EXTRA_PLAN_PRODUCT, EXTRA_PLAN_PRICE_RUB, PRO_PRICE_RUB } from "./app.js";
+import { createApp, parsePlanRequest, parseEventRequest, parseSavePlanRequest, parseMealTimesRequest, parsePricesRequest, computePlanStatus, FREE_PLANS_PER_WEEK, EXTRA_PLAN_PRODUCT, EXTRA_PLAN_PRICE_RUB, PRO_PRICE_RUB, RATE_LIMIT_MAX_REQUESTS, PRICES_RATE_LIMIT_MAX_REQUESTS, PAY_RATE_LIMIT_MAX_REQUESTS } from "./app.js";
+import { clearRateLimitState } from "./rateLimit.js";
 
 const BOT_TOKEN = "123456:TEST-TOKEN";
+
+// rateLimit.js хранит счётчики в module-level Map, общей на ВСЕ тесты этого
+// файла (vitest переиспользует один и тот же модуль между it() внутри одного
+// файла) — многие тесты ниже используют одного и того же telegram_user_id
+// (validInitData(42)) помногу раз. Без сброса между тестами количество
+// вызовов накапливалось бы через границы отдельных it() и рано или поздно
+// начало бы ловить 429 там, где тест проверяет совсем другое поведение.
+beforeEach(() => {
+  clearRateLimitState();
+});
 
 function signInitData(fields, botToken = BOT_TOKEN) {
   const dataCheckString = Object.entries(fields)
@@ -1167,5 +1178,101 @@ describe("POST /telegram/webhook", () => {
     stubTelegramFetch({ ok: true, json: async () => ({ ok: false, description: "Forbidden: bot was blocked by the user" }) });
     const res = await post({ message: { text: "/start", chat: { id: 42 } } });
     expect(res.status).toBe(200);
+  });
+});
+
+// Живой вывод из ревью безопасности (чат): "стоит сделать rate limiting" —
+// см. server/src/rateLimit.js за самим механизмом, здесь — что он реально
+// подключён к нужным эндпоинтам и с правильными порогами.
+describe("Rate limiting", () => {
+  let db, server, baseUrl;
+  const realFetch = globalThis.fetch;
+
+  beforeEach(async () => {
+    db = openDb(":memory:");
+    server = createApp(db, { botToken: BOT_TOKEN, yookassa: { shopId: "1460694", secretKey: "test_secret" } });
+    await new Promise((resolve) => server.listen(0, resolve));
+    baseUrl = `http://127.0.0.1:${server.address().port}`;
+  });
+  afterEach(async () => {
+    await new Promise((resolve) => server.close(resolve));
+    vi.unstubAllGlobals();
+  });
+
+  it(`общий лимит (${RATE_LIMIT_MAX_REQUESTS}/мин): дальше 429, до этого — обычные ответы`, async () => {
+    for (let i = 0; i < RATE_LIMIT_MAX_REQUESTS; i++) {
+      const res = await fetch(`${baseUrl}/api/plan-status`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ initData: validInitData(1) }),
+      });
+      expect(res.status).toBe(200);
+    }
+    const overLimit = await fetch(`${baseUrl}/api/plan-status`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ initData: validInitData(1) }),
+    });
+    expect(overLimit.status).toBe(429);
+  });
+
+  it("общий лимит считается отдельно по каждому telegram_user_id, не глобально", async () => {
+    for (let i = 0; i < RATE_LIMIT_MAX_REQUESTS; i++) {
+      await fetch(`${baseUrl}/api/plan-status`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ initData: validInitData(1) }) });
+    }
+    // другой пользователь — свежий счётчик, не задет чужим лимитом
+    const otherUser = await fetch(`${baseUrl}/api/plan-status`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ initData: validInitData(2) }) });
+    expect(otherUser.status).toBe(200);
+  });
+
+  it("/api/plan и /events (мимо readAuthenticatedBody) тоже считаются в общий лимит — общий на все эндпоинты сразу", async () => {
+    for (let i = 0; i < RATE_LIMIT_MAX_REQUESTS; i++) {
+      await fetch(`${baseUrl}/events`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ initData: validInitData(3), eventName: "app_opened" }) });
+    }
+    const res = await fetch(`${baseUrl}/api/plan-status`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ initData: validInitData(3) }) });
+    expect(res.status).toBe(429);
+  });
+
+  it(`/api/prices: отдельный более строгий лимит (${PRICES_RATE_LIMIT_MAX_REQUESTS}/мин) поверх общего`, async () => {
+    for (let i = 0; i < PRICES_RATE_LIMIT_MAX_REQUESTS; i++) {
+      const res = await fetch(`${baseUrl}/api/prices`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ initData: validInitData(4), names: ["Лук"] }),
+      });
+      expect(res.status).toBe(200);
+    }
+    const overLimit = await fetch(`${baseUrl}/api/prices`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ initData: validInitData(4), names: ["Лук"] }),
+    });
+    expect(overLimit.status).toBe(429);
+  });
+
+  it(`/api/pay/create: отдельный более строгий лимит (${PAY_RATE_LIMIT_MAX_REQUESTS}/мин) поверх общего`, async () => {
+    // Без email — падает на 400 ДО создания реального платежа, но лимит
+    // считается ещё раньше (сразу после авторизации), поэтому подходит для
+    // теста и не требует мокать саму ЮKassa.
+    for (let i = 0; i < PAY_RATE_LIMIT_MAX_REQUESTS; i++) {
+      const res = await fetch(`${baseUrl}/api/pay/create`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ initData: validInitData(5) }) });
+      expect(res.status).toBe(400); // нет email — но это ПОСЛЕ прохождения лимита
+    }
+    const overLimit = await fetch(`${baseUrl}/api/pay/create`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ initData: validInitData(5) }) });
+    expect(overLimit.status).toBe(429);
+  });
+
+  it("/yookassa/webhook: публичный эндпоинт без initData тоже ограничен, по IP", async () => {
+    vi.stubGlobal("fetch", vi.fn((url, opts) => (String(url).includes("api.yookassa.ru")
+      ? Promise.resolve({ ok: true, json: async () => ({ id: "unknown", status: "canceled", paid: false, amount: { value: "1.00" }, metadata: {} }) })
+      : realFetch(url, opts))));
+
+    for (let i = 0; i < RATE_LIMIT_MAX_REQUESTS; i++) {
+      const res = await fetch(`${baseUrl}/yookassa/webhook`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ object: { id: `pay-${i}` } }) });
+      expect(res.status).toBe(200);
+    }
+    const overLimit = await fetch(`${baseUrl}/yookassa/webhook`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ object: { id: "pay-over" } }) });
+    expect(overLimit.status).toBe(429);
+  });
+
+  it("429 отдаёт понятное сообщение об ошибке, не голый статус", async () => {
+    for (let i = 0; i < PRICES_RATE_LIMIT_MAX_REQUESTS; i++) {
+      await fetch(`${baseUrl}/api/prices`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ initData: validInitData(6), names: ["Лук"] }) });
+    }
+    const res = await fetch(`${baseUrl}/api/prices`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ initData: validInitData(6), names: ["Лук"] }) });
+    const body = await res.json();
+    expect(body).toEqual({ ok: false, error: expect.stringMatching(/слишком много запросов/i) });
   });
 });

@@ -21,6 +21,7 @@ import { resolveIngredientPricesWithCache } from "./vkusvillPrices.js";
 import { createPayment, fetchPaymentStatus } from "./yookassa.js";
 import { claimReferral, maybeRewardReferral, REFERRAL_REWARD_DAYS } from "./referrals.js";
 import { createFamily, joinFamily, leaveFamily, getFamilyStatus, toggleFamilyPantryItem } from "./family.js";
+import { isRateLimited } from "./rateLimit.js";
 
 const MEAL_TYPES = new Set(["breakfast", "lunch", "dinner", "snack"]);
 const MAX_EVENT_NAME_LENGTH = 64;
@@ -46,6 +47,30 @@ export const FREE_PLANS_PER_WEEK = 1;
 // лимита не разъезжалось между двумя местами при будущей правке.
 export const FREE_WINDOW_MS = 7 * 24 * 3_600_000;
 const MAX_PLAN_JSON_LENGTH = 200_000; // с запасом на неделю рецептов+список покупок, но не резиновое
+
+// Rate limiting (см. rateLimit.js) — живой вывод из ревью безопасности в
+// чате. Общий лимит применяется в readAuthenticatedBody, значит покрывает
+// почти все POST-эндпоинты автоматически, одним местом (плюс /api/plan и
+// /events — единственные два, что не используют этот хелпер, см. комментарий
+// у readAuthenticatedBody). Один общий счётчик на ВСЕ эндпоинты сразу,
+// включая /events — а он и есть самый "шумный" по частоте (аналитика шлётся
+// на каждый клик), поэтому 60/минуту, не 20-30: с большим запасом даже для
+// человека, увлечённо кликающего по всему визарду за минуту, но заметно
+// режет скриптованную заливку (там счёт на сотни/тысячи в минуту, не на
+// единицы).
+export const RATE_LIMIT_WINDOW_MS = 60_000;
+export const RATE_LIMIT_MAX_REQUESTS = 60;
+// /api/prices — самый дорогой эндпоинт по факту: до MAX_INGREDIENT_NAMES
+// названий за один вызов, каждое непопадание в общий кэш — живой запрос к
+// ВкусВилл. Один пользователь с одной действительной сессией мог заваливать
+// сервер выдуманными названиями и посадить общий (на всех) rate-limit
+// ВкусВилл — тот же сценарий, что уже ловили этим летом от обычного
+// использования. Отдельный, более строгий счётчик поверх общего.
+export const PRICES_RATE_LIMIT_MAX_REQUESTS = 6;
+// /api/pay/create — каждый вызов создаёт РЕАЛЬНЫЙ платёж в ЮKassa (см. ниже)
+// и строку в payments; заливка тут не только нагрузка, а прямой повод для
+// вопросов от платёжного провайдера. Тоже отдельный счётчик поверх общего.
+export const PAY_RATE_LIMIT_MAX_REQUESTS = 5;
 
 // Цена и срок — те же 299 ₽/мес, что уже показаны на ProModal (src/App.jsx)
 // и в public/terms.html ("указанный на экране оплаты срок") задолго до того,
@@ -144,10 +169,18 @@ export function parseEventRequest(body, telegramUserId) {
 
 /** Общий для новых эндпоинтов кусок: прочитать JSON-тело и проверить
  * initData. Возвращает либо {ok:true, body, telegramUserId}, либо
- * {ok:false, status, error} — вызывающему коду остаётся только эта пара ifов
+ * {ok:false, status, error} — вызывающему коду остаётся только эта пара ифов
  * и своя собственная бизнес-валидация/логика. Старые /api/plan и /events
  * оставлены как есть (не рефакторил их под это) — риск задеть уже
- * протестированное ради чистоты кода того не стоит. */
+ * протестированное ради чистоты кода того не стоит, у них тот же rate-limit
+ * проставлен вручную на месте (см. их обработчики ниже).
+ *
+ * Rate limit — здесь, ПОСЛЕ успешной авторизации: лимитировать имеет смысл
+ * по telegram_user_id, а не по IP (один и тот же реальный человек может
+ * ходить через разные IP, разные люди — через один и тот же в мобильной
+ * сети/NAT), а узнать его можно только когда initData уже проверена. Значит
+ * покрывает разом почти все POST-эндпоинты, использующие этот хелпер — не
+ * нужно добавлять проверку в каждый по отдельности. */
 async function readAuthenticatedBody(req, botToken) {
   let body;
   try {
@@ -157,6 +190,9 @@ async function readAuthenticatedBody(req, botToken) {
   }
   const auth = validateInitData(body.initData, botToken);
   if (!auth.ok) return { ok: false, status: 401, error: auth.error };
+  if (isRateLimited(`general:${auth.user.id}`, { maxRequests: RATE_LIMIT_MAX_REQUESTS, windowMs: RATE_LIMIT_WINDOW_MS })) {
+    return { ok: false, status: 429, error: "слишком много запросов, попробуйте через минуту" };
+  }
   // firstName — best-effort отображаемое имя (для /api/family/*: "кто есть в
   // семье"), не участвует в авторизации. Telegram не гарантирует его наличие
   // у каждого пользователя, поэтому не required нигде, где уже используется
@@ -306,6 +342,13 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
         sendJson(res, 401, { ok: false, error: auth.error });
         return;
       }
+      // /api/plan и /events — единственные два эндпоинта мимо
+      // readAuthenticatedBody (см. её комментарий), rate limit проставлен
+      // вручную здесь же, тот же общий счётчик по telegram_user_id.
+      if (isRateLimited(`general:${auth.user.id}`, { maxRequests: RATE_LIMIT_MAX_REQUESTS, windowMs: RATE_LIMIT_WINDOW_MS })) {
+        sendJson(res, 429, { ok: false, error: "слишком много запросов, попробуйте через минуту" });
+        return;
+      }
 
       const parsed = parsePlanRequest(body, auth.user.id);
       if (!parsed.ok) {
@@ -355,6 +398,13 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
         // честно, но вводяще в заблуждение писал "Событий не было".
         console.warn(`[events] отказ авторизации (401):`, auth.error);
         sendJson(res, 401, { ok: false, error: auth.error });
+        return;
+      }
+      // /api/plan и /events — единственные два эндпоинта мимо
+      // readAuthenticatedBody (см. её комментарий), rate limit проставлен
+      // вручную здесь же, тот же общий счётчик по telegram_user_id.
+      if (isRateLimited(`general:${auth.user.id}`, { maxRequests: RATE_LIMIT_MAX_REQUESTS, windowMs: RATE_LIMIT_WINDOW_MS })) {
+        sendJson(res, 429, { ok: false, error: "слишком много запросов, попробуйте через минуту" });
         return;
       }
 
@@ -625,6 +675,13 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
       const auth = await readAuthenticatedBody(req, botToken);
       if (!auth.ok) return sendJson(res, auth.status, { ok: false, error: auth.error });
 
+      // Отдельный, более строгий счётчик ПОВЕРХ общего (см. readAuthenticatedBody)
+      // — этот эндпоинт самый дорогой по факту: до MAX_INGREDIENT_NAMES
+      // названий за вызов, каждое непопадание в кэш — живой запрос к ВкусВилл.
+      if (isRateLimited(`prices:${auth.telegramUserId}`, { maxRequests: PRICES_RATE_LIMIT_MAX_REQUESTS, windowMs: RATE_LIMIT_WINDOW_MS })) {
+        return sendJson(res, 429, { ok: false, error: "слишком много запросов, попробуйте через минуту" });
+      }
+
       const parsed = parsePricesRequest(auth.body);
       if (!parsed.ok) return sendJson(res, 400, { ok: false, error: parsed.error });
 
@@ -658,6 +715,14 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
       if (!auth.ok) {
         console.warn(`[api/pay/create] отказ авторизации (${auth.status}):`, auth.error);
         return sendJson(res, auth.status, { ok: false, error: auth.error });
+      }
+
+      // Отдельный, более строгий счётчик ПОВЕРХ общего (см. readAuthenticatedBody)
+      // — каждый вызов создаёт РЕАЛЬНЫЙ платёж в ЮKassa и строку в payments,
+      // заливка тут не просто нагрузка, а прямой повод для вопросов от
+      // платёжного провайдера.
+      if (isRateLimited(`pay:${auth.telegramUserId}`, { maxRequests: PAY_RATE_LIMIT_MAX_REQUESTS, windowMs: RATE_LIMIT_WINDOW_MS })) {
+        return sendJson(res, 429, { ok: false, error: "слишком много запросов, попробуйте через минуту" });
       }
 
       // Живая жалоба в чате: "ЮKassa createPayment: Receipt is missing or
@@ -733,6 +798,19 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
       }
       const parsed = parseYookassaWebhookBody(body);
       if (!parsed.ok) return sendJson(res, 400, { ok: false, error: parsed.error });
+
+      // Единственный ПУБЛИЧНЫЙ (без initData) POST-эндпоинт в этом файле —
+      // сознательно не проверяем подпись (ЮKassa её не даёт, см. комментарий
+      // выше), значит и general-лимит из readAuthenticatedBody сюда не
+      // попадает. По IP, не по telegram_user_id (его тут и не узнать) —
+      // защита не от "кто-то украдёт чужой платёж" (не получится, см. ниже:
+      // статус перепроверяется у самой ЮKassa), а от заливки, которая
+      // заставляла бы наш сервер без остановки дёргать API ЮKassa своими же
+      // ключами на каждое чужое обращение.
+      const clientIp = (req.headers["x-forwarded-for"] || "").split(",")[0].trim() || req.socket.remoteAddress || "unknown";
+      if (isRateLimited(`yookassa-webhook:${clientIp}`, { maxRequests: RATE_LIMIT_MAX_REQUESTS, windowMs: RATE_LIMIT_WINDOW_MS })) {
+        return sendJson(res, 429, { ok: false, error: "слишком много запросов, попробуйте через минуту" });
+      }
 
       try {
         const status = await fetchPaymentStatus(yookassa, parsed.value.paymentId);
