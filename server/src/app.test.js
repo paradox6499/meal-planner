@@ -261,19 +261,19 @@ describe("HTTP-сервер", () => {
     const res = await fetch(`${baseUrl}/events`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ initData: validInitData(42), eventName: "plan_generated", props: { step: 5 } }),
+      body: JSON.stringify({ initData: validInitData(42), eventName: "support_clicked", props: { step: 5 } }),
     });
     expect(res.status).toBe(200);
     const summary = summarizeEventsSince(db, "2020-01-01T00:00:00Z");
     expect(summary.totalEvents).toBe(1);
-    expect(summary.byName[0].event_name).toBe("plan_generated");
+    expect(summary.byName[0].event_name).toBe("support_clicked");
   });
 
   it("POST /events без initData -> 401, ничего не сохраняется", async () => {
     const res = await fetch(`${baseUrl}/events`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ eventName: "plan_generated" }),
+      body: JSON.stringify({ eventName: "support_clicked" }),
     });
     expect(res.status).toBe(401);
     expect(summarizeEventsSince(db, "2020-01-01T00:00:00Z").totalEvents).toBe(0);
@@ -288,23 +288,50 @@ describe("HTTP-сервер", () => {
     expect(res.status).toBe(400);
   });
 
-  // Живой вывод из ревью: "разовая покупка ещё одного плана" — кредит
-  // списывается ровно тогда, когда реально использован (это событие —
-  // единственный сигнал "план собран"), не в момент покупки.
-  it("plan_generated ПОСЛЕ исчерпания базового лимита списывает один extra_plan_credit", async () => {
-    addExtraPlanCredit(db, 42, 2);
-    // Первая сборка — в пределах базового лимита (FREE_PLANS_PER_WEEK=1), кредит не трогаем
-    await fetch(`${baseUrl}/events`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ initData: validInitData(42), eventName: "plan_generated" }) });
-    expect(getExtraPlanCredits(db, 42)).toBe(2);
+  // plan_generated теперь зарезервировано за сервером (см. /api/plan ниже) —
+  // раньше это был единственный сигнал "план собран", и клиент мог просто не
+  // отправить его, получая бесплатные планы без ограничения. Если это имя всё
+  // же приходит на /events (старая закэшированная версия фронтенда) — тихо
+  // игнорируем, а не пишем и не считаем ошибкой.
+  it("POST /events с eventName=plan_generated игнорируется — не пишется, лимит не трогается", async () => {
+    const res = await fetch(`${baseUrl}/events`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ initData: validInitData(42), eventName: "plan_generated" }),
+    });
+    expect(res.status).toBe(200);
+    expect(summarizeEventsSince(db, "2020-01-01T00:00:00Z").totalEvents).toBe(0);
+  });
 
-    // Вторая сборка на этой же неделе — сверх базового лимита, идёт за счёт кредита
-    await fetch(`${baseUrl}/events`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ initData: validInitData(42), eventName: "plan_generated" }) });
+  it("другие события не трогают extra_plan_credits", async () => {
+    addExtraPlanCredit(db, 42, 1);
+    await fetch(`${baseUrl}/events`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ initData: validInitData(42), eventName: "support_clicked" }) });
     expect(getExtraPlanCredits(db, 42)).toBe(1);
   });
 
-  it("plan_generated в пределах базового лимита не трогает кредиты", async () => {
+  // Живой вывод из ревью: "разовая покупка ещё одного плана" — кредит
+  // списывается ровно тогда, когда план реально СОХРАНЁН на сервере (см.
+  // /api/plan), не в момент покупки и не по отдельному analytics-событию.
+  const planRequest = (telegramId = 42) => fetch(`${baseUrl}/api/plan`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ initData: validInitData(telegramId), timezoneOffsetMinutes: 180, mealSlots: [validSlot] }),
+  });
+
+  it("сборка плана ПОСЛЕ исчерпания базового лимита списывает один extra_plan_credit", async () => {
+    addExtraPlanCredit(db, 42, 2);
+    // Первая сборка — в пределах базового лимита (FREE_PLANS_PER_WEEK=1), кредит не трогаем
+    expect((await planRequest()).status).toBe(200);
+    expect(getExtraPlanCredits(db, 42)).toBe(2);
+
+    // Вторая сборка на этой же неделе — сверх базового лимита, идёт за счёт кредита
+    expect((await planRequest()).status).toBe(200);
+    expect(getExtraPlanCredits(db, 42)).toBe(1);
+  });
+
+  it("сборка плана в пределах базового лимита не трогает кредиты", async () => {
     addExtraPlanCredit(db, 42, 1);
-    await fetch(`${baseUrl}/events`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ initData: validInitData(42), eventName: "plan_generated" }) });
+    expect((await planRequest()).status).toBe(200);
     expect(getExtraPlanCredits(db, 42)).toBe(1);
   });
 
@@ -312,15 +339,22 @@ describe("HTTP-сервер", () => {
     setUserPro(db, 42, true);
     addExtraPlanCredit(db, 42, 1);
     for (let i = 0; i < 3; i++) {
-      await fetch(`${baseUrl}/events`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ initData: validInitData(42), eventName: "plan_generated" }) });
+      expect((await planRequest()).status).toBe(200);
     }
     expect(getExtraPlanCredits(db, 42)).toBe(1);
   });
 
-  it("другие события (не plan_generated) не трогают кредиты", async () => {
-    addExtraPlanCredit(db, 42, 1);
-    await fetch(`${baseUrl}/events`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ initData: validInitData(42), eventName: "support_clicked" }) });
-    expect(getExtraPlanCredits(db, 42)).toBe(1);
+  // Настоящее закрытие дыры "просто не отправлять аналитику": теперь /api/plan
+  // сам отказывает, если бесплатный лимит и кредиты исчерпаны — план не
+  // сохраняется вообще, а не просто "не засчитывается".
+  it("POST /api/plan: лимит и кредиты исчерпаны -> 403, план не сохраняется, второе событие не пишется", async () => {
+    expect((await planRequest()).status).toBe(200); // первая сборка — в пределах лимита
+    const second = await planRequest();
+    expect(second.status).toBe(403);
+    const body = await second.json();
+    expect(body.ok).toBe(false);
+    const summary = summarizeEventsSince(db, "2020-01-01T00:00:00Z");
+    expect(summary.byName.find((r) => r.event_name === "plan_generated").count).toBe(1);
   });
 
   it("POST /api/plan-status: free-пользователь без сборок за неделю — можно генерировать", async () => {

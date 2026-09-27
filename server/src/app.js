@@ -356,8 +356,36 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
         return;
       }
 
+      // Бесплатный лимит проверяется и здесь, а не только на экране (через
+      // /api/plan-status) — тот экран лишь ПОДСКАЗЫВАЕТ, реально запретить
+      // клиенту собрать план локально нельзя (сборка целиком на клиенте, см.
+      // buildInitialPlan во App.jsx). Раньше единственным учётом было
+      // /events{plan_generated} — отдельный fire-and-forget вызов, который
+      // клиент мог просто не отправить и получать бесплатные планы без
+      // ограничения вообще, сервер об этом даже не узнавал. Теперь
+      // plan_generated пишет ТОЛЬКО сервер, прямо здесь, как побочный эффект
+      // настоящего сохранения плана — единственного вызова, без которого не
+      // работают напоминания, реферальная награда и синхронизация между
+      // устройствами (см. useEffect на submitPlanToBackend во App.jsx — он
+      // срабатывает на КАЖДУЮ сборку плана, не только платную), так что
+      // пропустить его — не то же самое, что пропустить один analytics-сигнал.
+      const isPro = getUserPro(db, auth.user.id, new Date().toISOString());
+      const sinceISO = new Date(Date.now() - FREE_WINDOW_MS).toISOString();
+      const usedThisWeek = countPlanGenerationsSince(db, auth.user.id, sinceISO);
+      const extraPlanCredits = getExtraPlanCredits(db, auth.user.id);
+      if (!isPro && usedThisWeek >= FREE_PLANS_PER_WEEK + extraPlanCredits) {
+        sendJson(res, 403, { ok: false, error: "лимит бесплатных планов на эту неделю исчерпан" });
+        return;
+      }
+
       try {
         saveUserPlan(db, parsed.value);
+        // usedThisWeek посчитан ДО этой сборки (событие ещё не вставлено) —
+        // никакого "минус один", как раньше в /events, не нужно: если
+        // usedThisWeek уже был >= FREE_PLANS_PER_WEEK, значит эта сборка идёт
+        // за счёт покупного кредита.
+        insertEvent(db, { telegramUserId: auth.user.id, eventName: "plan_generated", props: null, createdAtISO: new Date().toISOString() });
+        if (!isPro && usedThisWeek >= FREE_PLANS_PER_WEEK) consumeExtraPlanCredit(db, auth.user.id);
         sendJson(res, 200, { ok: true });
       } catch (err) {
         console.error("[api/plan] ошибка сохранения:", err);
@@ -413,21 +441,19 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
         sendJson(res, 400, { ok: false, error: parsed.error });
         return;
       }
+      // plan_generated — зарезервированное имя: теперь его пишет только
+      // сервер, как часть /api/plan (см. комментарий там) — реальный учёт
+      // бесплатного лимита не может зависеть от того, что клиент решит сюда
+      // прислать. Если оно пришло отсюда — это либо старая (закэшированная)
+      // версия фронтенда, либо кто-то пытается накрутить счётчик вручную; в
+      // обоих случаях просто молча игнорируем, а не считаем ошибкой.
+      if (parsed.value.eventName === "plan_generated") {
+        sendJson(res, 200, { ok: true });
+        return;
+      }
 
       try {
         insertEvent(db, { ...parsed.value, createdAtISO: new Date().toISOString() });
-        // Списание разового кредита "ещё один план на этой неделе" (см.
-        // EXTRA_PLAN_PRODUCT выше) — ровно в момент реального использования,
-        // не в момент покупки. plan_generated — тот же analytics-сигнал,
-        // которым уже считается usedThisWeek (countPlanGenerationsSince), так
-        // что это событие И ЕСТЬ факт "план собран", а не отдельная догадка.
-        // usedBefore считаем ДО только что вставленного события — вычитаем 1
-        // из счётчика, который теперь уже включает его.
-        if (parsed.value.eventName === "plan_generated" && !getUserPro(db, auth.user.id, new Date().toISOString())) {
-          const sinceISO = new Date(Date.now() - FREE_WINDOW_MS).toISOString();
-          const usedBefore = countPlanGenerationsSince(db, auth.user.id, sinceISO) - 1;
-          if (usedBefore >= FREE_PLANS_PER_WEEK) consumeExtraPlanCredit(db, auth.user.id);
-        }
         sendJson(res, 200, { ok: true });
       } catch (err) {
         console.error("[events] ошибка сохранения:", err);

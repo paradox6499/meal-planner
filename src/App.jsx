@@ -552,7 +552,12 @@ export default function MealPlanner() {
     if (!planSlotId) setPlanSlotId(genSlotId());
     setAssembling(false);
     hapticNotify("success");
-    trackEvent("plan_generated", { store, budget, family, meals_count: selectedMeals.length });
+    // Раньше здесь был trackEvent("plan_generated", ...) — именно этот вызов
+    // и только он считал бесплатный лимит на сервере (см. countPlanGenerationsSince
+    // в server/src/app.js). Убрать один fire-and-forget вызов было слишком
+    // легко, чтобы получать безлимитные бесплатные планы — теперь событие
+    // plan_generated пишет сам сервер как часть /api/plan (submitPlanToBackend
+    // ниже, вызывается на каждую сборку через useEffect).
 
     // Считаем planView сами, здесь же — planView-в-состоянии соберётся
     // только на следующий рендер (useMemo), а в историю нужно положить
