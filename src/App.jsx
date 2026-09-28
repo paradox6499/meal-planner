@@ -1,10 +1,11 @@
 import { useState, useMemo, useEffect } from "react";
-import { Check, ChevronLeft, ChevronRight, Store, Users, Wallet, Salad, ChefHat, Flame, RotateCcw, UtensilsCrossed, Clock, Repeat, Ban, TriangleAlert, X, Loader2, Share2, Settings, Sun, Moon, MonitorSmartphone, Sparkles, PackageSearch, Home, MessageCircle, Clapperboard, History, Plus } from "lucide-react";
+import { Check, ChevronLeft, ChevronRight, Store, Users, Wallet, Salad, Flame, RotateCcw, UtensilsCrossed, Clock, Repeat, Ban, TriangleAlert, X, Loader2, Share2, Settings, Sun, Moon, MonitorSmartphone, Sparkles, PackageSearch, Home, MessageCircle, Clapperboard, History, Plus } from "lucide-react";
 import { ALLERGENS } from "./data/recipes.js";
 import { buildCartFromShoppingList, toVkusvillQuantity, clearMcpCache } from "./lib/vkusvillMcp.js";
 import { fetchVkusvillPools, getSubstituteOptions, attachRealCosts } from "./lib/vkusvillRecipes.js";
 import { loadProfile, saveProfile, clearProfile, loadTheme, saveTheme } from "./lib/profile.js";
 import { loadActivePlanSlots, saveActivePlanSlot, setActiveSlotId, removeActivePlanSlot, clearAllActivePlans, genSlotId, MAX_PRO_SLOTS } from "./lib/activePlan.js";
+import { describePlanDay, findTodayDayIndex } from "./lib/planDays.js";
 import { buildPools, buildInitialPlan, buildPlanView, interleaveGroups, computeBudgetStreak, computeRecentSavings } from "./lib/planLogic.js";
 import { submitPlanToBackend, reportPlanGenerated, checkPlanStatus, savePlanToHistory, fetchPlanHistory, updateMealTimes, createProPayment, createExtraPlanPayment, claimReferral, fetchReferralStatus, getBackendUrl, sendSupportPrompt, createFamily, joinFamily, leaveFamily, fetchFamilyStatus, toggleFamilyPantryItem } from "./lib/backend.js";
 import { loadPantryStaples, savePantryStaples } from "./lib/pantry.js";
@@ -92,6 +93,12 @@ const MEALS = [
 // плана — лишнее трение. "store" и "budget" — единственное, что имеет смысл
 // спрашивать каждую неделю. Ключи вместо голых индексов нужны, чтобы JSX
 // шагов ниже не пересчитывать вручную при пропуске части шагов.
+// UX-аудит 29.09.2026: было 9 шагов (12 тапов до первого плана — вероятная
+// точка ухода новичка). "Кухня", "Техника" и "Время готовки" убраны из
+// визарда: у них есть разумные значения по умолчанию (любая кухня, готовлю
+// на всём, время неважно), а менять их можно в Аккаунте — там эти же
+// настройки уже были. Остаются вопросы, без ответа на которые план не
+// собрать или которые касаются безопасности (аллергии).
 const STEP_META = [
   { key: "store", label: "Магазин" },
   { key: "family", label: "Семья" },
@@ -99,11 +106,24 @@ const STEP_META = [
   { key: "budget", label: "Бюджет" },
   { key: "diet", label: "Рацион" },
   { key: "allergies", label: "Аллергии" },
-  { key: "cuisine", label: "Кухня" },
-  { key: "devices", label: "Техника" },
-  { key: "cooktime", label: "Время готовки" },
 ];
 const QUICK_STEP_KEYS = ["store", "budget"];
+
+// Ответы по умолчанию, чтобы каждый шаг для новичка был одним тапом "Далее",
+// а не обязательным выбором с нуля. Реальный заказ пока только у ВкусВилл.
+const DEFAULT_STORE = "vv";
+const DEFAULT_DIET = "any";
+const ALL_DEVICE_IDS = DEVICES.map((d) => d.id);
+
+// Подтверждение опасного действия: showConfirm — родной диалог Telegram (Bot
+// API 6.2+), window.confirm — запасной вариант вне Telegram.
+function confirmAction(message) {
+  return new Promise((resolve) => {
+    const tg = window.Telegram?.WebApp;
+    if (tg?.showConfirm) tg.showConfirm(message, (ok) => resolve(!!ok));
+    else resolve(window.confirm(message));
+  });
+}
 
 // Telegram сам присылает имя пользователя при открытии Mini App — это
 // бесплатно (initDataUnsafe), никакого своего логина/аккаунта заводить не
@@ -160,7 +180,11 @@ export default function MealPlanner() {
   const [planSlotId, setPlanSlotId] = useState(initialActiveSlot?.id ?? null);
 
   const [step, setStep] = useState(0);
-  const [store, setStore] = useState(initialActiveSlot?.store ?? null);
+  const [store, setStore] = useState(initialActiveSlot?.store ?? DEFAULT_STORE);
+  const [showOtherStores, setShowOtherStores] = useState(false);
+  // Когда план собран — нужно для подписей дней ("Сегодня · пт, 2 окт."), см.
+  // lib/planDays.js. null у плана, сохранённого до появления этого поля.
+  const [planCreatedAt, setPlanCreatedAt] = useState(initialActiveSlot?.createdAt ?? null);
   const [family, setFamily] = useState(savedProfile?.family ?? 2);
   // Необязательные точечные переопределения "Семьи" по приёмам пищи (см.
   // комментарий у buildInitialPlan в planLogic.js) — например, пара, где
@@ -171,10 +195,10 @@ export default function MealPlanner() {
   const [familyByMeal, setFamilyByMeal] = useState(savedProfile?.familyByMeal ?? {});
   const [meals, setMeals] = useState(savedProfile?.meals ?? ["lunch", "dinner"]);
   const [budget, setBudget] = useState(initialActiveSlot?.budget ?? 4000);
-  const [diet, setDiet] = useState(savedProfile?.diet ?? null);
+  const [diet, setDiet] = useState(savedProfile?.diet ?? DEFAULT_DIET);
   const [allergies, setAllergies] = useState(savedProfile?.allergies ?? []);
   const [cuisines, setCuisines] = useState(savedProfile?.cuisines ?? []);
-  const [devices, setDevices] = useState(savedProfile?.devices ?? []);
+  const [devices, setDevices] = useState(savedProfile?.devices ?? ALL_DEVICE_IDS);
   const [maxCookTime, setMaxCookTime] = useState(savedProfile?.maxCookTime ?? null);
   const [done, setDone] = useState(!!initialActiveSlot);
   const [assembling, setAssembling] = useState(false);
@@ -424,9 +448,6 @@ export default function MealPlanner() {
     budget: budget >= 500,
     diet: !!diet,
     allergies: true, // необязательны — их отсутствие тоже осознанный ответ
-    cuisine: true, // необязательна
-    devices: devices.length > 0,
-    cooktime: true, // необязателен — "неважно" тоже осознанный ответ
   };
 
   // Раньше пересчитывалось на каждое изменение фильтра (useMemo) — теперь
@@ -507,16 +528,16 @@ export default function MealPlanner() {
   // handleFinish/startNewPlanSlot — оба выставляют его одновременно с done).
   useEffect(() => {
     if (done && planState && planSlotId) {
-      saveActivePlanSlot({ id: planSlotId, store, budget, planState, pools, priceByName });
+      saveActivePlanSlot({ id: planSlotId, store, budget, planState, pools, priceByName, createdAt: planCreatedAt });
       setActiveSlotId(planSlotId);
       setPlanSlots((prev) => {
         const idx = prev.slots.findIndex((s) => s.id === planSlotId);
-        const slot = { id: planSlotId, store, budget, planState, pools, priceByName };
+        const slot = { id: planSlotId, store, budget, planState, pools, priceByName, createdAt: planCreatedAt };
         const slots = idx >= 0 ? prev.slots.map((s, i) => (i === idx ? slot : s)) : [...prev.slots, slot];
         return { slots, activeSlotId: planSlotId };
       });
     }
-  }, [done, planState, pools, priceByName, store, budget, planSlotId]);
+  }, [done, planState, pools, priceByName, store, budget, planSlotId, planCreatedAt]);
 
   const handleFinish = async () => {
     // Бесплатный лимит — только если есть у кого спросить (бэкенд задеплоен
@@ -577,6 +598,7 @@ export default function MealPlanner() {
     setPriceByName(resolvedPriceByName);
     setPlanState(newPlanState);
     setDone(true);
+    setPlanCreatedAt(new Date().toISOString());
     // Самый первый план вообще (ни "Заново", ни "Ещё один план" не заводили
     // planSlotId заранее) — заводим id прямо здесь, иначе автосохранение
     // (эффект выше) не сработает: он ждёт planSlotId вместе с done/planState.
@@ -671,11 +693,11 @@ export default function MealPlanner() {
   // специфично для конкретной прошлой сборки: магазин, бюджет и сам план.
   const reset = () => {
     hapticImpact("light");
-    setStep(0); setStore(null); setBudget(4000); setDone(false); setPlanState(null);
-    setOpenRecipe(null); setAssembling(false); setPools(null); setPriceByName(null);
+    setStep(0); setStore(DEFAULT_STORE); setBudget(4000); setDone(false); setPlanState(null);
+    setOpenRecipe(null); setAssembling(false); setPools(null); setPriceByName(null); setPlanCreatedAt(null);
     if (!hasProfile) {
-      setFamily(2); setFamilyByMeal({}); setMeals(["lunch", "dinner"]); setDiet(null);
-      setAllergies([]); setCuisines([]); setDevices([]); setMaxCookTime(null);
+      setFamily(2); setFamilyByMeal({}); setMeals(["lunch", "dinner"]); setDiet(DEFAULT_DIET);
+      setAllergies([]); setCuisines([]); setDevices(ALL_DEVICE_IDS); setMaxCookTime(null);
     }
   };
 
@@ -692,6 +714,12 @@ export default function MealPlanner() {
       setLimitBlocked({ nextResetHint: status.nextResetHint });
       return;
     }
+    // Pro: "Новый план" ЗАМЕНЯЕТ текущий слот — предупреждаем и подсказываем
+    // "Ещё план", который добавляет рядом, не стирая (UX-аудит 29.09.2026).
+    if (planStatus?.isPro && planSlotId) {
+      const hint = canAddPlanSlot ? " Чтобы сохранить текущий, нажмите «Ещё план» — он добавится отдельно." : "";
+      if (!(await confirmAction(`Текущий план будет заменён новым.${hint} Заменить?`))) return;
+    }
     reset();
   };
 
@@ -702,7 +730,8 @@ export default function MealPlanner() {
   // removeSlot (переключение на другой слот после удаления текущего).
   function applySlotToState(slot) {
     setPlanSlotId(slot?.id ?? null);
-    setStore(slot?.store ?? null);
+    setStore(slot?.store ?? DEFAULT_STORE);
+    setPlanCreatedAt(slot?.createdAt ?? null);
     setBudget(slot?.budget ?? 4000);
     setPlanState(slot?.planState ?? null);
     setPools(slot?.pools ?? null);
@@ -741,8 +770,8 @@ export default function MealPlanner() {
   const startNewPlanSlot = () => {
     hapticImpact("light");
     setPlanSlotId(genSlotId());
-    setStep(0); setStore(null); setBudget(4000); setDone(false); setPlanState(null);
-    setOpenRecipe(null); setAssembling(false); setPools(null); setPriceByName(null);
+    setStep(0); setStore(DEFAULT_STORE); setBudget(4000); setDone(false); setPlanState(null);
+    setOpenRecipe(null); setAssembling(false); setPools(null); setPriceByName(null); setPlanCreatedAt(null);
     trackEvent("plan_slot_add_started");
   };
 
@@ -1058,18 +1087,42 @@ export default function MealPlanner() {
         {!showAccount && !limitBlocked && !lastPlanGate && !done && !assembling && (
           <div style={styles.stepBody} className="mp-step-body">
             {currentStepKey === "store" && (
-              <StepShell icon={<Store size={20} />} title="Где вам удобно заказывать?" sub="Выберите магазин с доставкой в вашем районе">
-                <div style={styles.grid2}>
-                  {STORES.map((s) => (
-                    <button key={s.id} className="chip" onClick={() => { hapticSelect(); setStore(s.id); }} style={styles.storeChip(store === s.id)}>
-                      <div style={{ fontWeight: 600 }}>{s.name}</div>
-                      <div style={styles.chipHint}>
-                        {s.note}
-                        {s.id !== "vv" && " · скоро"}
+              <StepShell
+                icon={<Store size={20} />}
+                title="Где вам удобно заказывать?"
+                sub={hasProfile ? "Выберите магазин с доставкой в вашем районе" : "Составим меню на 7 дней и список покупок с реальными ценами — это займёт около минуты"}
+              >
+                {/* Реальный заказ пока только у ВкусВилл — он выбран заранее, а
+                    остальные сети свёрнуты (UX-аудит 29.09.2026: 4 из 5
+                    вариантов были "скоро", но выглядели равноценными). */}
+                {(() => {
+                  const otherStoresOpen = showOtherStores || store !== DEFAULT_STORE;
+                  return (
+                    <>
+                      <div style={styles.grid2}>
+                        {STORES.filter((s) => s.id === DEFAULT_STORE || otherStoresOpen).map((s) => (
+                          <button
+                            key={s.id}
+                            className="chip"
+                            onClick={() => { hapticSelect(); setStore(s.id); }}
+                            style={{ ...styles.storeChip(store === s.id), ...(s.id === DEFAULT_STORE && !otherStoresOpen ? { gridColumn: "1 / -1" } : null) }}
+                          >
+                            <div style={{ fontWeight: 600 }}>{s.name}</div>
+                            <div style={styles.chipHint}>
+                              {s.note}
+                              {s.id !== "vv" && " · скоро"}
+                            </div>
+                          </button>
+                        ))}
                       </div>
-                    </button>
-                  ))}
-                </div>
+                      {!otherStoresOpen && (
+                        <button onClick={() => setShowOtherStores(true)} style={{ ...styles.inlineLinkBtn, display: "block", margin: "14px auto 0 auto", textDecoration: "none", color: "var(--text-tertiary)" }}>
+                          Другие сети — скоро
+                        </button>
+                      )}
+                    </>
+                  );
+                })()}
               </StepShell>
             )}
 
@@ -1152,53 +1205,6 @@ export default function MealPlanner() {
               </StepShell>
             )}
 
-            {currentStepKey === "cuisine" && (
-              <StepShell icon={<ChefHat size={20} />} title="Кухня" sub="Необязательно — можно выбрать несколько или пропустить">
-                <div style={styles.grid2}>
-                  {CUISINES.map((c) => (
-                    <button key={c.id} className="chip" onClick={() => toggleCuisine(cuisines, setCuisines, c.id)} style={styles.storeChip(cuisines.includes(c.id) || (c.id === "any" && cuisines.length === 0))}>
-                      <div style={{ fontWeight: 600 }}>{c.label}</div>
-                    </button>
-                  ))}
-                </div>
-              </StepShell>
-            )}
-
-            {currentStepKey === "devices" && (
-              <StepShell icon={<Flame size={20} />} title="На чём будете готовить?" sub="Выберите доступную технику — рецепты подстроятся под неё">
-                <div style={styles.grid2}>
-                  <button
-                    className="chip"
-                    onClick={() => { hapticSelect(); setDevices(DEVICES.map((d) => d.id)); }}
-                    style={styles.storeChip(devices.length === DEVICES.length)}
-                  >
-                    <div style={{ fontWeight: 600 }}>Готовлю на всём</div>
-                  </button>
-                  {DEVICES.map((d) => (
-                    <button key={d.id} className="chip" onClick={() => toggleSimple(devices, setDevices, d.id)} style={styles.storeChip(devices.includes(d.id))}>
-                      <div style={{ fontWeight: 600 }}>{d.label}</div>
-                    </button>
-                  ))}
-                </div>
-              </StepShell>
-            )}
-
-            {currentStepKey === "cooktime" && (
-              <StepShell icon={<Clock size={20} />} title="Сколько времени готовы тратить на готовку?" sub="Пришли уставшие после работы — выберите быстрые рецепты, будет время — берите любые">
-                <div style={styles.stack}>
-                  {COOK_TIME_TIERS.map((t) => (
-                    <button key={t.id} className="chip" onClick={() => { hapticSelect(); setMaxCookTime(t.maxMinutes); }} style={styles.rowChip(maxCookTime === t.maxMinutes)}>
-                      <div>
-                        <div style={{ fontWeight: 600 }}>{t.label}</div>
-                        <div style={styles.chipHint}>{t.hint}</div>
-                      </div>
-                      {maxCookTime === t.maxMinutes && <Check size={16} color={ACCENT} />}
-                    </button>
-                  ))}
-                </div>
-              </StepShell>
-            )}
-
             <div style={styles.navRow} className="mp-nav-row">
               <button onClick={() => { hapticImpact("light"); setStep((s) => Math.max(0, s - 1)); }} disabled={step === 0} style={{ ...styles.navBtn, visibility: step === 0 ? "hidden" : "visible" }}>
                 <ChevronLeft size={16} /><span>Назад</span>
@@ -1215,6 +1221,12 @@ export default function MealPlanner() {
                 <span>{step === activeSteps.length - 1 ? "Собрать список" : "Далее"}</span><ChevronRight size={16} />
               </button>
             </div>
+            {!hasProfile && currentStepKey === "allergies" && (
+              <p style={styles.quickHint}>
+                Кухню, технику и время готовки можно настроить позже в{" "}
+                <button onClick={() => setShowAccount(true)} style={styles.inlineLinkBtn}>Аккаунте</button> — пока подберём без ограничений.
+              </p>
+            )}
             {hasProfile && (
               <p style={styles.quickHint}>
                 Семья, приёмы пищи, рацион и остальное — из вашего профиля. Изменить — в{" "}
@@ -1238,6 +1250,7 @@ export default function MealPlanner() {
         {!showAccount && !limitBlocked && done && planView && (
           <ResultView
             plan={planView}
+            planStartISO={planCreatedAt}
             storeId={store}
             storeName={STORES.find((s) => s.id === store)?.name}
             budget={budget}
@@ -2425,7 +2438,7 @@ function PlanSlotsBar({ slots, activeId, onSwitch, onRemove, onAdd, canAdd }) {
   );
 }
 
-function ResultView({ plan, storeId, storeName, budget, family, mealsCount, diet, allergies, onSwap, onOpenRecipe, onRetryPrices, retryingPrices, priceRetryFailed, familyPantryNames, onToggleFamilyPantry }) {
+function ResultView({ plan, planStartISO, storeId, storeName, budget, family, mealsCount, diet, allergies, onSwap, onOpenRecipe, onRetryPrices, retryingPrices, priceRetryFailed, familyPantryNames, onToggleFamilyPantry }) {
   const [orderState, setOrderState] = useState({ status: "idle" }); // idle | loading | error
   // Отделы списка покупок сворачиваемые — по умолчанию все раскрыты (старое
   // поведение не меняется для короткого списка), но для семьи с 3+ приёмами
@@ -2447,6 +2460,17 @@ function ResultView({ plan, storeId, storeName, budget, family, mealsCount, diet
   // остаётся неактивной — не потому что забыли, а потому что нечем её
   // подкрепить по-настоящему.
   const canOrderForReal = storeId === "vv";
+
+  // Открыли план на 3-й день — сразу прокручиваем к сегодняшнему дню, а не к
+  // началу (UX-аудит 29.09.2026: "день 1..7" без подсветки сегодняшнего).
+  // Один раз при монтировании; для свежесобранного плана (сегодня = день 1)
+  // не трогаем прокрутку.
+  useEffect(() => {
+    if (findTodayDayIndex(planStartISO, plan.days) > 0) {
+      document.getElementById("plan-day-today")?.scrollIntoView({ block: "start" });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- только при первом показе экрана плана
+  }, []);
 
   // "Нет в наличии" — предложить замену конкретному товару из списка
   // покупок. subs: name -> выбранная замена (переживает несколько открытий
@@ -2708,31 +2732,39 @@ function ResultView({ plan, storeId, storeName, budget, family, mealsCount, diet
         Нажмите на блюдо, чтобы посмотреть рецепт
       </p>
       <div style={styles.stack}>
-        {plan.days.map(({ day, dayMeals }, dayIndex) => (
-          <div key={day} style={styles.dayBlock}>
-            <div style={styles.dayTag}>День {day}</div>
+        {plan.days.map(({ day, dayMeals }, dayIndex) => {
+          const info = describePlanDay(planStartISO, day);
+          return (
+          <div
+            key={day}
+            id={info?.isToday ? "plan-day-today" : undefined}
+            style={{ ...styles.dayBlock, scrollMarginTop: 16, opacity: info?.isPast ? 0.6 : 1 }}
+          >
+            <div style={{ ...styles.dayTag, ...(info?.isToday ? styles.dayTagToday : null) }}>{info ? info.label : `День ${day}`}</div>
             {dayMeals.map((dm, i) => (
               <div key={i} style={styles.recipeRow}>
-                <span style={{ width: 68, flexShrink: 0, fontSize: 12, color: "var(--text-tertiary)" }}>{dm.mealLabel}</span>
+                {/* Название блюда — своей строкой на всю ширину, время и цена
+                    под ним (UX-аудит 29.09.2026: в одной строке с приёмом
+                    пищи, временем, ценой и кнопкой замены названия резались
+                    до ~10 символов). */}
                 <button onClick={() => onOpenRecipe(dm)} title="Открыть рецепт" className="recipe-row-btn" style={styles.recipeRowBtn}>
                   {dm.recipe.photoUrl ? (
                     <img src={dm.recipe.photoUrl} alt="" style={styles.recipeThumb} />
                   ) : (
                     <span style={styles.recipeEmoji}>{dm.recipe.emoji}</span>
                   )}
-                  <span className="recipe-name-text" style={styles.recipeName}>{dm.recipe.name}</span>
+                  <span style={{ flex: 1, minWidth: 0 }}>
+                    <span className="recipe-name-text" style={styles.recipeName}>{dm.recipe.name}</span>
+                    {/* cost===null — ВкусВилл не нашёл в каталоге достаточно
+                        ингредиентов блюда, чтобы доверять цене (см.
+                        attachRealCosts в vkusvillRecipes.js) — честное "—",
+                        а не 0 ₽, которое выглядело бы как "блюдо бесплатное". */}
+                    <span style={styles.recipeMeta}>
+                      {dm.mealLabel} · {dm.recipe.time} мин · {dm.cost == null ? "—" : `${(dm.cost * (dm.family ?? family)).toLocaleString("ru-RU")} ₽`}
+                    </span>
+                  </span>
                   <ChevronRight size={14} style={{ color: "var(--text-tertiary)", flexShrink: 0 }} />
                 </button>
-                <span style={styles.timeBadge}>
-                  <Clock size={11} /> {dm.recipe.time} мин
-                </span>
-                {/* cost===null — ВкусВилл не нашёл в каталоге достаточно
-                    ингредиентов блюда, чтобы доверять цене (см.
-                    attachRealCosts в vkusvillRecipes.js) — честное "—",
-                    а не 0 ₽, которое выглядело бы как "блюдо бесплатное". */}
-                <span style={{ color: "var(--text-tertiary)", fontSize: 13, flexShrink: 0 }}>
-                  {dm.cost == null ? "—" : `${(dm.cost * (dm.family ?? family)).toLocaleString("ru-RU")} ₽`}
-                </span>
                 <button
                   onClick={() => onSwap(dayIndex, i)}
                   disabled={!dm.canSwap}
@@ -2745,7 +2777,8 @@ function ResultView({ plan, storeId, storeName, budget, family, mealsCount, diet
               </div>
             ))}
           </div>
-        ))}
+          );
+        })}
       </div>
 
       <h3 style={styles.sectionTitle}>Список покупок</h3>
@@ -2774,11 +2807,11 @@ function ResultView({ plan, storeId, storeName, budget, family, mealsCount, diet
           </button>
           {!collapsed && (
           <div style={styles.listBox}>
-            {g.items.map((it) => {
+            {g.items.map((it, itIdx) => {
               const sub = subs[it.name];
               const already = pantryStaples.has(it.name);
               return (
-                <div key={it.name}>
+                <div key={`${it.name}-${itIdx}`}>
                   <div style={styles.listRow}>
                     <span style={{ minWidth: 0 }}>
                       {sub ? (
@@ -2869,7 +2902,7 @@ function ResultView({ plan, storeId, storeName, budget, family, mealsCount, diet
       </button>
       {canOrderForReal ? (
         <>
-          <button onClick={handleOrder} disabled={orderState.status === "loading"} style={{ ...styles.orderBtn, opacity: orderState.status === "loading" ? 0.6 : 1 }}>
+          <button onClick={handleOrder} disabled={orderState.status === "loading"} style={{ ...styles.orderBtn, ...styles.orderBtnSticky, opacity: orderState.status === "loading" ? 0.6 : 1 }}>
             {orderState.status === "loading" ? "Собираем корзину…" : `Заказать в ${storeName}`}
           </button>
           {orderState.status === "error" && (
@@ -3295,6 +3328,12 @@ const styles = {
   sectionTitle: { fontSize: 13, fontWeight: 600, color: "var(--text-tertiary)", margin: "0 0 8px 0" },
   dayBlock: { paddingBottom: 8, marginBottom: 4, borderBottom: "1px solid var(--hairline)" },
   dayTag: { fontSize: 11, fontWeight: 700, color: ACCENT, marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.02em" },
+  dayTagToday: { display: "inline-block", background: ACCENT, color: "#fff", padding: "2px 9px", borderRadius: 8 },
+  recipeMeta: { display: "block", fontSize: 12, color: "var(--text-tertiary)", marginTop: 2 },
+  // Главное действие экрана плана закреплено внизу, пока не долистали до
+  // его естественного места в конце списка (UX-аудит 29.09.2026: кнопка была
+  // за ~5 экранами прокрутки).
+  orderBtnSticky: { position: "sticky", bottom: "max(12px, env(safe-area-inset-bottom))", zIndex: 5 },
   recipeRow: { display: "flex", alignItems: "center", gap: 8, padding: "5px 0", fontSize: 14 },
   timeBadge: { display: "flex", alignItems: "center", gap: 3, color: "var(--text-tertiary)", fontSize: 11, flexShrink: 0 },
   // padding было 2 — вместе с иконкой 14px тап-зона выходила ~18×18,
@@ -3331,7 +3370,7 @@ const styles = {
   shareBtn: { width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 8, padding: "13px 0", ...glass(0.6, 10), border: "1px solid var(--hairline)", borderRadius: 18, color: "var(--text-primary)", fontSize: 14, fontWeight: 600, cursor: "pointer", marginTop: 8 },
 
   recipeRowBtn: { flex: 1, display: "flex", alignItems: "center", gap: 8, background: "none", border: "none", padding: "4px 2px", borderRadius: 10, textAlign: "left", cursor: "pointer", color: "var(--text-primary)", font: "inherit", minWidth: 0 },
-  recipeEmoji: { fontSize: 17, flexShrink: 0, width: 20, textAlign: "center" },
+  recipeEmoji: { fontSize: 20, flexShrink: 0, width: 34, textAlign: "center" },
   // Раньше длинные названия (особенно у ВкусВилл — "Тушёные куриные желудки"
   // и длиннее) в тесной строке (иконка + время + цена + кнопка замены на
   // одной линии) расползались на 3-4 строки — нечитаемо. line-clamp режет
@@ -3341,7 +3380,7 @@ const styles = {
     display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical",
     overflow: "hidden", wordBreak: "break-word", lineHeight: 1.25,
   },
-  recipeThumb: { width: 22, height: 22, borderRadius: 6, objectFit: "cover", flexShrink: 0 },
+  recipeThumb: { width: 34, height: 34, borderRadius: 9, objectFit: "cover", flexShrink: 0 },
 
   modalOverlay: { position: "fixed", inset: 0, background: "var(--modal-backdrop)", backdropFilter: "blur(6px)", WebkitBackdropFilter: "blur(6px)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20, zIndex: 50 },
   modalCard: { width: "100%", maxWidth: 420, maxHeight: "85vh", overflowY: "auto", ...glass(0.9, 30), borderRadius: 28, border: "1px solid var(--hairline)", padding: 26, boxShadow: "var(--modal-shadow)", position: "relative" },
