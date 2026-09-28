@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { createHmac } from "node:crypto";
-import { openDb, findCandidateSlots, summarizeEventsSince, setUserPro, insertEvent, listPlanHistory, listRecentFeedback, createPendingPayment, getPaymentByYookassaId, getUserPro, getExtraPlanCredits, addExtraPlanCredit } from "./db.js";
+import { openDb, findCandidateSlots, summarizeEventsSince, setUserPro, insertEvent, listPlanHistory, listRecentFeedback, createPendingPayment, getPaymentByYookassaId, getUserPro, getExtraPlanCredits, addExtraPlanCredit, extendUserPro } from "./db.js";
 import { createApp, parsePlanRequest, parseEventRequest, parseSavePlanRequest, parseMealTimesRequest, parsePricesRequest, computePlanStatus, FREE_PLANS_PER_WEEK, EXTRA_PLAN_PRODUCT, EXTRA_PLAN_PRICE_RUB, PRO_PRICE_RUB, RATE_LIMIT_MAX_REQUESTS, PRICES_RATE_LIMIT_MAX_REQUESTS, PAY_RATE_LIMIT_MAX_REQUESTS } from "./app.js";
 import { clearRateLimitState } from "./rateLimit.js";
 
@@ -134,6 +134,13 @@ describe("computePlanStatus", () => {
   it("usedThisWeek больше лимита, но credits>0 — всё равно можно (кредит независим)", () => {
     const status = computePlanStatus(false, FREE_PLANS_PER_WEEK + 1, new Date("2026-09-10T09:00:00Z"), 1);
     expect(status.canGenerate).toBe(true);
+  });
+
+  // UX-аудит 29.09.2026: дата сброса должна быть от самой сборки (окно
+  // скользящее), а не "сейчас + 7 дней".
+  it("nextResetHint считается от времени блокирующей сборки, а не от now", () => {
+    const status = computePlanStatus(false, 1, new Date("2026-09-14T09:00:00Z"), 0, ["2026-09-10T18:30:00.000Z"]);
+    expect(status.nextResetHint).toBe("2026-09-17T18:30:00.000Z");
   });
 
   it("без extraPlanCredits (не передан) — поведение как раньше, extraPlanCredits:0", () => {
@@ -435,6 +442,19 @@ describe("HTTP-сервер", () => {
     });
     const data = await res.json();
     expect(data).toMatchObject({ isPro: true, canGenerate: true });
+  });
+
+  // UX-аудит 29.09.2026: напоминание бота отправляло продлевать Pro на
+  // кнопку, которой у действующего Pro не было — нужен срок окончания.
+  it("POST /api/plan-status: оплаченный Pro отдаёт proUntil, у free он null", async () => {
+    const status = async (id) => (await fetch(`${baseUrl}/api/plan-status`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ initData: validInitData(id) }),
+    })).json();
+    expect((await status(42)).proUntil).toBeNull();
+    extendUserPro(db, 43, { fromISO: new Date().toISOString(), addDays: 30 });
+    const paid = await status(43);
+    expect(paid.isPro).toBe(true);
+    expect(paid.proUntil).toBeTruthy();
   });
 
   it("POST /api/plan-status без initData -> 401", async () => {
@@ -970,8 +990,19 @@ describe("POST /yookassa/webhook", () => {
     vi.unstubAllGlobals();
   });
 
+  // telegramCalls — тела запросов к api.telegram.org (подтверждение оплаты
+  // пользователю); telegramOk=false имитирует сбой Telegram (бот заблокирован).
+  let telegramCalls, telegramOk;
+  beforeEach(() => { telegramCalls = []; telegramOk = true; });
   function stubYookassaFetch(mockImpl) {
-    vi.stubGlobal("fetch", vi.fn((url, opts) => (String(url).includes("api.yookassa.ru") ? mockImpl(url, opts) : realFetch(url, opts))));
+    vi.stubGlobal("fetch", vi.fn((url, opts) => {
+      if (String(url).includes("api.yookassa.ru")) return mockImpl(url, opts);
+      if (String(url).includes("api.telegram.org")) {
+        telegramCalls.push(JSON.parse(opts.body));
+        return Promise.resolve({ ok: true, json: async () => (telegramOk ? { ok: true, result: {} } : { ok: false, description: "Forbidden: bot was blocked by the user" }) });
+      }
+      return realFetch(url, opts);
+    }));
   }
 
   it("succeeded (ПЕРЕПРОВЕРЕННЫЙ у ЮKassa, не из тела запроса) -> продлевает Pro и помечает платёж", async () => {
@@ -992,6 +1023,26 @@ describe("POST /yookassa/webhook", () => {
 
     expect(getPaymentByYookassaId(db, "pay-1")).toMatchObject({ status: "succeeded" });
     expect(getUserPro(db, 42, "2026-09-10T09:00:01.000Z")).toBe(true);
+
+    // UX-аудит 29.09.2026: после оплаты пользователь получает подтверждение
+    // в чате с кнопкой, открывающей Mini App.
+    expect(telegramCalls).toHaveLength(1);
+    expect(telegramCalls[0].chat_id).toBe(42);
+    expect(telegramCalls[0].text).toContain("Оплата прошла");
+    expect(telegramCalls[0].text).toContain("Pro активен");
+    expect(telegramCalls[0].reply_markup.inline_keyboard[0][0].web_app.url).toMatch(/^https:\/\//);
+  });
+
+  it("сбой Telegram при отправке подтверждения НЕ ломает уже проведённую оплату (200, Pro продлён)", async () => {
+    telegramOk = false;
+    createPendingPayment(db, { yookassaPaymentId: "pay-1", telegramUserId: 42, amountRub: 299, createdAtISO: "2026-09-10T09:00:00.000Z" });
+    stubYookassaFetch(async () => ({
+      ok: true,
+      json: async () => ({ id: "pay-1", status: "succeeded", paid: true, amount: { value: "299.00" }, metadata: { telegram_user_id: "42" } }),
+    }));
+    const res = await fetch(`${baseUrl}/yookassa/webhook`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ object: { id: "pay-1" } }) });
+    expect(res.status).toBe(200);
+    expect(getUserPro(db, 42, "2026-09-10T09:00:01.000Z")).toBe(true);
   });
 
   // Живой вывод из ревью: "разовая покупка ещё одного плана" — succeeded по
@@ -1010,6 +1061,8 @@ describe("POST /yookassa/webhook", () => {
     expect(getPaymentByYookassaId(db, "pay-extra-1")).toMatchObject({ status: "succeeded" });
     expect(getExtraPlanCredits(db, 42)).toBe(1);
     expect(getUserPro(db, 42, "2026-09-10T09:00:01.000Z")).toBe(false);
+    expect(telegramCalls).toHaveLength(1);
+    expect(telegramCalls[0].text).toContain("ещё один план");
   });
 
   it("повторное уведомление об УЖЕ succeeded платеже не продлевает Pro второй раз", async () => {
@@ -1026,6 +1079,7 @@ describe("POST /yookassa/webhook", () => {
     const secondUntil = getPaymentByYookassaId(db, "pay-1");
 
     expect(secondUntil.confirmed_at).toBe(firstUntil.confirmed_at); // не перезаписано вторым уведомлением
+    expect(telegramCalls).toHaveLength(1); // подтверждение уходит один раз, не на каждое повторное уведомление
   });
 
   it("платёж, о котором мы не просили (нет pending-записи) -> 200, ничего не меняет", async () => {

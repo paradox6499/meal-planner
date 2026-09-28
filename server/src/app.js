@@ -11,10 +11,10 @@ import {
   saveFeedback, listRecentFeedback, updateMealTimesForUser,
   createPendingPayment, getPaymentByYookassaId, updatePaymentStatus, extendUserPro,
   countRewardedReferrals,
-  getExtraPlanCredits, addExtraPlanCredit, consumeExtraPlanCredit,
+  getExtraPlanCredits, addExtraPlanCredit, consumeExtraPlanCredit, listPlanGenerationTimesSince, getProUntil,
 } from "./db.js";
 import { planReplyForUpdate, buildWelcomeText, buildFeedbackAckText, buildFeedbackListText, buildFeedbackAdminNotifyText, buildSupportPromptText } from "./webhook.js";
-import { sendTelegramMessage } from "./telegram.js";
+import { sendTelegramMessage, buildPaymentConfirmationText } from "./telegram.js";
 import { sendDigestNow } from "./digest.js";
 import { sendBackupNow } from "./backup.js";
 import { resolveIngredientPricesWithCache } from "./vkusvillPrices.js";
@@ -239,19 +239,22 @@ async function readAuthenticatedBody(req, botToken) {
  * кредит купили ПОСЛЕ того, как usedThisWeek уже выросла на предыдущей
  * сборке за счёт другого кредита: вторая покупка в ту же неделю не
  * открывала доступ, хотя должна была. */
-export function computePlanStatus(isPro, usedThisWeek, now, extraPlanCredits = 0) {
+export function computePlanStatus(isPro, usedThisWeek, now, extraPlanCredits = 0, freeGenerationTimesISO = []) {
   const canGenerate = isPro || usedThisWeek < FREE_PLANS_PER_WEEK || extraPlanCredits > 0;
+  // Лимит скользящий: место освобождается, когда из окна выпадет та сборка,
+  // из-за которой usedThisWeek достиг лимита — это (usedThisWeek -
+  // FREE_PLANS_PER_WEEK)-я по счёту от старой (0-based). Если времён не
+  // передали (или их меньше ожидаемого) — прежнее "сейчас + окно" как
+  // безопасный запасной вариант, не молчание.
+  const blockingEventISO = freeGenerationTimesISO[usedThisWeek - FREE_PLANS_PER_WEEK];
+  const resetBase = blockingEventISO ? new Date(blockingEventISO).getTime() : now.getTime();
   return {
     isPro,
     freeLimitPerWeek: FREE_PLANS_PER_WEEK,
     usedThisWeek,
     extraPlanCredits,
     canGenerate,
-    // Не "через 7 дней от последнего плана", а просто "через 7 дней от
-    // сейчас" — раз лимит скользящий (countPlanGenerationsSince), а не
-    // календарная неделя, показывать пользователю смысла больше в простом
-    // "загляните через неделю", чем в точной дате сброса конкретного слота.
-    nextResetHint: canGenerate ? null : new Date(now.getTime() + FREE_WINDOW_MS).toISOString(),
+    nextResetHint: canGenerate ? null : new Date(resetBase + FREE_WINDOW_MS).toISOString(),
   };
 }
 
@@ -351,7 +354,9 @@ export function parseFamilyPantryRequest(body) {
   return { ok: true, value: { name: name.trim(), present } };
 }
 
-export function createApp(db, { botToken, adminTelegramId = null, webhookSecret = null, yookassa = null }) {
+const DEFAULT_WEBAPP_URL = "https://paradox6499.github.io/meal-planner/";
+
+export function createApp(db, { botToken, adminTelegramId = null, webhookSecret = null, yookassa = null, webAppUrl = DEFAULT_WEBAPP_URL }) {
   return createServer(async (req, res) => {
     if (req.method === "OPTIONS") {
       sendJson(res, 204, {});
@@ -533,7 +538,12 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
         const sinceISO = new Date(Date.now() - FREE_WINDOW_MS).toISOString();
         const usedThisWeek = countPlanGenerationsSince(db, auth.telegramUserId, sinceISO);
         const extraPlanCredits = getExtraPlanCredits(db, auth.telegramUserId);
-        sendJson(res, 200, { ok: true, ...computePlanStatus(isPro, usedThisWeek, new Date(), extraPlanCredits) });
+        const freeTimes = listPlanGenerationTimesSince(db, auth.telegramUserId, sinceISO);
+        sendJson(res, 200, {
+          ok: true,
+          ...computePlanStatus(isPro, usedThisWeek, new Date(), extraPlanCredits, freeTimes),
+          proUntil: getProUntil(db, auth.telegramUserId, new Date().toISOString()),
+        });
       } catch (err) {
         console.error("[api/plan-status] ошибка:", err);
         sendJson(res, 500, { ok: false, error: "не удалось получить статус" });
@@ -915,18 +925,34 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
         // Pro/не начисляем кредит повторно на те же деньги. existing.product
         // — что именно куплено (см. createPendingPayment/EXTRA_PLAN_PRODUCT
         // выше), старые платежи до этой колонки читаются как 'pro' (DEFAULT).
+        let confirmationText = null;
         if (status.status === "succeeded" && existing.status !== "succeeded") {
           const nowISO = new Date().toISOString();
           updatePaymentStatus(db, { yookassaPaymentId: status.id, status: "succeeded", confirmedAtISO: nowISO });
           if (existing.product === EXTRA_PLAN_PRODUCT) {
             addExtraPlanCredit(db, existing.telegram_user_id);
+            confirmationText = buildPaymentConfirmationText(EXTRA_PLAN_PRODUCT);
           } else {
-            extendUserPro(db, existing.telegram_user_id, { fromISO: nowISO, addDays: PRO_PERIOD_DAYS });
+            const proUntil = extendUserPro(db, existing.telegram_user_id, { fromISO: nowISO, addDays: PRO_PERIOD_DAYS });
+            confirmationText = buildPaymentConfirmationText(PRO_PRODUCT, proUntil);
           }
         } else if (status.status !== existing.status) {
           updatePaymentStatus(db, { yookassaPaymentId: status.id, status: status.status, confirmedAtISO: null });
         }
         sendJson(res, 200, { ok: true });
+        // Подтверждение пользователю — ПОСЛЕ ответа ЮKassa и best-effort: сбой
+        // Telegram (бот заблокирован и т.п.) не должен превращать уже
+        // проведённую оплату в ошибку вебхука. Кнопка открывает Mini App
+        // сразу — человек попадает туда, где ждёт оплаченное.
+        if (confirmationText) {
+          try {
+            await sendTelegramMessage(botToken, existing.telegram_user_id, confirmationText, {
+              replyMarkup: { inline_keyboard: [[{ text: "Открыть «Съедим»", web_app: { url: webAppUrl } }]] },
+            });
+          } catch (err) {
+            console.error("[yookassa/webhook] не удалось отправить подтверждение оплаты:", err.message);
+          }
+        }
       } catch (err) {
         console.error("[yookassa/webhook] ошибка обработки:", err.message);
         // 500, а не 200 — на реальном сбое (например, сама ЮKassa API

@@ -135,7 +135,11 @@ export default function MealPlanner() {
   // усложнять). Наличие профиля решает, показывать ли полный визард из 8
   // шагов или короткий (магазин + бюджет) — см. STEP_META/QUICK_STEP_KEYS.
   const [savedProfile] = useState(loadProfile);
-  const hasProfile = !!savedProfile;
+  // State, а не производное от savedProfile: профиль теперь автосохраняется в
+  // конце ПЕРВОЙ успешной сборки (handleFinish) — hasProfile должен стать true
+  // сразу, в этой же сессии, иначе reset() ("Новый план") в ней же снова
+  // сбросил бы ответы на дефолты и заставил проходить все шаги заново.
+  const [hasProfile, setHasProfile] = useState(!!savedProfile);
 
   // Раньше собранный план жил только в React-состоянии — исчезал при каждом
   // перемонтировании (вышли из Telegram и зашли снова, перезапуск WebView),
@@ -302,6 +306,33 @@ export default function MealPlanner() {
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- один раз на монтировании, как и соседний эффект homeScreenStatus ниже
   }, []);
+
+  // После оплаты человек возвращается из браузера в тот же Mini App, а экран
+  // лимита в нём так и остаётся "исчерпан" (UX-аудит 29.09.2026: "после
+  // оплаты тишина"). Возвращаясь в приложение, тихо перепроверяем статус — и
+  // если платёж уже прошёл (canGenerate), убираем экран лимита сами.
+  // visibilitychange — обычный браузер/часть клиентов; activated — событие
+  // Telegram Mini Apps (Bot API 8.0+), срабатывает при возврате в приложение.
+  useEffect(() => {
+    if (!limitBlocked && !lastPlanGate) return;
+    let cancelled = false;
+    const recheck = async () => {
+      const status = await checkPlanStatus();
+      if (cancelled || !status?.canGenerate) return;
+      setPlanStatus(status);
+      setLimitBlocked(null);
+      setLastPlanGate(null);
+    };
+    const onVisible = () => { if (document.visibilityState === "visible") recheck(); };
+    document.addEventListener("visibilitychange", onVisible);
+    const tg = window.Telegram?.WebApp;
+    tg?.onEvent?.("activated", recheck);
+    return () => {
+      cancelled = true;
+      document.removeEventListener("visibilitychange", onVisible);
+      tg?.offEvent?.("activated", recheck);
+    };
+  }, [limitBlocked, lastPlanGate]);
 
   // "Добавить на экран" (Bot API 8.0+, см. lib/homeScreen.js) — статус
   // проверяем один раз при монтировании, а не при каждом открытии Аккаунта:
@@ -560,6 +591,18 @@ export default function MealPlanner() {
     // reportPlanGenerated вызывается РОВНО ОДИН РАЗ за эту сборку.
     reportPlanGenerated();
 
+    // UX-аудит 29.09.2026: профиль сохранялся ТОЛЬКО кнопкой "Сохранить как
+    // профиль" в самом низу Аккаунта — почти никто её не находил, и каждый
+    // "Заново" превращался в те же 9 шагов и 12 тапов вместо 4. Теперь первая
+    // успешная сборка сохраняет ответы сама (только если профиля ещё нет —
+    // чужой уже сохранённый не перезаписываем). diet и meals — те же условия,
+    // что у ручной кнопки: без них профиль бесполезен.
+    if (!hasProfile && diet && meals.length > 0) {
+      saveProfile({ family, familyByMeal, meals, diet, allergies, cuisines, devices, displayName, mealTimes, maxCookTime });
+      setHasProfile(true);
+      trackEvent("profile_auto_saved");
+    }
+
     // Считаем planView сами, здесь же — planView-в-состоянии соберётся
     // только на следующий рендер (useMemo), а в историю нужно положить
     // РОВНО тот план, что только что собрали, один раз, а не всё, во что он
@@ -634,6 +677,22 @@ export default function MealPlanner() {
       setFamily(2); setFamilyByMeal({}); setMeals(["lunch", "dinner"]); setDiet(null);
       setAllergies([]); setCuisines([]); setDevices([]); setMaxCookTime(null);
     }
+  };
+
+  // UX-аудит 29.09.2026: лимит проверялся только в самом конце визарда —
+  // человек нажимал "Заново", проходил все шаги и лишь потом узнавал, что
+  // новый план недоступен (а старый к тому времени уже стёрт с экрана).
+  // Теперь спрашиваем сервер ДО сброса: если нельзя — показываем экран
+  // лимита, план остаётся на месте, "Назад" возвращает к нему.
+  const handleNewPlan = async () => {
+    hapticImpact("light");
+    const status = await checkPlanStatus();
+    if (status && status.canGenerate === false) {
+      hapticNotify("error");
+      setLimitBlocked({ nextResetHint: status.nextResetHint });
+      return;
+    }
+    reset();
   };
 
   // Живой вывод из ревью Pro-плюшек: "Несколько планов одновременно" — Pro
@@ -891,8 +950,8 @@ export default function MealPlanner() {
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             {done && !showAccount && (
-              <button onClick={reset} style={styles.resetBtn}>
-                <RotateCcw size={14} /> Заново
+              <button onClick={handleNewPlan} style={styles.resetBtn}>
+                <RotateCcw size={14} /> Новый план
               </button>
             )}
             <button
@@ -940,26 +999,29 @@ export default function MealPlanner() {
         {!showAccount && limitBlocked && (
           <div style={styles.stepBody} className="mp-step-body">
             <StepShell icon={<Sparkles size={20} color={ACCENT} />} title="Бесплатный лимит на этой неделе исчерпан" sub="На бесплатном тарифе доступен 1 план в неделю">
+              {/* UX-аудит 29.09.2026: nextResetHint приходил с сервера, но
+                  нигде не показывался — везде было расплывчатое "позже". */}
               <p style={{ ...styles.acctSectionHint, marginTop: 0 }}>
-                Новый план будет доступен позже — или соберите ещё один прямо сейчас, разово или без ограничений вообще.
+                {formatResetDate(limitBlocked.nextResetHint)
+                  ? <>Следующий бесплатный план — <b>{formatResetDate(limitBlocked.nextResetHint)}</b>. Или соберите новый прямо сейчас:</>
+                  : "Новый бесплатный план будет доступен позже. Или соберите новый прямо сейчас:"}
               </p>
-              {/* Живой вывод из ревью: "разовая дешёвая покупка ещё одного
-                  плана на этой неделе как ступенька перед полной подпиской" —
-                  показываем ПЕРЕД "Открыть Pro" (более лёгкое решение сначала,
-                  не обязательство на месяц). */}
+              {/* Одно главное действие вместо двух конкурирующих кнопок
+                  (UX-аудит): разовая покупка — залитая основная кнопка, Pro —
+                  строка-ссылка под ней с ценой и главным аргументом. */}
               <button
                 onClick={() => { hapticImpact("light"); trackEvent("extra_plan_modal_opened", { source: "limit_blocked" }); setShowExtraPlanModal(true); }}
-                style={styles.extraPlanBtn}
+                style={{ ...styles.navBtnPrimary, width: "100%", justifyContent: "center" }}
               >
-                Купить ещё один план — {EXTRA_PLAN_PRICE_RUB} ₽
+                Собрать сейчас — {EXTRA_PLAN_PRICE_RUB} ₽
               </button>
               <button
                 onClick={() => { hapticImpact("light"); trackEvent("pro_modal_opened", { source: "limit_blocked" }); setShowProModal(true); }}
-                style={{ ...styles.navBtnPrimary, width: "100%", justifyContent: "center", marginTop: 8 }}
+                style={styles.proLinkBtn}
               >
-                Открыть Pro
+                Или Pro: {PRO_PRICE_RUB} ₽ за 30 дней, без автосписания — безлимит, напоминания, семья
               </button>
-              <button onClick={() => setLimitBlocked(null)} style={styles.limitBackBtn}>Назад</button>
+              <button onClick={() => setLimitBlocked(null)} style={styles.limitBackBtn}>{done ? "Назад к моему плану" : "Назад"}</button>
             </StepShell>
           </div>
         )}
@@ -967,6 +1029,7 @@ export default function MealPlanner() {
         {!showAccount && !limitBlocked && !done && lastPlanGate && (
           <LastPlanGateView
             latest={lastPlanGate.latest}
+            nextResetHint={lastPlanGate.status?.nextResetHint}
             onOpenPro={() => { hapticImpact("light"); trackEvent("pro_modal_opened", { source: "last_plan_gate" }); setShowProModal(true); }}
             onOpenExtraPlan={() => { hapticImpact("light"); trackEvent("extra_plan_modal_opened", { source: "last_plan_gate" }); setShowExtraPlanModal(true); }}
           />
@@ -1161,7 +1224,7 @@ export default function MealPlanner() {
           </div>
         )}
 
-        {!showAccount && done && planView && (
+        {!showAccount && !limitBlocked && done && planView && (
           <PlanSlotsBar
             slots={planSlots.slots}
             activeId={planSlotId}
@@ -1172,7 +1235,7 @@ export default function MealPlanner() {
           />
         )}
 
-        {!showAccount && done && planView && (
+        {!showAccount && !limitBlocked && done && planView && (
           <ResultView
             plan={planView}
             storeId={store}
@@ -1247,7 +1310,16 @@ function SkeletonView() {
 // там же) — здесь честный, более скромный экран: дни и блюда (кликабельные,
 // как в PlanHistorySection) и итоговая сумма, без попытки притвориться
 // полным ResultView.
-function LastPlanGateView({ latest, onOpenPro, onOpenExtraPlan }) {
+const PRO_PRICE_RUB = 299;
+
+function formatResetDate(iso) {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toLocaleDateString("ru-RU", { day: "numeric", month: "long" });
+}
+
+function LastPlanGateView({ latest, nextResetHint, onOpenPro, onOpenExtraPlan }) {
   const [openRecipe, setOpenRecipe] = useState(null);
   const dateLabel = new Date(latest.createdAt).toLocaleDateString("ru-RU", { day: "numeric", month: "long" });
   // Живая жалоба в чате: "не могу провалиться в план, увидеть КБЖУ,
@@ -1298,13 +1370,15 @@ function LastPlanGateView({ latest, onOpenPro, onOpenExtraPlan }) {
           </p>
         )}
         <p style={{ ...styles.acctSectionHint, marginTop: 0 }}>
-          Новый план по бесплатному тарифу будет доступен позже — соберите ещё один прямо сейчас, разово или без ограничений вообще.
+          {formatResetDate(nextResetHint)
+            ? <>Следующий бесплатный план — <b>{formatResetDate(nextResetHint)}</b>. Или соберите новый прямо сейчас:</>
+            : "Новый бесплатный план будет доступен позже. Или соберите новый прямо сейчас:"}
         </p>
-        <button onClick={onOpenExtraPlan} style={styles.extraPlanBtn}>
-          Купить ещё один план — {EXTRA_PLAN_PRICE_RUB} ₽
+        <button onClick={onOpenExtraPlan} style={{ ...styles.navBtnPrimary, width: "100%", justifyContent: "center" }}>
+          Собрать сейчас — {EXTRA_PLAN_PRICE_RUB} ₽
         </button>
-        <button onClick={onOpenPro} style={{ ...styles.navBtnPrimary, width: "100%", justifyContent: "center", marginTop: 8 }}>
-          Перейти на Pro
+        <button onClick={onOpenPro} style={styles.proLinkBtn}>
+          Или Pro: {PRO_PRICE_RUB} ₽ за 30 дней, без автосписания — безлимит, напоминания, семья
         </button>
       </StepShell>
       {openRecipe && <RecipeModal dm={openRecipe} family={openRecipe.family} onClose={() => setOpenRecipe(null)} />}
@@ -1785,7 +1859,7 @@ const SUBSCRIPTION_BENEFITS = [
 // Раньше в Аккаунте был мини-аккордеон с тем же списком, что и здесь — теперь
 // он переехал в отдельный полноэкранный ProModal (пользователь в чате прямо
 // это попросил: компактная карточка в Аккаунте + большое окно с полным
-// питчем и ценой по кнопке "Перейти на Pro", а не два дублирующих друг друга
+// питчем и ценой по кнопке "Открыть Pro", а не два дублирующих друг друга
 // списка). Карточка в Аккаунте теперь просто честно называет, что доступно
 // сейчас, и одной кнопкой ведёт к продающему экрану.
 function AccountSubscriptionCard({ onOpenPro, planStatus }) {
@@ -1793,6 +1867,7 @@ function AccountSubscriptionCard({ onOpenPro, planStatus }) {
   // в обоих случаях честнее не утверждать конкретную цифру лимита, раз мы
   // её на самом деле не знаем прямо сейчас.
   const isPro = planStatus?.isPro ?? false;
+  const proUntilLabel = formatResetDate(planStatus?.proUntil);
   return (
     <div style={styles.acctSection}>
       <div style={styles.subCard}>
@@ -1802,16 +1877,21 @@ function AccountSubscriptionCard({ onOpenPro, planStatus }) {
           <span style={isPro ? styles.proBadge : styles.freeBadge}>{isPro ? "Pro" : "Free"}</span>
         </div>
         {isPro ? (
-          <p style={styles.acctSectionHint}>Спасибо за подписку — пересборка плана без ограничений.</p>
+          <p style={styles.acctSectionHint}>
+            {proUntilLabel ? `Pro активен до ${proUntilLabel}` : "Pro активен"} — пересборка плана без ограничений. Автосписания нет: продлить можно вручную, когда захотите.
+          </p>
         ) : (
           <p style={styles.acctSectionHint}>
             На бесплатном тарифе — 1 план в неделю{planStatus ? ` (использовано: ${planStatus.usedThisWeek}/${planStatus.freeLimitPerWeek})` : ""}.
             Pro снимает это ограничение и добавляет напоминания, несколько планов и общий список на семью.
           </p>
         )}
-        {!isPro && (
+        {/* Действующему Pro с оплаченным сроком — "Продлить" (раньше кнопки
+            не было вообще, а напоминание бота отправляло именно сюда). Pro без
+            срока (ручной тумблер админа) продлевать нечем. */}
+        {(!isPro || planStatus?.proUntil) && (
           <button onClick={() => { hapticImpact("light"); onOpenPro(); }} style={{ ...styles.orderBtn, marginTop: 4 }}>
-            Перейти на Pro
+            {isPro ? "Продлить Pro" : "Открыть Pro"}
           </button>
         )}
       </div>
@@ -1881,7 +1961,9 @@ function FamilySection({ familyStatus, isPro, actionState, onCreate, onLeave }) 
   // предсказуемый (AUTOINCREMENT), можно перебрать и напроситься в чужую
   // семью. inviteCode — случайный (см. genInviteCode в server/src/db.js).
   const inviteLink = `${BOT_SHARE_URL}?startapp=fam_${familyStatus.inviteCode}`;
-  const shareText = "Присоединяйся к нашей семье в «Съедим» — увидим один и тот же список покупок, отметил кто-то одно — увидят все.";
+  // Текст приглашения не обещает "один и тот же список" (UX-аудит 29.09.2026):
+  // у каждого свой план, общая только отметка "уже есть дома".
+  const shareText = "Присоединяйся к нашей семье в «Съедим» — так мы не будем покупать одно и то же дважды: отметил дома продукт один — второй увидит это при следующем открытии списка.";
   return (
     <div style={styles.acctSection}>
       <div style={styles.subCard}>
@@ -2175,10 +2257,16 @@ function ProModal({ onClose }) {
 
         <div style={styles.proPriceBox}>
           <div style={styles.proPriceRow}>
-            <span style={styles.proPriceOld}>399 ₽</span>
-            <span style={styles.proPriceNew}>299 ₽</span>
-            <span style={styles.proPricePeriod}>/ мес</span>
+            <span style={styles.proPriceNew}>{PRO_PRICE_RUB} ₽</span>
+            <span style={styles.proPricePeriod}>за 30 дней</span>
           </div>
+          {/* Зачёркнутая "399 ₽" убрана (UX-аудит 29.09.2026): по ней никогда
+              не продавали — это вводящая в заблуждение реклама. "/ мес" и
+              "подписка" тоже намекали на автосписание, которого нет (см.
+              terms.html: разовый платёж на 30 дней). */}
+          <p style={{ ...styles.acctSectionHint, textAlign: "center", margin: "4px 0 0 0" }}>
+            Разовый платёж — автосписания нет, продлевать или нет решаете вы.
+          </p>
           {/* Обязателен для чека (54-ФЗ, см. lib/payerContact.js) — ЮKassa
               без email/телефона покупателя отклоняет платёж целиком.
               Запоминается локально, при следующей оплате спрашивать не нужно. */}
@@ -2199,7 +2287,7 @@ function ProModal({ onClose }) {
             disabled={paymentState === "loading" || !emailValid}
             style={{ ...styles.navBtnPrimary, width: "100%", justifyContent: "center", marginTop: 12, opacity: paymentState === "loading" || !emailValid ? 0.6 : 1 }}
           >
-            {paymentState === "loading" ? <><Loader2 size={16} className="spin" /> Готовим оплату…</> : "Оформить подписку"}
+            {paymentState === "loading" ? <><Loader2 size={16} className="spin" /> Готовим оплату…</> : `Оплатить Pro — ${PRO_PRICE_RUB} ₽`}
           </button>
           {paymentState === "error" && (
             <p style={{ ...styles.acctSectionHint, textAlign: "center", margin: "12px 0 0 0" }}>
@@ -3042,6 +3130,7 @@ const styles = {
   // выглядеть тревожно. Жалоба в чате: кнопка была прижата почти вплотную к
   // "Открыть Pro" над ней (padding-top 10px у acctClearBtn) — увеличил
   // отступ и убрал ложный красный акцент.
+  proLinkBtn: { width: "100%", background: "none", border: "none", color: ACCENT, fontSize: 13, fontWeight: 600, cursor: "pointer", padding: "14px 4px 0 4px", lineHeight: 1.4, textAlign: "center" },
   limitBackBtn: { width: "100%", background: "none", border: "none", color: "var(--text-tertiary)", fontSize: 13, fontWeight: 500, cursor: "pointer", padding: "20px 0 0 0" },
   // "Купить ещё один план" — сознательно НЕ такой же заливкой, как
   // navBtnPrimary ("Открыть Pro") — более лёгкое, менее обязывающее решение
@@ -3106,7 +3195,6 @@ const styles = {
   },
   proPriceBox: { marginTop: 22, paddingTop: 18, borderTop: "1px solid var(--hairline)" },
   proPriceRow: { display: "flex", alignItems: "baseline", justifyContent: "center", gap: 8 },
-  proPriceOld: { fontSize: 15, color: "var(--text-tertiary)", textDecoration: "line-through" },
   proPriceNew: { fontSize: 28, fontWeight: 700, letterSpacing: "-0.01em" },
   proPricePeriod: { fontSize: 13, color: "var(--text-tertiary)" },
   progressWrap: { marginBottom: 22 },

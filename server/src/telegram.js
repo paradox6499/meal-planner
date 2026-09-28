@@ -7,7 +7,7 @@
  * @param {string} botToken
  * @param {number} chatId — telegram_user_id (личка с ботом = чат с тем же id)
  * @param {string} text
- * @param {{ parseMode?: string }} [opts]
+ * @param {{ parseMode?: string, replyMarkup?: object }} [opts]
  */
 export async function sendTelegramMessage(botToken, chatId, text, opts = {}) {
   // По умолчанию БЕЗ parse_mode (раньше был "Markdown" по умолчанию) — живой
@@ -24,6 +24,7 @@ export async function sendTelegramMessage(botToken, chatId, text, opts = {}) {
       chat_id: chatId,
       text,
       ...(opts.parseMode ? { parse_mode: opts.parseMode } : {}),
+      ...(opts.replyMarkup ? { reply_markup: opts.replyMarkup } : {}),
       disable_web_page_preview: true,
     }),
   });
@@ -36,6 +37,17 @@ export async function sendTelegramMessage(botToken, chatId, text, opts = {}) {
     throw new Error(`Telegram sendMessage: ${body?.description || res.status}`);
   }
   return body.result;
+}
+
+/** Сообщение "оплата прошла" (UX-аудит 29.09.2026: после оплаты в
+ * браузере пользователь возвращался в чат с ботом и не видел ничего — ни
+ * подтверждения, ни следующего шага). proUntilISO — для product 'pro'. */
+export function buildPaymentConfirmationText(product, proUntilISO) {
+  if (product === "extra_plan") {
+    return "✅ Оплата прошла — вам доступен ещё один план. Откройте «Съедим» и соберите его.";
+  }
+  const date = proUntilISO ? new Date(proUntilISO).toLocaleDateString("ru-RU", { day: "numeric", month: "long" }) : null;
+  return `✅ Оплата прошла — Pro активен${date ? ` до ${date}` : ""}. Безлимитные планы, напоминания и общий список на семью уже доступны — откройте «Съедим».`;
 }
 
 /** Текст напоминания — отдельная функция, чтобы формат сообщения можно было

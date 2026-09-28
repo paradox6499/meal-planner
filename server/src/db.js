@@ -467,6 +467,16 @@ export function getUserPro(db, telegramUserId, nowISO) {
   return !!row.is_pro || (!!row.pro_until && row.pro_until > nowISO);
 }
 
+/** Дата окончания ОПЛАЧЕННОГО Pro (pro_until), если он ещё действует — иначе
+ * null. Ручной тумблер is_pro (админский) срока не имеет и сюда не попадает.
+ * Нужен фронтенду, чтобы показать "Pro до ..." и дать кнопку "Продлить"
+ * (UX-аудит 29.09.2026: напоминание бота отправляло на кнопку, которой у
+ * действующего Pro не было). */
+export function getProUntil(db, telegramUserId, nowISO) {
+  const row = db.prepare("SELECT pro_until FROM users WHERE telegram_user_id = ?").get(telegramUserId);
+  return row?.pro_until && row.pro_until > nowISO ? row.pro_until : null;
+}
+
 /** Продлевает/выставляет срок действия Pro по факту оплаты — НЕ трогает
  * is_pro (ручной тумблер admin'а — отдельная, независимая причина быть Pro,
  * см. комментарий у ensureColumn). Если у пользователя уже была активная
@@ -748,6 +758,16 @@ export function countPlanGenerationsSince(db, telegramUserId, sinceISO) {
     .prepare(`SELECT COUNT(*) AS count FROM events WHERE telegram_user_id = ? AND event_name = 'plan_generated' AND created_at >= ?`)
     .get(telegramUserId, sinceISO);
   return row.count;
+}
+
+/** Время бесплатных сборок в окне, по возрастанию — нужно, чтобы назвать
+ * пользователю ТОЧНУЮ дату, когда лимит освободится (UX-аудит 29.09.2026:
+ * раньше "сейчас + 7 дней", хотя окно скользящее от самой сборки). */
+export function listPlanGenerationTimesSince(db, telegramUserId, sinceISO) {
+  return db
+    .prepare(`SELECT created_at FROM events WHERE telegram_user_id = ? AND event_name = 'plan_generated' AND created_at >= ? ORDER BY created_at ASC`)
+    .all(telegramUserId, sinceISO)
+    .map((r) => r.created_at);
 }
 
 const PLAN_HISTORY_KEEP_PER_USER = 12;
