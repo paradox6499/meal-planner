@@ -6,7 +6,7 @@ import { fetchVkusvillPools, getSubstituteOptions, attachRealCosts } from "./lib
 import { loadProfile, saveProfile, clearProfile, loadTheme, saveTheme } from "./lib/profile.js";
 import { loadActivePlanSlots, saveActivePlanSlot, setActiveSlotId, removeActivePlanSlot, clearAllActivePlans, genSlotId, MAX_PRO_SLOTS } from "./lib/activePlan.js";
 import { buildPools, buildInitialPlan, buildPlanView, interleaveGroups, computeBudgetStreak, computeRecentSavings } from "./lib/planLogic.js";
-import { submitPlanToBackend, checkPlanStatus, savePlanToHistory, fetchPlanHistory, updateMealTimes, createProPayment, createExtraPlanPayment, claimReferral, fetchReferralStatus, getBackendUrl, sendSupportPrompt, createFamily, joinFamily, leaveFamily, fetchFamilyStatus, toggleFamilyPantryItem } from "./lib/backend.js";
+import { submitPlanToBackend, reportPlanGenerated, checkPlanStatus, savePlanToHistory, fetchPlanHistory, updateMealTimes, createProPayment, createExtraPlanPayment, claimReferral, fetchReferralStatus, getBackendUrl, sendSupportPrompt, createFamily, joinFamily, leaveFamily, fetchFamilyStatus, toggleFamilyPantryItem } from "./lib/backend.js";
 import { loadPantryStaples, savePantryStaples } from "./lib/pantry.js";
 import { loadPayerEmail, savePayerEmail } from "./lib/payerContact.js";
 import { trackEvent } from "./lib/analytics.js";
@@ -552,12 +552,13 @@ export default function MealPlanner() {
     if (!planSlotId) setPlanSlotId(genSlotId());
     setAssembling(false);
     hapticNotify("success");
-    // Раньше здесь был trackEvent("plan_generated", ...) — именно этот вызов
-    // и только он считал бесплатный лимит на сервере (см. countPlanGenerationsSince
-    // в server/src/app.js). Убрать один fire-and-forget вызов было слишком
-    // легко, чтобы получать безлимитные бесплатные планы — теперь событие
-    // plan_generated пишет сам сервер как часть /api/plan (submitPlanToBackend
-    // ниже, вызывается на каждую сборку через useEffect).
+    // Именно ЗДЕСЬ, а не в useEffect на submitPlanToBackend ниже — тот
+    // срабатывает на КАЖДОЕ изменение planView (открытие с сохранённым
+    // планом, замена блюда), а не только на реальную сборку. Раньше учёт
+    // лимита был завязан на тот эффект и списывал лимит/кредит от одного
+    // открытия приложения (найдено техническим и UX-аудитом 29.09.2026).
+    // reportPlanGenerated вызывается РОВНО ОДИН РАЗ за эту сборку.
+    reportPlanGenerated();
 
     // Считаем planView сами, здесь же — planView-в-состоянии соберётся
     // только на следующий рендер (useMemo), а в историю нужно положить

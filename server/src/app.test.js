@@ -112,16 +112,28 @@ describe("computePlanStatus", () => {
   });
 
   // Живой вывод из ревью: "разовая дешёвая покупка ещё одного плана на этой
-  // неделе" — extraPlanCredits прибавляется к базовому бесплатному лимиту.
-  it("extraPlanCredits расширяет лимит — можно генерировать сверх базового", () => {
+  // неделе" — extraPlanCredits это ОСТАТОК кредитов прямо сейчас (не то, что
+  // складывается с usedThisWeek — см. комментарий у computePlanStatus).
+  it("extraPlanCredits открывает доступ сверх базового лимита", () => {
     const status = computePlanStatus(false, FREE_PLANS_PER_WEEK, new Date("2026-09-10T09:00:00Z"), 1);
     expect(status.canGenerate).toBe(true);
     expect(status.extraPlanCredits).toBe(1);
   });
 
-  it("extraPlanCredits тоже кончаются — на лимит+кредиты снова заблокировано", () => {
-    const status = computePlanStatus(false, FREE_PLANS_PER_WEEK + 1, new Date("2026-09-10T09:00:00Z"), 1);
+  it("extraPlanCredits закончились (0) — снова заблокировано", () => {
+    const status = computePlanStatus(false, FREE_PLANS_PER_WEEK, new Date("2026-09-10T09:00:00Z"), 0);
     expect(status.canGenerate).toBe(false);
+  });
+
+  // Регрессия на баг из тех. аудита #2: usedThisWeek считает ТОЛЬКО
+  // бесплатные сборки (event_name='plan_generated'), сборки за счёт кредита
+  // пишутся отдельным именем и сюда не попадают (см. /api/plan/generate) —
+  // поэтому вторая покупка кредита в ту же неделю корректно открывает доступ,
+  // даже если usedThisWeek уже "старше" FREE_PLANS_PER_WEEK не бывает по
+  // построению, но функция не должна ломаться и на большем значении.
+  it("usedThisWeek больше лимита, но credits>0 — всё равно можно (кредит независим)", () => {
+    const status = computePlanStatus(false, FREE_PLANS_PER_WEEK + 1, new Date("2026-09-10T09:00:00Z"), 1);
+    expect(status.canGenerate).toBe(true);
   });
 
   it("без extraPlanCredits (не передан) — поведение как раньше, extraPlanCredits:0", () => {
@@ -309,52 +321,85 @@ describe("HTTP-сервер", () => {
     expect(getExtraPlanCredits(db, 42)).toBe(1);
   });
 
-  // Живой вывод из ревью: "разовая покупка ещё одного плана" — кредит
-  // списывается ровно тогда, когда план реально СОХРАНЁН на сервере (см.
-  // /api/plan), не в момент покупки и не по отдельному analytics-событию.
-  const planRequest = (telegramId = 42) => fetch(`${baseUrl}/api/plan`, {
+  // POST /api/plan — ТОЛЬКО синхронизация meal_slots для напоминаний (см.
+  // комментарий у неё в app.js). Регрессия на баг LIMIT_MISCOUNT (тех. и
+  // UX-аудит 29.09.2026): раньше именно этот вызов списывал лимит/кредит на
+  // КАЖДОЕ открытие приложения с сохранённым планом или замену блюда — теперь
+  // он не должен трогать лимит и кредиты вообще, сколько бы раз его ни звать.
+  const planSyncRequest = (telegramId = 42) => fetch(`${baseUrl}/api/plan`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ initData: validInitData(telegramId), timezoneOffsetMinutes: 180, mealSlots: [validSlot] }),
   });
 
-  it("сборка плана ПОСЛЕ исчерпания базового лимита списывает один extra_plan_credit", async () => {
+  it("POST /api/plan (синхронизация) не пишет plan_generated и не списывает кредиты, сколько раз ни вызови", async () => {
     addExtraPlanCredit(db, 42, 2);
-    // Первая сборка — в пределах базового лимита (FREE_PLANS_PER_WEEK=1), кредит не трогаем
-    expect((await planRequest()).status).toBe(200);
+    for (let i = 0; i < 5; i++) {
+      expect((await planSyncRequest()).status).toBe(200);
+    }
     expect(getExtraPlanCredits(db, 42)).toBe(2);
+    const summary = summarizeEventsSince(db, "2020-01-01T00:00:00Z");
+    expect(summary.byName.find((r) => r.event_name === "plan_generated")).toBeUndefined();
+  });
 
-    // Вторая сборка на этой же неделе — сверх базового лимита, идёт за счёт кредита
-    expect((await planRequest()).status).toBe(200);
+  // POST /api/plan/generate — авторитетный учёт бесплатного лимита. Вызывается
+  // ровно один раз на реальную сборку (см. reportPlanGenerated в backend.js).
+  const generateRequest = (telegramId = 42) => fetch(`${baseUrl}/api/plan/generate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ initData: validInitData(telegramId) }),
+  });
+
+  it("POST /api/plan/generate: первая сборка — в пределах базового лимита, source:free, кредит не трогаем", async () => {
+    addExtraPlanCredit(db, 42, 2);
+    const res = await generateRequest();
+    expect(res.status).toBe(200);
+    expect((await res.json()).source).toBe("free");
+    expect(getExtraPlanCredits(db, 42)).toBe(2);
+  });
+
+  it("POST /api/plan/generate: вторая сборка на той же неделе — за счёт кредита, source:credit", async () => {
+    addExtraPlanCredit(db, 42, 2);
+    await generateRequest();
+    const res = await generateRequest();
+    expect(res.status).toBe(200);
+    expect((await res.json()).source).toBe("credit");
     expect(getExtraPlanCredits(db, 42)).toBe(1);
   });
 
-  it("сборка плана в пределах базового лимита не трогает кредиты", async () => {
-    addExtraPlanCredit(db, 42, 1);
-    expect((await planRequest()).status).toBe(200);
-    expect(getExtraPlanCredits(db, 42)).toBe(1);
+  it("POST /api/plan/generate: лимит и кредиты исчерпаны -> 403", async () => {
+    await generateRequest(); // бесплатная
+    const second = await generateRequest(); // без кредитов
+    expect(second.status).toBe(403);
+    const body = await second.json();
+    expect(body.ok).toBe(false);
   });
 
-  it("Pro-пользователь никогда не расходует extra_plan_credits (лимит на него не действует)", async () => {
+  it("POST /api/plan/generate: Pro-пользователь никогда не расходует extra_plan_credits", async () => {
     setUserPro(db, 42, true);
     addExtraPlanCredit(db, 42, 1);
     for (let i = 0; i < 3; i++) {
-      expect((await planRequest()).status).toBe(200);
+      const res = await generateRequest();
+      expect(res.status).toBe(200);
+      expect((await res.json()).source).toBe("pro");
     }
     expect(getExtraPlanCredits(db, 42)).toBe(1);
   });
 
-  // Настоящее закрытие дыры "просто не отправлять аналитику": теперь /api/plan
-  // сам отказывает, если бесплатный лимит и кредиты исчерпаны — план не
-  // сохраняется вообще, а не просто "не засчитывается".
-  it("POST /api/plan: лимит и кредиты исчерпаны -> 403, план не сохраняется, второе событие не пишется", async () => {
-    expect((await planRequest()).status).toBe(200); // первая сборка — в пределах лимита
-    const second = await planRequest();
-    expect(second.status).toBe(403);
-    const body = await second.json();
-    expect(body.ok).toBe(false);
-    const summary = summarizeEventsSince(db, "2020-01-01T00:00:00Z");
-    expect(summary.byName.find((r) => r.event_name === "plan_generated").count).toBe(1);
+  // Регрессия на баг из тех. аудита #2 (формула кредитов): купить кредит →
+  // использовать → купить ВТОРОЙ кредит в ту же неделю → должен открыть
+  // доступ. Раньше usedThisWeek считала уже потраченный кредит тоже, и вторая
+  // покупка не помогала (usedThisWeek >= FREE_PLANS_PER_WEEK + credits).
+  it("POST /api/plan/generate: вторая покупка кредита в ту же неделю ПОСЛЕ использования первого — снова можно", async () => {
+    addExtraPlanCredit(db, 42, 1);
+    await generateRequest(); // бесплатная (source:free)
+    expect((await generateRequest()).status).toBe(200); // за счёт первого кредита (source:credit), credits -> 0
+
+    addExtraPlanCredit(db, 42, 1); // купили ВТОРОЙ кредит в ту же неделю
+    const res = await generateRequest();
+    expect(res.status).toBe(200); // должно снова получиться — раньше здесь был 403
+    expect((await res.json()).source).toBe("credit");
+    expect(getExtraPlanCredits(db, 42)).toBe(0);
   });
 
   it("POST /api/plan-status: free-пользователь без сборок за неделю — можно генерировать", async () => {

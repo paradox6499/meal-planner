@@ -91,19 +91,43 @@ const PRO_PRODUCT = "pro";
 
 function readJsonBody(req) {
   return new Promise((resolve, reject) => {
-    let raw = "";
+    // Буферы, а не "raw += chunk" — конкатенация строк декодирует каждый
+    // chunk в UTF-8 НЕЗАВИСИМО, и многобайтовый символ кириллицы, разрезанный
+    // ровно на границе двух chunk'ов, превращается в "�" (баг из аудита,
+    // приложение B). Buffer.concat + один toString("utf8") в конце декодирует
+    // правильно независимо от того, где прошли границы chunk'ов.
+    const chunks = [];
+    let total = 0;
+    let settled = false;
     req.on("data", (chunk) => {
-      raw += chunk;
-      if (raw.length > 1_000_000) req.destroy(); // грубая защита от гигантского тела запроса
+      if (settled) return;
+      total += chunk.length;
+      if (total > 1_000_000) {
+        // Раньше req.destroy() без reject — событие "end" после destroy не
+        // приходит, промис никогда не резолвился и не отклонялся, запрос
+        // подвисал навсегда (баг из аудита).
+        settled = true;
+        reject(new Error("слишком большое тело запроса"));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
     });
     req.on("end", () => {
+      if (settled) return;
+      settled = true;
       try {
+        const raw = Buffer.concat(chunks).toString("utf8");
         resolve(raw ? JSON.parse(raw) : {});
       } catch {
         reject(new Error("невалидный JSON в теле запроса"));
       }
     });
-    req.on("error", reject);
+    req.on("error", (err) => {
+      if (settled) return;
+      settled = true;
+      reject(err);
+    });
   });
 }
 
@@ -200,14 +224,23 @@ async function readAuthenticatedBody(req, botToken) {
   return { ok: true, body, telegramUserId: auth.user.id, firstName: auth.user.first_name ?? null };
 }
 
-/** Чистая функция — сколько ещё бесплатных сборок доступно прямо сейчас.
- * Вынесена отдельно от HTTP, чтобы тестировать без реального запроса и без
- * реальных дат (принимает now параметром). extraPlanCredits — разовые
- * покупки "ещё один план на этой неделе" (см. EXTRA_PLAN_PRODUCT) — просто
- * прибавляются к базовому бесплатному лимиту, списываются по факту
- * использования отдельно (см. /events ниже), не здесь. */
+/** Чистая функция — можно ли собрать план прямо сейчас. Вынесена отдельно от
+ * HTTP, чтобы тестировать без реального запроса и без реальных дат (принимает
+ * now параметром).
+ *
+ * usedThisWeek — сколько раз БЕСПЛАТНЫЙ лимит уже был использован за окно
+ * (countPlanGenerationsSince считает только event_name='plan_generated' —
+ * сборки, оплаченные кредитом, пишутся отдельным именем
+ * 'plan_generated_credit' и сюда не попадают, см. POST /api/plan/generate).
+ * extraPlanCredits — остаток КУПЛЕННЫХ кредитов "ещё один план на этой
+ * неделе" прямо сейчас (getExtraPlanCredits), а не что-то, что нужно
+ * складывать с usedThisWeek: раньше (до фикса из тех. аудита) формула была
+ * usedThisWeek >= FREE_PLANS_PER_WEEK + extraPlanCredits — и ломалась, если
+ * кредит купили ПОСЛЕ того, как usedThisWeek уже выросла на предыдущей
+ * сборке за счёт другого кредита: вторая покупка в ту же неделю не
+ * открывала доступ, хотя должна была. */
 export function computePlanStatus(isPro, usedThisWeek, now, extraPlanCredits = 0) {
-  const canGenerate = isPro || usedThisWeek < FREE_PLANS_PER_WEEK + extraPlanCredits;
+  const canGenerate = isPro || usedThisWeek < FREE_PLANS_PER_WEEK || extraPlanCredits > 0;
   return {
     isPro,
     freeLimitPerWeek: FREE_PLANS_PER_WEEK,
@@ -328,6 +361,17 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
       sendJson(res, 200, { ok: true });
       return;
     }
+    // POST /api/plan — ТОЛЬКО синхронизация meal_slots для напоминаний.
+    // Вызывается фронтендом на КАЖДОЕ изменение planView (открытие с
+    // восстановленным из localStorage планом, замена блюда, смена времени
+    // приёмов пищи — см. useEffect на submitPlanToBackend в App.jsx), не
+    // только на реальную сборку. Поэтому здесь СОЗНАТЕЛЬНО нет проверки
+    // бесплатного лимита и учёта plan_generated — раньше (коммит 7dd1dfc) они
+    // были добавлены именно сюда, и это списывало лимит/кредит при каждом
+    // открытии приложения или замене блюда, а не при реальной сборке плана
+    // (баг, найденный обоими аудитами 29.09.2026: LIMIT_MISCOUNT). Реальная
+    // сборка — это отдельный вызов POST /api/plan/generate ниже, ровно один
+    // раз на нажатие "Собрать список" (handleFinish в App.jsx).
     if (req.method === "POST" && req.url === "/api/plan") {
       let body;
       try {
@@ -356,36 +400,8 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
         return;
       }
 
-      // Бесплатный лимит проверяется и здесь, а не только на экране (через
-      // /api/plan-status) — тот экран лишь ПОДСКАЗЫВАЕТ, реально запретить
-      // клиенту собрать план локально нельзя (сборка целиком на клиенте, см.
-      // buildInitialPlan во App.jsx). Раньше единственным учётом было
-      // /events{plan_generated} — отдельный fire-and-forget вызов, который
-      // клиент мог просто не отправить и получать бесплатные планы без
-      // ограничения вообще, сервер об этом даже не узнавал. Теперь
-      // plan_generated пишет ТОЛЬКО сервер, прямо здесь, как побочный эффект
-      // настоящего сохранения плана — единственного вызова, без которого не
-      // работают напоминания, реферальная награда и синхронизация между
-      // устройствами (см. useEffect на submitPlanToBackend во App.jsx — он
-      // срабатывает на КАЖДУЮ сборку плана, не только платную), так что
-      // пропустить его — не то же самое, что пропустить один analytics-сигнал.
-      const isPro = getUserPro(db, auth.user.id, new Date().toISOString());
-      const sinceISO = new Date(Date.now() - FREE_WINDOW_MS).toISOString();
-      const usedThisWeek = countPlanGenerationsSince(db, auth.user.id, sinceISO);
-      const extraPlanCredits = getExtraPlanCredits(db, auth.user.id);
-      if (!isPro && usedThisWeek >= FREE_PLANS_PER_WEEK + extraPlanCredits) {
-        sendJson(res, 403, { ok: false, error: "лимит бесплатных планов на эту неделю исчерпан" });
-        return;
-      }
-
       try {
         saveUserPlan(db, parsed.value);
-        // usedThisWeek посчитан ДО этой сборки (событие ещё не вставлено) —
-        // никакого "минус один", как раньше в /events, не нужно: если
-        // usedThisWeek уже был >= FREE_PLANS_PER_WEEK, значит эта сборка идёт
-        // за счёт покупного кредита.
-        insertEvent(db, { telegramUserId: auth.user.id, eventName: "plan_generated", props: null, createdAtISO: new Date().toISOString() });
-        if (!isPro && usedThisWeek >= FREE_PLANS_PER_WEEK) consumeExtraPlanCredit(db, auth.user.id);
         sendJson(res, 200, { ok: true });
       } catch (err) {
         console.error("[api/plan] ошибка сохранения:", err);
@@ -395,14 +411,60 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
       // Реальная сборка плана — это и есть "приглашённый активировался" (см.
       // referrals.js) — если у него есть ожидающий реферал, начисляет
       // награду обеим сторонам. Идемпотентно (проверено внутри), безопасно
-      // звать на каждую сборку, не только первую. Ответ 200 пользователю уже
-      // ушёл выше — сбой здесь (например Telegram не даёт написать
-      // пригласившему) не должен выглядеть как сбой сохранения плана.
+      // звать на каждую сборку/синхронизацию, не только первую. Ответ 200
+      // пользователю уже ушёл выше — сбой здесь (например Telegram не даёт
+      // написать пригласившему) не должен выглядеть как сбой сохранения плана.
       try {
         await maybeRewardReferral(db, auth.user.id, { botToken });
       } catch (err) {
         console.error("[api/plan] ошибка начисления реферальной награды:", err.message);
       }
+      return;
+    }
+
+    // POST /api/plan/generate — авторитетный учёт бесплатного лимита.
+    // Вызывается РОВНО ОДИН РАЗ, сразу после того как клиент реально собрал
+    // новый план (сборка целиком на клиенте — buildInitialPlan в App.jsx,
+    // сервер не может это запретить технически, см. комментарий у /api/plan
+    // выше), а не на каждую последующую синхронизацию. Раньше единственным
+    // учётом было /events{plan_generated} — отдельный fire-and-forget вызов,
+    // который клиент мог просто не отправить; теперь plan_generated пишет
+    // только сервер, здесь.
+    //
+    // Кредит и бесплатный лимит — РАЗНЫЕ источники, не складываются: сборка
+    // "в долг" бесплатного лимита пишется как plan_generated, сборка за счёт
+    // купленного кредита — как plan_generated_credit (другое имя события,
+    // чтобы countPlanGenerationsSince её не считала — иначе купленный ПОСЛЕ
+    // такой сборки новый кредит не открывал бы доступ, см. computePlanStatus).
+    if (req.method === "POST" && req.url === "/api/plan/generate") {
+      const auth = await readAuthenticatedBody(req, botToken);
+      if (!auth.ok) return sendJson(res, auth.status, { ok: false, error: auth.error });
+
+      const nowISO = new Date().toISOString();
+      const isPro = getUserPro(db, auth.telegramUserId, nowISO);
+      if (isPro) {
+        insertEvent(db, { telegramUserId: auth.telegramUserId, eventName: "plan_generated", props: null, createdAtISO: nowISO });
+        sendJson(res, 200, { ok: true, source: "pro" });
+        return;
+      }
+
+      const sinceISO = new Date(Date.now() - FREE_WINDOW_MS).toISOString();
+      const freeUsedThisWeek = countPlanGenerationsSince(db, auth.telegramUserId, sinceISO);
+      if (freeUsedThisWeek < FREE_PLANS_PER_WEEK) {
+        insertEvent(db, { telegramUserId: auth.telegramUserId, eventName: "plan_generated", props: null, createdAtISO: nowISO });
+        sendJson(res, 200, { ok: true, source: "free" });
+        return;
+      }
+
+      const extraPlanCredits = getExtraPlanCredits(db, auth.telegramUserId);
+      if (extraPlanCredits > 0) {
+        insertEvent(db, { telegramUserId: auth.telegramUserId, eventName: "plan_generated_credit", props: null, createdAtISO: nowISO });
+        consumeExtraPlanCredit(db, auth.telegramUserId);
+        sendJson(res, 200, { ok: true, source: "credit" });
+        return;
+      }
+
+      sendJson(res, 403, { ok: false, error: "лимит бесплатных планов на эту неделю исчерпан" });
       return;
     }
 

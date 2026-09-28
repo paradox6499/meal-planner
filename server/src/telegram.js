@@ -10,13 +10,20 @@
  * @param {{ parseMode?: string }} [opts]
  */
 export async function sendTelegramMessage(botToken, chatId, text, opts = {}) {
+  // По умолчанию БЕЗ parse_mode (раньше был "Markdown" по умолчанию) — живой
+  // баг из аудита: тексты с непарным "_"/"*" (имя события с подчёркиванием,
+  // обращение пользователя в поддержку, название рецепта) валят весь запрос
+  // ошибкой "can't parse entities", и сообщение НЕ доходит вообще, тихо. Раз
+  // в тексте может быть что угодно от пользователя — безопасный дефолт это
+  // "без разметки", а не "разметка, пока не сломается". parseMode передаётся
+  // явно только для текстов, которые заведомо не содержат чужого ввода.
   const res = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       chat_id: chatId,
       text,
-      parse_mode: opts.parseMode ?? "Markdown",
+      ...(opts.parseMode ? { parse_mode: opts.parseMode } : {}),
       disable_web_page_preview: true,
     }),
   });
@@ -34,7 +41,9 @@ export async function sendTelegramMessage(botToken, chatId, text, opts = {}) {
 /** Текст напоминания — отдельная функция, чтобы формат сообщения можно было
  * менять/тестировать независимо от факта его отправки. */
 export function buildReminderText(mealLabel, recipeName) {
-  return `🍽 Скоро ${mealLabel.toLowerCase()}: *${recipeName}*. Самое время начинать готовить.`;
+  // Без markdown-разметки вокруг recipeName — sendTelegramMessage больше не
+  // включает parse_mode по умолчанию, а название рецепта не экранировано.
+  return `🍽 Скоро ${mealLabel.toLowerCase()}: ${recipeName}. Самое время начинать готовить.`;
 }
 
 // "Лёгкое бесплатное напоминание вернуться" (живой вывод из ревью в чате —

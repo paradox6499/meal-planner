@@ -367,6 +367,36 @@ export async function submitPlanToBackend(planView, mealTimes) {
   }
 }
 
+/** Авторитетный учёт "план реально собран" — вызывается РОВНО ОДИН РАЗ, сразу
+ * после успешной сборки (handleFinish в App.jsx), в отличие от
+ * submitPlanToBackend выше (тот шлётся на каждое изменение planView, включая
+ * открытие с сохранённым планом — раньше это по ошибке списывало лимит, см.
+ * server/src/app.js: POST /api/plan/generate). Best-effort, как и остальные
+ * функции здесь: план уже собран и показан локально к этому моменту, отказ
+ * сервера здесь не откатывает и не прячет уже показанный план — только
+ * логируется, чтобы не превращать редкий сетевой сбой в "план пропал". */
+export async function reportPlanGenerated() {
+  const backendUrl = getBackendUrl();
+  if (!backendUrl) return;
+
+  const tg = window.Telegram?.WebApp;
+  if (!tg?.initData) return;
+
+  try {
+    const res = await fetch(`${backendUrl}/api/plan/generate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ initData: tg.initData }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => null);
+      console.warn("Сервер не засчитал сборку плана:", res.status, body?.error);
+    }
+  } catch (err) {
+    console.warn("Не удалось сообщить серверу о сборке плана:", err.message);
+  }
+}
+
 /** Регистрирует "меня пригласил referrerTelegramId" — вызывается один раз
  * при открытии по реферальной ссылке (?startapp=ref_<id>, см. App.jsx).
  * Тихо ничего не делает без бэкенда/вне Telegram, как и остальные функции

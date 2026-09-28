@@ -30,6 +30,7 @@ const EVENT_LABELS = {
   wizard_started: "визард начали",
   wizard_step_completed: "шагов визарда пройдено",
   plan_generated: "планов собрано",
+  plan_generated_credit: "планов собрано (по кредиту)",
   pro_modal_opened: "открыли экран подписки",
   pro_subscribe_clicked: "нажали «Оформить подписку»",
   order_clicked: "нажали «Заказать»",
@@ -105,7 +106,7 @@ export async function sendDigestNow(db, { botToken, adminTelegramId }, now = new
   const text = buildDigestText(summary, { sinceISO, now, paymentsSummary });
 
   try {
-    await sendTelegramMessage(botToken, adminTelegramId, text, { parseMode: undefined });
+    await sendTelegramMessage(botToken, adminTelegramId, text);
     if (updateWatermark) setLastDigestAt(db, now.toISOString());
     return { sent: true, summary };
   } catch (err) {
