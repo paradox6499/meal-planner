@@ -291,6 +291,10 @@ export function buildPlanView(planState, pools, family, priceByName, familyByMea
   return {
     days, grouped,
     total: Math.round(itemized ? itemizedTotal : total),
+    // Сумма по рецептам (оценка) — запасной вариант итога, когда настоящие
+    // цены почти не получены (mostlyUnpriced): итемизированная сумма тогда
+    // близка к 0 и вводит в заблуждение.
+    estimatedTotal: Math.round(total),
     itemized,
     warnings: planState.warnings || [],
     anyEstimated, anyDishUnpriced, anyUnpriced: itemized && unpricedCount > 0, mostlyUnpriced,

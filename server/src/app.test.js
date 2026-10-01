@@ -1634,3 +1634,69 @@ describe("POST /api/account/delete (право на удаление)", () => {
     expect(getPaymentByYookassaId(db, "pay-42")).not.toBeNull();
   });
 });
+
+// Решение автора (30.09.2026): семья не остаётся после окончания Pro у
+// владельца — общий список перестаёт работать, данные сохраняются.
+describe("Семья и Pro владельца", () => {
+  let db, server, baseUrl;
+  beforeEach(async () => {
+    db = openDb(":memory:");
+    server = createApp(db, { botToken: BOT_TOKEN });
+    await new Promise((resolve) => server.listen(0, resolve));
+    baseUrl = `http://127.0.0.1:${server.address().port}`;
+  });
+  afterEach(() => new Promise((resolve) => server.close(resolve)));
+  const post = (path, id, body = {}) => fetch(`${baseUrl}${path}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ initData: validInitData(id), ...body }) }).then(async (r) => ({ status: r.status, body: await r.json() }));
+
+  async function familyWithMember() {
+    setUserPro(db, 1, true);
+    const created = await post("/api/family/create", 1);
+    await post("/api/family/join", 2, { inviteCode: created.body.status.inviteCode });
+    return created.body.status.inviteCode;
+  }
+
+  it("пока у владельца Pro: семья активна, общий список работает", async () => {
+    await familyWithMember();
+    expect((await post("/api/family/pantry", 2, { name: "Молоко", present: true })).status).toBe(200);
+    const status = await post("/api/family/status", 2);
+    expect(status.body.status).toMatchObject({ inFamily: true, active: true, pantryNames: ["Молоко"] });
+  });
+
+  it("у владельца закончился Pro: семья неактивна у ВСЕХ, список пуст, отметить нельзя", async () => {
+    await familyWithMember();
+    await post("/api/family/pantry", 2, { name: "Молоко", present: true });
+    setUserPro(db, 1, false);
+
+    for (const id of [1, 2]) {
+      const status = (await post("/api/family/status", id)).body.status;
+      expect(status).toMatchObject({ inFamily: true, active: false, pantryNames: [] });
+    }
+    const toggle = await post("/api/family/pantry", 2, { name: "Хлеб", present: true });
+    expect(toggle.status).toBe(403);
+    expect(toggle.body.error).toMatch(/неактивна/);
+  });
+
+  it("новый человек не может вступить в семью с истёкшим Pro у владельца", async () => {
+    const code = await familyWithMember();
+    setUserPro(db, 1, false);
+    const join = await post("/api/family/join", 3, { inviteCode: code });
+    expect(join.status).toBe(400);
+    expect(join.body.error).toMatch(/закончился Pro/);
+  });
+
+  it("владелец продлил Pro — семья снова активна с теми же данными", async () => {
+    await familyWithMember();
+    await post("/api/family/pantry", 2, { name: "Молоко", present: true });
+    setUserPro(db, 1, false);
+    setUserPro(db, 1, true);
+    const status = (await post("/api/family/status", 2)).body.status;
+    expect(status).toMatchObject({ active: true, pantryNames: ["Молоко"] });
+    expect(status.members).toHaveLength(2);
+  });
+
+  it("участник и сам без Pro — семья работает, пока Pro у владельца", async () => {
+    await familyWithMember();
+    expect(getUserPro(db, 2, new Date().toISOString())).toBe(false);
+    expect((await post("/api/family/pantry", 2, { name: "Сыр", present: true })).status).toBe(200);
+  });
+});

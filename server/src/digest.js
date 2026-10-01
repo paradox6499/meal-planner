@@ -39,6 +39,17 @@ const EVENT_LABELS = {
   support_clicked: "открыли поддержку",
   home_screen_prompted: "предложили «на экран»",
   home_screen_added: "добавили на экран",
+  extra_plan_modal_opened: "открыли «ещё один план»",
+  extra_plan_buy_clicked: "нажали «Купить план»",
+  family_created: "создали семью",
+  family_left: "вышли из семьи / распустили",
+  family_invite_shared: "поделились приглашением в семью",
+  referral_share_clicked: "поделились реферальной ссылкой",
+  plan_slot_add_started: "начали «ещё план» (Pro)",
+  plan_slot_switched: "переключили план (Pro)",
+  plan_slot_removed: "удалили план (Pro)",
+  recipe_video_search_clicked: "открыли поиск видео-рецепта",
+  profile_auto_saved: "профиль сохранился сам",
 };
 
 // paymentsSummary — { count, totalRub } (см. db.js:summarizePaymentsSince).

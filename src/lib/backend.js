@@ -63,6 +63,28 @@ export function getBackendUrl() {
   return raw ? raw.replace(/\/+$/, "") : raw;
 }
 
+// Таймаут на сетевые вызовы (аудит 29.09.2026: ни у одного вызова здесь, кроме
+// sendSupportPrompt, его не было — на слабой сети визард "молчал" на
+// checkPlanStatus без единого признака жизни). По истечении бросает обычную
+// Error — все вызывающие функции уже ловят сетевые ошибки и деградируют
+// (бэкенд опционален), так что истёкший таймаут для них — просто ещё один вид
+// "сеть недоступна". timeoutMs — своё значение для конкретного вызова (опция
+// вырезается и в fetch не передаётся).
+export const REQUEST_TIMEOUT_MS = 10_000;
+export async function fetchWithTimeout(url, options = {}) {
+  const { timeoutMs = REQUEST_TIMEOUT_MS, ...init } = options;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } catch (err) {
+    if (err?.name === "AbortError") throw new Error(`сервер не ответил за ${Math.round(timeoutMs / 1000)} с`);
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // typeof-проверка первой (а не просто window?.Telegram...) — раньше во всех
 // функциях этого файла молча подразумевалось, что глобальный window вообще
 // существует (правда в браузере, но не в тестах Node-окружения без jsdom, см.
@@ -87,7 +109,10 @@ export async function checkPlanStatus() {
   if (!backendUrl || !initData) return null;
 
   try {
-    const res = await fetch(`${backendUrl}/api/plan-status`, {
+    // Короткий таймаут: этот вызов стоит на пути "Собрать список" — лучше
+    // пропустить проверку лимита (бэкенд опционален), чем держать человека.
+    const res = await fetchWithTimeout(`${backendUrl}/api/plan-status`, {
+      timeoutMs: 6000,
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ initData }),
@@ -170,7 +195,7 @@ export async function createPayment(product, email) {
   }
 
   try {
-    const res = await fetch(`${backendUrl}/api/pay/create`, {
+    const res = await fetchWithTimeout(`${backendUrl}/api/pay/create`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ initData, email, product }),
@@ -217,7 +242,10 @@ export async function resolvePricesViaBackend(names) {
   if (!backendUrl || !initData || names.length === 0) return null;
 
   try {
-    const res = await fetch(`${backendUrl}/api/prices`, {
+    // Дольше остальных: сервер может на промахах кэша ходить во ВкусВилл с
+    // ретраями (см. server/src/vkusvillPrices.js).
+    const res = await fetchWithTimeout(`${backendUrl}/api/prices`, {
+      timeoutMs: 30_000,
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ initData, names }),
@@ -240,7 +268,7 @@ export async function savePlanToHistory({ storeId, storeName, budget, family, to
   if (!backendUrl || !initData) return;
 
   try {
-    const res = await fetch(`${backendUrl}/api/plans`, {
+    const res = await fetchWithTimeout(`${backendUrl}/api/plans`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ initData, storeId, storeName, budget, family, totalCost, plan }),
@@ -269,7 +297,7 @@ export async function fetchPlanHistory() {
   if (!backendUrl || !initData) return null;
 
   try {
-    const res = await fetch(`${backendUrl}/api/plans/list`, {
+    const res = await fetchWithTimeout(`${backendUrl}/api/plans/list`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ initData }),
@@ -298,7 +326,7 @@ export async function updateMealTimes(mealTimes) {
   if (!backendUrl || !initData) return;
 
   try {
-    const res = await fetch(`${backendUrl}/api/meal-times`, {
+    const res = await fetchWithTimeout(`${backendUrl}/api/meal-times`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ initData, mealTimes }),
@@ -334,7 +362,7 @@ export async function submitPlanToBackend(planView, mealTimes) {
   if (!tg?.initData) return;
 
   try {
-    const res = await fetch(`${backendUrl}/api/plan`, {
+    const res = await fetchWithTimeout(`${backendUrl}/api/plan`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -383,7 +411,7 @@ export async function reportPlanGenerated() {
   if (!tg?.initData) return;
 
   try {
-    const res = await fetch(`${backendUrl}/api/plan/generate`, {
+    const res = await fetchWithTimeout(`${backendUrl}/api/plan/generate`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ initData: tg.initData }),
@@ -409,7 +437,7 @@ export async function claimReferral(referrerTelegramId) {
   if (!backendUrl || !initData) return;
 
   try {
-    await fetch(`${backendUrl}/api/referral/claim`, {
+    await fetchWithTimeout(`${backendUrl}/api/referral/claim`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ initData, referrerTelegramId }),
@@ -429,7 +457,7 @@ export async function fetchReferralStatus() {
   if (!backendUrl || !initData) return null;
 
   try {
-    const res = await fetch(`${backendUrl}/api/referral/status`, {
+    const res = await fetchWithTimeout(`${backendUrl}/api/referral/status`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ initData }),
@@ -459,7 +487,7 @@ export async function createFamily() {
   if (!backendUrl || !initData) return null;
 
   try {
-    const res = await fetch(`${backendUrl}/api/family/create`, {
+    const res = await fetchWithTimeout(`${backendUrl}/api/family/create`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ initData }),
@@ -481,7 +509,7 @@ export async function joinFamily(inviteCode) {
   if (!backendUrl || !initData) return null;
 
   try {
-    const res = await fetch(`${backendUrl}/api/family/join`, {
+    const res = await fetchWithTimeout(`${backendUrl}/api/family/join`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ initData, inviteCode }),
@@ -499,7 +527,7 @@ export async function leaveFamily() {
   if (!backendUrl || !initData) return null;
 
   try {
-    const res = await fetch(`${backendUrl}/api/family/leave`, {
+    const res = await fetchWithTimeout(`${backendUrl}/api/family/leave`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ initData }),
@@ -517,7 +545,7 @@ export async function fetchFamilyStatus() {
   if (!backendUrl || !initData) return null;
 
   try {
-    const res = await fetch(`${backendUrl}/api/family/status`, {
+    const res = await fetchWithTimeout(`${backendUrl}/api/family/status`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ initData }),
@@ -540,7 +568,7 @@ export async function toggleFamilyPantryItem(name, present) {
   if (!backendUrl || !initData) return null;
 
   try {
-    const res = await fetch(`${backendUrl}/api/family/pantry`, {
+    const res = await fetchWithTimeout(`${backendUrl}/api/family/pantry`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ initData, name, present }),
@@ -549,5 +577,27 @@ export async function toggleFamilyPantryItem(name, present) {
   } catch (err) {
     console.warn("Не удалось обновить общий список семьи:", err.message);
     return null;
+  }
+}
+
+/** Право на удаление (152-ФЗ): стирает на сервере все личные данные
+ * пользователя — профиль, план для напоминаний, историю, события, обращения,
+ * рефералы, участие в семье (см. server/src/db.js: deleteUserData). Платежи
+ * остаются (бухучёт). Локальные данные (localStorage) стирает вызывающий код. */
+export async function deleteAccount() {
+  const backendUrl = getBackendUrl();
+  const initData = currentInitData();
+  if (!backendUrl || !initData) return { ok: false, error: "нет связи с сервером" };
+  try {
+    const res = await fetchWithTimeout(`${backendUrl}/api/account/delete`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ initData, confirm: true }),
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok || !data?.ok) return { ok: false, error: data?.error || `HTTP ${res.status}` };
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err.message };
   }
 }

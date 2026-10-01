@@ -64,11 +64,17 @@ export function leaveFamily(db, telegramUserId) {
 
 /** Единая сводка для фронтенда (POST /api/family/status) — inFamily:false,
  * если человек ни в какой семье не состоит, остальные поля тогда не нужны. */
-export function getFamilyStatus(db, telegramUserId) {
+export function getFamilyStatus(db, telegramUserId, { active = true } = {}) {
   const family = getFamilyForUser(db, telegramUserId);
   if (!family) return { inFamily: false };
   return {
     inFamily: true,
+    // active:false — у ВЛАДЕЛЬЦА закончился Pro. Решение автора ("семья после
+    // окончания Pro не остаётся", 30.09.2026): общий список перестаёт
+    // работать, но семья и её данные не удаляются — продлил владелец Pro, и
+    // всё снова работает с того же места. Сам Pro проверяет вызывающий
+    // HTTP-слой (app.js), этот модуль про тарифы ничего не знает.
+    active,
     familyId: family.id,
     // inviteCode — фронтенд строит ссылку t.me/s_edim_bot?startapp=fam_<inviteCode>
     // (см. AccountView: FamilySection, кнопка "Пригласить ещё" — только у
@@ -78,7 +84,7 @@ export function getFamilyStatus(db, telegramUserId) {
     inviteCode: family.invite_code,
     isOwner: family.owner_telegram_id === telegramUserId,
     members: getFamilyMembers(db, family.id).map((m) => ({ telegramUserId: m.telegram_user_id, displayName: m.display_name, joinedAt: m.joined_at })),
-    pantryNames: getFamilyPantry(db, family.id),
+    pantryNames: active ? getFamilyPantry(db, family.id) : [],
   };
 }
 

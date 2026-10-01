@@ -328,6 +328,18 @@ describe("buildPlanView", () => {
     expect(view.total).toBe(0);
   });
 
+  // UX-аудит 29.09.2026: при сбое ВкусВилл итог показывался как "0 ₽" (читается
+  // как "бесплатно"). estimatedTotal — сумма по рецептам, которую экран плана
+  // показывает с "≈" вместо нуля.
+  it("estimatedTotal — оценка по рецептам, не ноль, когда реальные цены не получены", () => {
+    const failed = buildPlanView(planState, pools, 2, new Map());
+    expect(failed.total).toBe(0);
+    expect(failed.estimatedTotal).toBeGreaterThan(0);
+    // без итемизации итог и есть оценка по рецептам
+    const plain = buildPlanView(planState, pools, 2, null);
+    expect(plain.estimatedTotal).toBe(plain.total);
+  });
+
   it("mostlyUnpriced=false, когда не нашлась цена только для меньшинства позиций", () => {
     const priceByName = new Map([
       ["морковь", { price: 55, productUnit: "кг" }],

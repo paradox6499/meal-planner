@@ -7,9 +7,10 @@ import { loadProfile, saveProfile, clearProfile, loadTheme, saveTheme } from "./
 import { loadActivePlanSlots, saveActivePlanSlot, setActiveSlotId, removeActivePlanSlot, clearAllActivePlans, genSlotId, MAX_PRO_SLOTS } from "./lib/activePlan.js";
 import { describePlanDay, findTodayDayIndex } from "./lib/planDays.js";
 import { buildPools, buildInitialPlan, buildPlanView, interleaveGroups, computeBudgetStreak, computeRecentSavings } from "./lib/planLogic.js";
-import { submitPlanToBackend, reportPlanGenerated, checkPlanStatus, savePlanToHistory, fetchPlanHistory, updateMealTimes, createProPayment, createExtraPlanPayment, claimReferral, fetchReferralStatus, getBackendUrl, sendSupportPrompt, createFamily, joinFamily, leaveFamily, fetchFamilyStatus, toggleFamilyPantryItem } from "./lib/backend.js";
+import { submitPlanToBackend, reportPlanGenerated, checkPlanStatus, savePlanToHistory, fetchPlanHistory, updateMealTimes, createProPayment, createExtraPlanPayment, claimReferral, fetchReferralStatus, getBackendUrl, sendSupportPrompt, createFamily, joinFamily, leaveFamily, fetchFamilyStatus, toggleFamilyPantryItem, deleteAccount } from "./lib/backend.js";
 import { loadPantryStaples, savePantryStaples } from "./lib/pantry.js";
 import { loadPayerEmail, savePayerEmail } from "./lib/payerContact.js";
+import { loadConsent, saveConsent, openLegalPage } from "./lib/consent.js";
 import { trackEvent } from "./lib/analytics.js";
 import logoUrl from "./assets/logo.svg";
 import { hapticSelect, hapticImpact, hapticNotify } from "./lib/haptics.js";
@@ -112,6 +113,15 @@ const QUICK_STEP_KEYS = ["store", "budget"];
 // Ответы по умолчанию, чтобы каждый шаг для новичка был одним тапом "Далее",
 // а не обязательным выбором с нуля. Реальный заказ пока только у ВкусВилл.
 const DEFAULT_STORE = "vv";
+
+// "1 приём / 2 приёма / 5 приёмов" — раньше везде стояло "приёма/приёмов"
+// через слэш (UX-аудит 29.09.2026).
+function mealsPerDayLabel(n) {
+  const mod10 = n % 10, mod100 = n % 100;
+  if (mod10 === 1 && mod100 !== 11) return "приём пищи в день";
+  if ([2, 3, 4].includes(mod10) && ![12, 13, 14].includes(mod100)) return "приёма пищи в день";
+  return "приёмов пищи в день";
+}
 const DEFAULT_DIET = "any";
 const ALL_DEVICE_IDS = DEVICES.map((d) => d.id);
 
@@ -539,13 +549,32 @@ export default function MealPlanner() {
     }
   }, [done, planState, pools, priceByName, store, budget, planSlotId, planCreatedAt]);
 
+  // Оболочка над runFinish (аудит 29.09.2026): раньше экран "собираем" включался
+  // только ПОСЛЕ ответа checkPlanStatus (без таймаута) — на слабой сети кнопка
+  // "Собрать список" молчала, а повторный тап запускал сборку второй раз. Теперь
+  // скелетон виден сразу (кнопки уже нет), второй вызов игнорируется, а любая
+  // непойманная ошибка не оставляет приложение на вечной загрузке.
   const handleFinish = async () => {
+    if (assembling) return;
+    setAssembling(true);
+    try {
+      await runFinish();
+    } catch (err) {
+      console.error("Сборка плана не удалась:", err);
+      hapticNotify("error");
+      setAssembling(false);
+      trackEvent("app_error", { message: String(err?.message || err).slice(0, 300), source: "handleFinish" });
+    }
+  };
+
+  const runFinish = async () => {
     // Бесплатный лимит — только если есть у кого спросить (бэкенд задеплоен
     // и мы в Telegram); без него checkPlanStatus() вернёт null и мы честно
     // ничего не блокируем — тот же принцип "бэкенд опционален", что и везде.
     const status = await checkPlanStatus();
     if (status && status.canGenerate === false) {
       hapticNotify("error");
+      setAssembling(false);
       setLimitBlocked({ nextResetHint: status.nextResetHint });
       return;
     }
@@ -566,11 +595,11 @@ export default function MealPlanner() {
     // Найдено при аудите комбинаций, не из жалобы в чате.
     if (selectedMeals.length === 0) {
       hapticNotify("error");
+      setAssembling(false);
       setShowAccount(true);
       return;
     }
     const neededCategories = [...new Set(selectedMeals.map((m) => m.category))];
-    setAssembling(true);
 
     let resolvedPools;
     let resolvedPriceByName = null;
@@ -773,6 +802,19 @@ export default function MealPlanner() {
     setStep(0); setStore(DEFAULT_STORE); setBudget(4000); setDone(false); setPlanState(null);
     setOpenRecipe(null); setAssembling(false); setPools(null); setPriceByName(null); setPlanCreatedAt(null);
     trackEvent("plan_slot_add_started");
+  };
+
+  // UX-аудит 29.09.2026: из визарда назад к своему плану было не вернуться
+  // ("Назад" на первом шаге скрыт) — только перезапуском приложения. Сохранённый
+  // слот при "Новом плане" никуда не девается, так что просто открываем его
+  // снова: тот же слот (замена плана) или активный (если начали "Ещё план").
+  const planToReturnTo = planSlots.slots.find((s) => s.id === planSlotId) ?? planSlots.slots.find((s) => s.id === planSlots.activeSlotId) ?? null;
+  const handleBackToPlan = () => {
+    if (!planToReturnTo) return;
+    hapticImpact("light");
+    applySlotToState(planToReturnTo);
+    setActiveSlotId(planToReturnTo.id);
+    setPlanSlots((prev) => ({ ...prev, activeSlotId: planToReturnTo.id }));
   };
 
   const handleSaveProfile = () => {
@@ -1151,7 +1193,7 @@ export default function MealPlanner() {
             )}
 
             {currentStepKey === "budget" && (
-              <StepShell icon={<Wallet size={20} />} title="Бюджет на неделю" sub={`Сколько готовы потратить на продукты на ${meals.length || 0} ${meals.length === 1 ? "приём пищи в день" : "приёма/приёмов пищи в день"}`}>
+              <StepShell icon={<Wallet size={20} />} title="Бюджет на неделю" sub={`Сколько готовы потратить на продукты на ${meals.length || 0} ${mealsPerDayLabel(meals.length || 0)}`}>
                 <div style={styles.budgetVal}>{budget.toLocaleString("ru-RU")} ₽</div>
                 <input type="range" min={1500} max={15000} step={250} value={budget} onChange={(e) => setBudget(Number(e.target.value))} style={styles.slider} />
                 <div style={styles.sliderLabels}><span>1 500 ₽</span><span>15 000 ₽</span></div>
@@ -1206,9 +1248,15 @@ export default function MealPlanner() {
             )}
 
             <div style={styles.navRow} className="mp-nav-row">
-              <button onClick={() => { hapticImpact("light"); setStep((s) => Math.max(0, s - 1)); }} disabled={step === 0} style={{ ...styles.navBtn, visibility: step === 0 ? "hidden" : "visible" }}>
-                <ChevronLeft size={16} /><span>Назад</span>
-              </button>
+              {step === 0 && planToReturnTo ? (
+                <button onClick={handleBackToPlan} style={styles.navBtn}>
+                  <ChevronLeft size={16} /><span>К моему плану</span>
+                </button>
+              ) : (
+                <button onClick={() => { hapticImpact("light"); setStep((s) => Math.max(0, s - 1)); }} disabled={step === 0} style={{ ...styles.navBtn, visibility: step === 0 ? "hidden" : "visible" }}>
+                  <ChevronLeft size={16} /><span>Назад</span>
+                </button>
+              )}
               <button
                 onClick={() => {
                   hapticImpact("medium");
@@ -1263,8 +1311,8 @@ export default function MealPlanner() {
             onRetryPrices={handleRetryPrices}
             retryingPrices={retryingPrices}
             priceRetryFailed={priceRetryFailed}
-            familyPantryNames={familyStatus?.inFamily ? familyStatus.pantryNames : null}
-            onToggleFamilyPantry={familyStatus?.inFamily ? handleToggleFamilyPantry : null}
+            familyPantryNames={familyStatus?.inFamily && familyStatus.active !== false ? familyStatus.pantryNames : null}
+            onToggleFamilyPantry={familyStatus?.inFamily && familyStatus.active !== false ? handleToggleFamilyPantry : null}
           />
         )}
       </div>
@@ -1809,8 +1857,10 @@ function AccountView({
         actionState={familyActionState}
         onCreate={onCreateFamily}
         onLeave={onLeaveFamily}
+        onOpenPro={onOpenPro}
       />
       <ReferralSection referralStatus={referralStatus} />
+      <LegalAndDataSection />
     </div>
   );
 }
@@ -1865,7 +1915,7 @@ const SUBSCRIPTION_BENEFITS = [
     // следующем открытии списка, не мгновенным пушем на чужой открытый
     // экран (нет вебсокетов/пушей — сознательный компромисс сложности vs
     // пользы, честно не обещаем то, чего нет).
-    detail: "Пригласите семью (Аккаунт → «Общий список на семью») — отметил кто-то товар как «уже есть дома», остальные увидят это при следующем открытии списка покупок. Меньше дублирующихся покупок.",
+    detail: "Пригласите семью (Аккаунт → «Общий список на семью») — отметил кто-то товар как «уже есть дома», остальные увидят это при следующем открытии списка покупок. Меньше дублирующихся покупок. Работает, пока у создателя семьи активен Pro.",
   },
 ];
 
@@ -1938,7 +1988,7 @@ function pluralPeople(n) {
   return "участников";
 }
 
-function FamilySection({ familyStatus, isPro, actionState, onCreate, onLeave }) {
+function FamilySection({ familyStatus, isPro, actionState, onCreate, onLeave, onOpenPro }) {
   // Вне Telegram (обычный браузер) initDataUnsafe.user не существует —
   // ссылка вида "?startapp=fam_undefined" никуда не привела бы осмысленно,
   // тот же принцип, что и у ReferralSection ниже.
@@ -1984,18 +2034,35 @@ function FamilySection({ familyStatus, isPro, actionState, onCreate, onLeave }) 
           <Users size={16} color={ACCENT} />
           <span style={{ fontWeight: 700, fontSize: 15 }}>Общий список на семью</span>
         </div>
-        <p style={styles.acctSectionHint}>
-          {familyStatus.members.length} {pluralPeople(familyStatus.members.length)} — общий "уже есть дома" в списке покупок.
-        </p>
+        {familyStatus.active === false ? (
+          // Решение автора (30.09.2026): после окончания Pro у владельца семья
+          // не остаётся — общий список на паузе, состав и данные сохранены.
+          <>
+            <p style={styles.acctWarnHint}>
+              {familyStatus.isOwner
+                ? "Семья на паузе: у вас закончился Pro, общий список не работает. Продлите Pro — и всё вернётся с того же места."
+                : "Общий список на паузе: у владельца семьи закончился Pro. Когда он продлит подписку, список снова заработает."}
+            </p>
+            {familyStatus.isOwner && (
+              <button onClick={() => { hapticImpact("light"); onOpenPro?.(); }} style={{ ...styles.orderBtn, marginTop: 4 }}>
+                Продлить Pro
+              </button>
+            )}
+          </>
+        ) : (
+          <p style={styles.acctSectionHint}>
+            {familyStatus.members.length} {pluralPeople(familyStatus.members.length)} — общий "уже есть дома" в списке покупок.
+          </p>
+        )}
         <div style={styles.stack}>
           {familyStatus.members.map((m) => (
             <div key={m.telegramUserId} style={styles.familyMemberRow}>
-              {m.displayName || `Участник ${m.telegramUserId}`}
+              {m.displayName || "Участник"}
               {m.telegramUserId === myTelegramId ? " (вы)" : ""}
             </div>
           ))}
         </div>
-        {familyStatus.isOwner && familyStatus.members.length < MAX_FAMILY_MEMBERS_LABEL && (
+        {familyStatus.active !== false && familyStatus.isOwner && familyStatus.members.length < MAX_FAMILY_MEMBERS_LABEL && (
           <button
             onClick={() => { hapticImpact("light"); trackEvent("family_invite_shared"); shareViaTelegram(shareText, inviteLink); }}
             style={{ ...styles.orderBtn, marginTop: 10, display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}
@@ -2008,6 +2075,66 @@ function FamilySection({ familyStatus, isPro, actionState, onCreate, onLeave }) 
         </button>
         {actionState.status === "error" && <p style={styles.acctWarnHint}>{actionState.message}</p>}
       </div>
+    </div>
+  );
+}
+
+// Согласие с условиями перед оплатой (см. lib/consent.js): без галочки кнопка
+// оплаты неактивна. Ссылки открывают документы во внешнем браузере.
+function ConsentCheckbox({ checked, onChange }) {
+  return (
+    <label style={styles.consentRow}>
+      <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} style={styles.consentBox} />
+      <span>
+        Я принимаю{" "}
+        <button type="button" onClick={() => openLegalPage("terms.html")} style={styles.inlineLinkBtn}>пользовательское соглашение</button>
+        {" "}и{" "}
+        <button type="button" onClick={() => openLegalPage("privacy.html")} style={styles.inlineLinkBtn}>политику конфиденциальности</button>
+      </span>
+    </label>
+  );
+}
+
+// Документы и данные в конце Аккаунта (152-ФЗ): ссылки на политику и
+// соглашение (раньше они были только на лендинге, внутри приложения — нигде) и
+// право на удаление данных кнопкой, а не только письмом в поддержку.
+function LegalAndDataSection() {
+  const [state, setState] = useState({ status: "idle" }); // idle | loading | error
+
+  const handleDelete = async () => {
+    const ok = await confirmAction(
+      "Удалить все ваши данные из «Съедим»? Профиль, планы и история, напоминания, обращения и участие в семье будут стёрты без восстановления. Платный Pro и купленные планы тоже пропадут. Записи об оплатах сохраняются — этого требует закон."
+    );
+    if (!ok) return;
+    hapticImpact("medium");
+    // Событие аналитики перед удалением НЕ шлём: fire-and-forget запрос мог бы
+    // долететь уже ПОСЛЕ удаления и создать строку удалённому пользователю.
+    setState({ status: "loading" });
+    const result = await deleteAccount();
+    if (!result.ok) {
+      hapticNotify("error");
+      setState({ status: "error", message: result.error });
+      return;
+    }
+    hapticNotify("success");
+    // Локальные данные (профиль, планы, "уже есть дома", email для чека,
+    // согласие) живут только на этом устройстве — стираем их тоже и
+    // перезапускаем приложение с чистого листа.
+    try { localStorage.clear(); } catch { /* нечего стирать */ }
+    window.location.reload();
+  };
+
+  return (
+    <div style={styles.acctSection}>
+      <div style={styles.acctSectionTitle}>Документы и данные</div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: "6px 16px" }}>
+        <button onClick={() => openLegalPage("privacy.html")} style={styles.inlineLinkBtn}>Политика конфиденциальности</button>
+        <button onClick={() => openLegalPage("terms.html")} style={styles.inlineLinkBtn}>Пользовательское соглашение</button>
+      </div>
+      <button onClick={handleDelete} disabled={state.status === "loading"} style={{ ...styles.acctClearBtn, marginTop: 14 }}>
+        {state.status === "loading" ? "Удаляем…" : "Удалить мои данные"}
+      </button>
+      {state.status === "error" && <p style={styles.acctWarnHint}>Не удалось удалить: {state.message}. Попробуйте ещё раз или напишите в поддержку.</p>}
     </div>
   );
 }
@@ -2211,9 +2338,12 @@ function ProModal({ onClose }) {
   // email не даёт вообще ни при каких условиях, см. lib/payerContact.js.
   const [errorDetail, setErrorDetail] = useState(null);
   const [email, setEmail] = useState(loadPayerEmail);
+  const [agreed, setAgreed] = useState(loadConsent);
   const emailValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
+  const canPay = emailValid && agreed;
   const handleSubscribe = async () => {
-    if (!emailValid) return; // кнопка и так задизейблена — подстраховка от гонки
+    if (!canPay) return; // кнопка и так задизейблена — подстраховка от гонки
+    saveConsent();
     hapticImpact("light");
     trackEvent("pro_subscribe_clicked");
     setPaymentState("loading");
@@ -2295,10 +2425,11 @@ function ProModal({ onClose }) {
             style={styles.textInput}
           />
           <p style={{ ...styles.acctSectionHint, margin: "6px 0 0 0" }}>Нужен по закону — на него ЮKassa пришлёт кассовый чек.</p>
+          <ConsentCheckbox checked={agreed} onChange={setAgreed} />
           <button
             onClick={handleSubscribe}
-            disabled={paymentState === "loading" || !emailValid}
-            style={{ ...styles.navBtnPrimary, width: "100%", justifyContent: "center", marginTop: 12, opacity: paymentState === "loading" || !emailValid ? 0.6 : 1 }}
+            disabled={paymentState === "loading" || !canPay}
+            style={{ ...styles.navBtnPrimary, width: "100%", justifyContent: "center", marginTop: 12, opacity: paymentState === "loading" || !canPay ? 0.6 : 1 }}
           >
             {paymentState === "loading" ? <><Loader2 size={16} className="spin" /> Готовим оплату…</> : `Оплатить Pro — ${PRO_PRICE_RUB} ₽`}
           </button>
@@ -2324,10 +2455,13 @@ function ExtraPlanModal({ onClose, onOpenPro }) {
   const [paymentState, setPaymentState] = useState("idle");
   const [errorDetail, setErrorDetail] = useState(null);
   const [email, setEmail] = useState(loadPayerEmail);
+  const [agreed, setAgreed] = useState(loadConsent);
   const emailValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
+  const canPay = emailValid && agreed;
 
   const handleBuy = async () => {
-    if (!emailValid) return;
+    if (!canPay) return;
+    saveConsent();
     hapticImpact("light");
     trackEvent("extra_plan_buy_clicked");
     setPaymentState("loading");
@@ -2357,9 +2491,9 @@ function ExtraPlanModal({ onClose, onOpenPro }) {
         <div style={styles.proHero}>
           <Sparkles size={32} color={ACCENT} />
         </div>
-        <h2 style={{ ...styles.stepTitle, textAlign: "center" }}>Ещё один план на этой неделе</h2>
+        <h2 style={{ ...styles.stepTitle, textAlign: "center" }}>Ещё один план</h2>
         <p style={{ ...styles.stepSub, textAlign: "center" }}>
-          Разовая покупка, без месячной подписки — добавляет ровно один план сверх бесплатного лимита.
+          Разовая покупка, без подписки — добавляет ровно один план сверх бесплатного лимита. Не сгорает: можно использовать, когда понадобится.
         </p>
 
         <div style={styles.proPriceBox}>
@@ -2379,10 +2513,11 @@ function ExtraPlanModal({ onClose, onOpenPro }) {
             style={styles.textInput}
           />
           <p style={{ ...styles.acctSectionHint, margin: "6px 0 0 0" }}>Нужен по закону — на него ЮKassa пришлёт кассовый чек.</p>
+          <ConsentCheckbox checked={agreed} onChange={setAgreed} />
           <button
             onClick={handleBuy}
-            disabled={paymentState === "loading" || !emailValid}
-            style={{ ...styles.navBtnPrimary, width: "100%", justifyContent: "center", marginTop: 12, opacity: paymentState === "loading" || !emailValid ? 0.6 : 1 }}
+            disabled={paymentState === "loading" || !canPay}
+            style={{ ...styles.navBtnPrimary, width: "100%", justifyContent: "center", marginTop: 12, opacity: paymentState === "loading" || !canPay ? 0.6 : 1 }}
           >
             {paymentState === "loading" ? <><Loader2 size={16} className="spin" /> Готовим оплату…</> : "Купить план"}
           </button>
@@ -2460,6 +2595,14 @@ function ResultView({ plan, planStartISO, storeId, storeName, budget, family, me
   // остаётся неактивной — не потому что забыли, а потому что нечем её
   // подкрепить по-настоящему.
   const canOrderForReal = storeId === "vv";
+  // Каталог ВкусВилл не ответил при сборке плана -> handleFinish тихо
+  // откатился на статические рецепты (их id без префикса "vv-"). Раньше
+  // пользователь этого не видел: плашка винила только цены, итог показывал
+  // "0 ₽", а "Заказать" оставалась активной (UX-аудит 29.09.2026).
+  const fallbackRecipes = canOrderForReal && plan.days.some((d) => d.dayMeals.some((dm) => !String(dm.recipe.id).startsWith("vv-")));
+  // Без настоящих цен корзину во ВкусВилл не собрать — кнопка заказа ждёт их.
+  const noRealPrices = plan.mostlyUnpriced || (fallbackRecipes && !plan.itemized);
+  const orderBlocked = canOrderForReal && noRealPrices;
 
   // Открыли план на 3-й день — сразу прокручиваем к сегодняшнему дню, а не к
   // началу (UX-аудит 29.09.2026: "день 1..7" без подсветки сегодняшнего).
@@ -2573,6 +2716,10 @@ function ResultView({ plan, planStartISO, storeId, storeName, budget, family, me
   // итемизированных цен (plan.itemized===false — не-ВкусВилл или сбой
   // ВкусВилл) корректно посчитать дельту нечем, оставляем сумму как есть.
   const adjustedTotal = useMemo(() => {
+    // Цены почти не получены: итемизированная сумма близка к нулю и вводит в
+    // заблуждение ("0 ₽" читается как "бесплатно") — показываем оценку по
+    // рецептам с пометкой "≈" (см. total ниже).
+    if (plan.mostlyUnpriced) return plan.estimatedTotal;
     if (!plan.itemized) return plan.total;
     let delta = 0;
     for (const [name, sub] of Object.entries(subs)) {
@@ -2630,7 +2777,7 @@ function ResultView({ plan, planStartISO, storeId, storeName, budget, family, me
     <div style={styles.stepBody} className="fade-in-up mp-result-body">
       <div style={styles.resultHeader}>
         <h2 style={styles.stepTitle}>Ваш план на неделю</h2>
-        <p style={styles.stepSub}>{mealsCount} приёма/приёмов пищи в день · {storeName} · на {family} {family === 1 ? "человека" : "человек"}</p>
+        <p style={styles.stepSub}>{mealsCount} {mealsPerDayLabel(mealsCount)} · {storeName} · на {family} {family === 1 ? "человека" : "человек"}</p>
       </div>
 
       {plan.warnings.length > 0 && (
@@ -2640,6 +2787,35 @@ function ResultView({ plan, planStartISO, storeId, storeName, budget, family, me
             Под ваши аллергии/рацион не нашлось рецептов для: {plan.warnings.join(", ")}.
             Эти приёмы пищи пропущены в плане — уберите часть ограничений, если это важно.
           </span>
+        </div>
+      )}
+
+      {fallbackRecipes && (
+        <div style={styles.warningBox}>
+          <TriangleAlert size={15} style={{ flexShrink: 0, marginTop: 1 }} />
+          <div style={{ minWidth: 0 }}>
+            <span>
+              {!plan.itemized
+                ? "Каталог ВкусВилл сейчас недоступен — показали базовый набор рецептов с примерными ценами. Заказ во ВкусВилл откроется, когда получим настоящие цены."
+                : plan.mostlyUnpriced
+                  ? "Каталог ВкусВилл не ответил при сборке — показан базовый набор рецептов."
+                  : "Каталог ВкусВилл не ответил при сборке — показан базовый набор рецептов. Цены на продукты уже настоящие."}
+            </span>
+            {!plan.itemized && onRetryPrices && (
+              <button
+                onClick={onRetryPrices}
+                disabled={retryingPrices}
+                style={{ ...styles.retryPricesBtn, opacity: retryingPrices ? 0.6 : 1 }}
+              >
+                {retryingPrices ? <><Loader2 size={13} className="spin" /> Пробуем ещё раз…</> : "Повторить получение цен"}
+              </button>
+            )}
+            {!plan.itemized && priceRetryFailed && !retryingPrices && (
+              <p style={{ fontSize: 11.5, marginTop: 6, opacity: 0.85 }}>
+                Не получилось — каталог всё ещё недоступен. Попробуйте ещё раз через минуту-другую.
+              </p>
+            )}
+          </div>
         </div>
       )}
 
@@ -2696,9 +2872,9 @@ function ResultView({ plan, planStartISO, storeId, storeName, budget, family, me
       )}
 
       <div style={{ ...styles.totalBox, borderColor: over ? "rgba(255,59,48,0.35)" : "rgba(10,132,255,0.3)" }}>
-        <span style={{ fontSize: 13, color: "var(--text-tertiary)" }}>Итого за продукты</span>
+        <span style={{ fontSize: 13, color: "var(--text-tertiary)" }}>Итого за продукты{noRealPrices ? " (оценка)" : ""}</span>
         <span style={{ fontSize: 28, fontWeight: 700, letterSpacing: "-0.01em", color: over ? DANGER : ACCENT }}>
-          {adjustedTotal.toLocaleString("ru-RU")} ₽
+          {noRealPrices ? "≈ " : ""}{adjustedTotal.toLocaleString("ru-RU")} ₽
         </span>
         <span style={{ fontSize: 13, color: "var(--text-tertiary)" }}>из {budget.toLocaleString("ru-RU")} ₽ бюджета</span>
         {plan.itemized && Object.keys(subs).length > 0 && (
@@ -2902,8 +3078,12 @@ function ResultView({ plan, planStartISO, storeId, storeName, budget, family, me
       </button>
       {canOrderForReal ? (
         <>
-          <button onClick={handleOrder} disabled={orderState.status === "loading"} style={{ ...styles.orderBtn, ...styles.orderBtnSticky, opacity: orderState.status === "loading" ? 0.6 : 1 }}>
-            {orderState.status === "loading" ? "Собираем корзину…" : `Заказать в ${storeName}`}
+          <button
+            onClick={handleOrder}
+            disabled={orderState.status === "loading" || orderBlocked}
+            style={{ ...styles.orderBtn, ...(orderBlocked ? null : styles.orderBtnSticky), opacity: orderState.status === "loading" ? 0.6 : orderBlocked ? 0.45 : 1, cursor: orderBlocked ? "default" : "pointer" }}
+          >
+            {orderState.status === "loading" ? "Собираем корзину…" : orderBlocked ? `Заказать в ${storeName} — когда получим цены` : `Заказать в ${storeName}`}
           </button>
           {orderState.status === "error" && (
             <p style={styles.orderError}>Не получилось собрать корзину: {orderState.message}. Попробуйте ещё раз.</p>
@@ -3163,6 +3343,8 @@ const styles = {
   // выглядеть тревожно. Жалоба в чате: кнопка была прижата почти вплотную к
   // "Открыть Pro" над ней (padding-top 10px у acctClearBtn) — увеличил
   // отступ и убрал ложный красный акцент.
+  consentRow: { display: "flex", alignItems: "flex-start", gap: 8, marginTop: 12, fontSize: 12, lineHeight: 1.5, color: "var(--text-secondary)", textAlign: "left", cursor: "pointer" },
+  consentBox: { width: 18, height: 18, marginTop: 1, flexShrink: 0, accentColor: ACCENT },
   proLinkBtn: { width: "100%", background: "none", border: "none", color: ACCENT, fontSize: 13, fontWeight: 600, cursor: "pointer", padding: "14px 4px 0 4px", lineHeight: 1.4, textAlign: "center" },
   limitBackBtn: { width: "100%", background: "none", border: "none", color: "var(--text-tertiary)", fontSize: 13, fontWeight: 500, cursor: "pointer", padding: "20px 0 0 0" },
   // "Купить ещё один план" — сознательно НЕ такой же заливкой, как

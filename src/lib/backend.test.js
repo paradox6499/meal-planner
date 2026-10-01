@@ -582,3 +582,108 @@ describe("createFamily / joinFamily / leaveFamily / fetchFamilyStatus / toggleFa
     expect(JSON.parse(opts.body)).toEqual({ initData: "initdata-blob", name: "Мука", present: true });
   });
 });
+
+// Аудит 29.09.2026: у вызовов бэкенда не было таймаута — на слабой сети визард
+// "молчал" без единого признака жизни.
+import { fetchWithTimeout, REQUEST_TIMEOUT_MS, deleteAccount } from "./backend.js";
+
+describe("fetchWithTimeout", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it("передаёт опции в fetch и добавляет signal; timeoutMs в fetch не уходит", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true });
+    vi.stubGlobal("fetch", fetchMock);
+    await fetchWithTimeout("https://x/api", { method: "POST", body: "b", timeoutMs: 1234 });
+    const [url, opts] = fetchMock.mock.calls[0];
+    expect(url).toBe("https://x/api");
+    expect(opts.method).toBe("POST");
+    expect(opts.body).toBe("b");
+    expect(opts.signal).toBeInstanceOf(AbortSignal);
+    expect("timeoutMs" in opts).toBe(false);
+  });
+
+  it("по истечении таймаута прерывает запрос и бросает понятную ошибку", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("fetch", vi.fn((url, { signal }) => new Promise((resolve, reject) => {
+      signal.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })));
+    })));
+    const pending = fetchWithTimeout("https://x/api", { timeoutMs: 3000 });
+    const assertion = expect(pending).rejects.toThrow(/не ответил за 3 с/);
+    await vi.advanceTimersByTimeAsync(3000);
+    await assertion;
+  });
+
+  it("быстрый ответ — таймер не остаётся висеть", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true }));
+    await fetchWithTimeout("https://x/api");
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("таймаут по умолчанию — 10 секунд", () => {
+    expect(REQUEST_TIMEOUT_MS).toBe(10_000);
+  });
+
+  it("обычная сетевая ошибка пробрасывается как есть", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("boom")));
+    await expect(fetchWithTimeout("https://x/api")).rejects.toThrow("boom");
+  });
+});
+
+describe("checkPlanStatus: зависший сервер", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+    vi.useRealTimers();
+  });
+
+  it("не отвечает дольше 6 секунд -> null (сборка плана не блокируется)", async () => {
+    vi.useFakeTimers();
+    vi.stubEnv("VITE_BACKEND_URL", "https://api.example.com");
+    stubTelegram("x");
+    vi.stubGlobal("fetch", vi.fn((url, { signal }) => new Promise((resolve, reject) => {
+      signal.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })));
+    })));
+    const pending = checkPlanStatus();
+    await vi.advanceTimersByTimeAsync(6000);
+    expect(await pending).toBeNull();
+  });
+});
+
+describe("deleteAccount", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+  });
+
+  it("шлёт confirm:true вместе с initData на /api/account/delete", async () => {
+    vi.stubEnv("VITE_BACKEND_URL", "https://api.example.com");
+    stubTelegram("blob");
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ ok: true }) });
+    vi.stubGlobal("fetch", fetchMock);
+    expect(await deleteAccount()).toEqual({ ok: true });
+    const [url, opts] = fetchMock.mock.calls[0];
+    expect(url).toBe("https://api.example.com/api/account/delete");
+    expect(JSON.parse(opts.body)).toEqual({ initData: "blob", confirm: true });
+  });
+
+  it("не удалось -> {ok:false, error}, не бросает", async () => {
+    vi.stubEnv("VITE_BACKEND_URL", "https://api.example.com");
+    stubTelegram("blob");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 500, json: async () => ({ ok: false, error: "не удалось удалить данные" }) }));
+    expect(await deleteAccount()).toEqual({ ok: false, error: "не удалось удалить данные" });
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("offline")));
+    expect(await deleteAccount()).toEqual({ ok: false, error: "offline" });
+  });
+
+  it("нет бэкенда/Telegram -> ok:false без запроса", async () => {
+    vi.stubEnv("VITE_BACKEND_URL", "");
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    expect((await deleteAccount()).ok).toBe(false);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});

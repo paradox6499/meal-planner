@@ -11,7 +11,7 @@ import {
   createPendingPayment, getPaymentByYookassaId,
   countRewardedReferrals,
   getExtraPlanCredits, consumeExtraPlanCredit, listPlanGenerationTimesSince, getProUntil,
-  countEventsSince, deleteUserData,
+  countEventsSince, deleteUserData, getFamilyForUser, getFamilyByInviteCode,
 } from "./db.js";
 import { planReplyForUpdate, buildWelcomeText, buildFeedbackAckText, buildFeedbackListText, buildFeedbackAdminNotifyText, buildSupportPromptText } from "./webhook.js";
 import { sendTelegramMessage } from "./telegram.js";
@@ -383,6 +383,14 @@ export function parseFamilyPantryRequest(body) {
 
 export function createApp(db, { botToken, adminTelegramId = null, webhookSecret = null, yookassa = null, webAppUrl = DEFAULT_WEBAPP_URL }) {
   const paymentNotifyOpts = { botToken, adminTelegramId, webAppUrl };
+
+  // Семья работает, пока у её ВЛАДЕЛЬЦА активен Pro (решение автора
+  // 30.09.2026: после окончания Pro семья не остаётся). Данные не удаляются —
+  // продлил Pro, и семья снова активна. Не в семье -> true (проверять нечего).
+  const isFamilyActiveFor = (telegramUserId) => {
+    const family = getFamilyForUser(db, telegramUserId);
+    return !family || getUserPro(db, family.owner_telegram_id, new Date().toISOString());
+  };
   return createServer(async (req, res) => {
     if (req.method === "OPTIONS") {
       sendJson(res, 204, {});
@@ -770,6 +778,10 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
       if (!parsed.ok) return sendJson(res, 400, { ok: false, error: parsed.error });
 
       try {
+        const target = getFamilyByInviteCode(db, parsed.value.inviteCode);
+        if (target && !getUserPro(db, target.owner_telegram_id, new Date().toISOString())) {
+          return sendJson(res, 400, { ok: false, error: "у владельца этой семьи закончился Pro — приглашение пока не действует" });
+        }
         const result = joinFamily(db, { inviteCode: parsed.value.inviteCode, joiningTelegramId: auth.telegramUserId, displayName: auth.firstName, nowISO: new Date().toISOString() });
         if (!result.ok) return sendJson(res, 400, { ok: false, error: result.reason });
         sendJson(res, 200, { ok: true, status: getFamilyStatus(db, auth.telegramUserId) });
@@ -800,7 +812,7 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
       if (!auth.ok) return sendJson(res, auth.status, { ok: false, error: auth.error });
 
       try {
-        sendJson(res, 200, { ok: true, status: getFamilyStatus(db, auth.telegramUserId) });
+        sendJson(res, 200, { ok: true, status: getFamilyStatus(db, auth.telegramUserId, { active: isFamilyActiveFor(auth.telegramUserId) }) });
       } catch (err) {
         console.error("[api/family/status] ошибка:", err);
         sendJson(res, 500, { ok: false, error: "не удалось получить статус семьи" });
@@ -817,6 +829,10 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
 
       const parsed = parseFamilyPantryRequest(auth.body);
       if (!parsed.ok) return sendJson(res, 400, { ok: false, error: parsed.error });
+
+      if (!isFamilyActiveFor(auth.telegramUserId)) {
+        return sendJson(res, 403, { ok: false, error: "семья неактивна — у владельца закончился Pro" });
+      }
 
       try {
         const result = toggleFamilyPantryItem(db, { telegramUserId: auth.telegramUserId, name: parsed.value.name, present: parsed.value.present });
