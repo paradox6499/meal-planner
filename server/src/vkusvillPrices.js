@@ -164,7 +164,7 @@ function isFresh(cached, nowMs) {
  * запрос (после исчерпания ретраев) не кэшируется вообще — как и на
  * фронтенде (см. комментарий у callToolOnce в vkusvillMcp.js): временный
  * сбой не должен залипать в кэше как будто товар не найден. */
-export async function resolveIngredientPricesWithCache(db, names) {
+export async function resolveIngredientPricesWithCache(db, names, { maxLiveFetches = Infinity, takeLiveBudget = null } = {}) {
   const uniqueNames = [...new Set(names.filter((n) => typeof n === "string" && n.trim().length > 0))];
   const result = new Map();
   if (uniqueNames.length === 0) return result;
@@ -179,6 +179,27 @@ export async function resolveIngredientPricesWithCache(db, names) {
     } else {
       toFetch.push(name);
     }
+  }
+  if (toFetch.length === 0) return result;
+
+  // Потолок живых запросов (аудит 29.09.2026): один пользователь с одной
+  // действительной сессией мог присылать сотни выдуманных названий и
+  // заваливать общий rate-limit ВкусВилл, а каждое название навсегда
+  // оседало в ingredient_prices. Всё, что не влезло в потолок (за запрос и за
+  // час на пользователя, см. takeLiveBudget), получает честное "цена не
+  // найдена" БЕЗ записи в кэш — следующий запрос попробует снова.
+  let allowed = Math.min(toFetch.length, maxLiveFetches);
+  if (takeLiveBudget) allowed = takeLiveBudget(allowed);
+  const skipped = toFetch.slice(allowed);
+  toFetch.length = allowed;
+  for (const name of skipped) {
+    const stale = cached.get(name);
+    result.set(
+      name,
+      stale
+        ? { matched: stale.matched, price: stale.price, productUnit: stale.productUnit, xmlId: stale.xmlId, packageAmount: stale.packageAmount, packageUnit: stale.packageUnit }
+        : { matched: false, price: null, productUnit: null, xmlId: null, packageAmount: null, packageUnit: null }
+    );
   }
   if (toFetch.length === 0) return result;
 

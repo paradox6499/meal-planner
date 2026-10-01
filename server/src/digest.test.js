@@ -158,3 +158,27 @@ describe("sendDigestNow", () => {
     expect(second.summary.totalEvents).toBe(1); // событие в 02:00 всё ещё видно
   });
 });
+
+describe("buildDigestText: зависшие платежи и размер БД", () => {
+  const NOW = new Date("2026-09-10T09:00:00Z");
+  const empty = { totalEvents: 0, byName: [], recentErrors: [] };
+
+  it("есть платежи, висящие дольше часа -> предупреждение про вебхук", () => {
+    const text = buildDigestText(empty, { sinceISO: "2026-09-09T09:00:00Z", now: NOW, stalePending: 2 });
+    expect(text).toContain("Платежей в ожидании дольше часа: 2");
+  });
+
+  it("нет зависших платежей -> предупреждения нет", () => {
+    expect(buildDigestText(empty, { sinceISO: "2026-09-09T09:00:00Z", now: NOW, stalePending: 0 })).not.toContain("в ожидании");
+  });
+
+  it("размер БД показывается и в пустом отчёте, и в полном", () => {
+    expect(buildDigestText(empty, { sinceISO: "2026-09-09T09:00:00Z", now: NOW, dbSizeBytes: 5 * 1_048_576 })).toContain("База данных: 5.0 МБ");
+    const full = { totalEvents: 1, byName: [{ event_name: "app_opened", count: 1 }], recentErrors: [] };
+    expect(buildDigestText(full, { sinceISO: "2026-09-09T09:00:00Z", now: NOW, dbSizeBytes: 2 * 1_048_576 })).toContain("База данных: 2.0 МБ");
+  });
+
+  it("без dbSizeBytes строки про базу нет (обратная совместимость)", () => {
+    expect(buildDigestText(empty, { sinceISO: "2026-09-09T09:00:00Z", now: NOW })).not.toContain("База данных");
+  });
+});

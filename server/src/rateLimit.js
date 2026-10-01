@@ -41,8 +41,31 @@ export function isRateLimited(key, { maxRequests, windowMs, now = Date.now() }) 
   return bucket.count > maxRequests;
 }
 
+// Бюджет в "штуках" (а не запросах): сколько единиц дорогой работы может
+// выполнить один ключ за окно. Нужен там, где один запрос может стоить и 1, и
+// 300 единиц (например, живые обращения к ВкусВилл за ценами, см. /api/prices) —
+// счётчик запросов их не различает.
+const budgets = new Map(); // key -> { used, windowStart }
+
+/** Выдаёт из бюджета до wanted единиц и возвращает, сколько ВЫДАНО (0..wanted).
+ * Фиксированное окно, как и isRateLimited. */
+export function takeBudget(key, wanted, { capacity, windowMs, now = Date.now() }) {
+  let bucket = budgets.get(key);
+  if (!bucket || now - bucket.windowStart >= windowMs) {
+    if (!bucket && budgets.size >= MAX_TRACKED_KEYS) {
+      budgets.delete(budgets.keys().next().value);
+    }
+    bucket = { used: 0, windowStart: now };
+    budgets.set(key, bucket);
+  }
+  const granted = Math.max(0, Math.min(wanted, capacity - bucket.used));
+  bucket.used += granted;
+  return granted;
+}
+
 /** Только для тестов — сбрасывает всё состояние между тестами, тот же
  * паттерн, что и clearMcpCache в src/lib/vkusvillMcp.js на фронтенде. */
 export function clearRateLimitState() {
   buckets.clear();
+  budgets.clear();
 }

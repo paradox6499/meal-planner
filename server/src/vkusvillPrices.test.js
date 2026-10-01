@@ -132,3 +132,54 @@ describe("resolveIngredientPricesWithCache", () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 });
+
+// Аудит 29.09.2026: один пользователь мог присылать сотни выдуманных названий
+// и заваливать общий rate-limit ВкусВилл, а каждое название навсегда оседало в
+// кэше. Потолок живых запросов — за один вызов и за час на пользователя.
+describe("resolveIngredientPricesWithCache: потолок живых запросов", () => {
+  let db;
+  beforeEach(() => {
+    db = openDb(":memory:");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(mockMcpResponse({ items: [] })));
+    vi.spyOn(Math, "random").mockReturnValue(0);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    Math.random.mockRestore();
+  });
+  const names = ["a1", "a2", "a3", "a4", "a5"];
+
+  it("maxLiveFetches ограничивает число живых запросов; остальным — 'не найдено' БЕЗ записи в кэш", async () => {
+    const result = await resolveIngredientPricesWithCache(db, names, { maxLiveFetches: 2 });
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(result.size).toBe(5);
+    expect(result.get("a5")).toEqual({ matched: false, price: null, productUnit: null, xmlId: null, packageAmount: null, packageUnit: null });
+    // в кэше только то, за чем реально сходили
+    expect(getIngredientPricesByName(db, names).size).toBe(2);
+  });
+
+  it("takeLiveBudget получает размер запроса и может выдать меньше", async () => {
+    const take = vi.fn().mockReturnValue(1);
+    await resolveIngredientPricesWithCache(db, names, { maxLiveFetches: 3, takeLiveBudget: take });
+    expect(take).toHaveBeenCalledWith(3);
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("бюджет исчерпан (0) — в ВкусВилл не ходим вообще", async () => {
+    const result = await resolveIngredientPricesWithCache(db, names, { takeLiveBudget: () => 0 });
+    expect(fetch).not.toHaveBeenCalled();
+    expect(result.size).toBe(5);
+  });
+
+  it("то, что не влезло в потолок, но есть в кэше (устаревшее), отдаётся из кэша", async () => {
+    upsertIngredientPrices(db, [{ name: "a5", matched: true, price: 77, productUnit: "кг", xmlId: "5" }], new Date(Date.now() - 2 * MATCHED_TTL_MS).toISOString());
+    const result = await resolveIngredientPricesWithCache(db, names, { maxLiveFetches: 0 });
+    expect(result.get("a5").price).toBe(77);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("без опций — прежнее поведение (всё ходит живьём)", async () => {
+    await resolveIngredientPricesWithCache(db, names);
+    expect(fetch).toHaveBeenCalledTimes(5);
+  });
+});

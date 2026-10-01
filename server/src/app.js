@@ -4,24 +4,28 @@
 // поднятия реального процесса на реальном порту.
 import { createServer } from "node:http";
 import { validateInitData } from "./initData.js";
-import { randomUUID } from "node:crypto";
 import {
   saveUserPlan, insertEvent,
   getUserPro, countPlanGenerationsSince, savePlanHistory, listPlanHistory,
   saveFeedback, listRecentFeedback, updateMealTimesForUser,
-  createPendingPayment, getPaymentByYookassaId, updatePaymentStatus, extendUserPro,
+  createPendingPayment, getPaymentByYookassaId,
   countRewardedReferrals,
-  getExtraPlanCredits, addExtraPlanCredit, consumeExtraPlanCredit, listPlanGenerationTimesSince, getProUntil,
+  getExtraPlanCredits, consumeExtraPlanCredit, listPlanGenerationTimesSince, getProUntil,
+  countEventsSince, deleteUserData,
 } from "./db.js";
 import { planReplyForUpdate, buildWelcomeText, buildFeedbackAckText, buildFeedbackListText, buildFeedbackAdminNotifyText, buildSupportPromptText } from "./webhook.js";
-import { sendTelegramMessage, buildPaymentConfirmationText } from "./telegram.js";
+import { sendTelegramMessage } from "./telegram.js";
+import {
+  PRO_PRODUCT, EXTRA_PLAN_PRODUCT, PRO_PERIOD_DAYS, DEFAULT_WEBAPP_URL,
+  applyPaymentStatus, notifyPaymentResult, reconcilePendingPayments, paymentIdempotenceKey,
+} from "./payments.js";
 import { sendDigestNow } from "./digest.js";
 import { sendBackupNow } from "./backup.js";
 import { resolveIngredientPricesWithCache } from "./vkusvillPrices.js";
 import { createPayment, fetchPaymentStatus } from "./yookassa.js";
 import { claimReferral, maybeRewardReferral, REFERRAL_REWARD_DAYS } from "./referrals.js";
 import { createFamily, joinFamily, leaveFamily, getFamilyStatus, toggleFamilyPantryItem } from "./family.js";
-import { isRateLimited } from "./rateLimit.js";
+import { isRateLimited, takeBudget } from "./rateLimit.js";
 
 const MEAL_TYPES = new Set(["breakfast", "lunch", "dinner", "snack"]);
 const MAX_EVENT_NAME_LENGTH = 64;
@@ -37,7 +41,21 @@ const MAX_INGREDIENT_NAMES = 300;
 // столько защита от злоупотребления (initData и так подписан Telegram-ом),
 // сколько подстраховка от случайного "закинуть весь stack trace с
 // кодом" из фронтенда.
-const MAX_PROPS_JSON_LENGTH = 4000;
+// Было 4000 — при потолке запросов в минуту это сотни мегабайт в сутки с одного
+// аккаунта (аудит 29.09.2026). Реальные props — шаг визарда, обрезанное до 300
+// символов сообщение ошибки (см. main.jsx/ErrorBoundary.jsx) — укладываются в
+// несколько сотен байт.
+const MAX_PROPS_JSON_LENGTH = 600;
+// Дневной потолок аналитических событий на одного пользователя: нормальный
+// сценарий — десятки событий в день, сотни — уже не человек.
+export const EVENTS_PER_USER_PER_DAY = 300;
+// Ходить живьём во ВкусВилл за ценами неизвестных названий — самая дорогая
+// операция сервера, а лимит ВкусВилл общий на всех. За один запрос — не
+// больше стольких промахов кэша, за час на пользователя — не больше стольких
+// живых запросов вообще (остальное честно вернётся "цена не найдена").
+export const PRICES_LIVE_FETCHES_PER_REQUEST = 60;
+export const PRICES_LIVE_FETCHES_PER_HOUR = 240;
+const MAX_INGREDIENT_NAME_LENGTH = 80;
 // "1 план в неделю" — тот же лимит, что уже честно анонсирован пользователям
 // текстом в SUBSCRIPTION_BENEFITS (src/App.jsx) задолго до того, как он
 // реально стал работать технически.
@@ -78,16 +96,14 @@ export const PAY_RATE_LIMIT_MAX_REQUESTS = 5;
 // проще и однозначнее (extendUserPro просто прибавляет дни, без вопроса
 // "а как быть с февралём").
 export const PRO_PRICE_RUB = 299;
-export const PRO_PERIOD_DAYS = 30;
+export { PRO_PERIOD_DAYS, EXTRA_PLAN_PRODUCT };
 
 // "Ещё один план на этой неделе" — разовая дешёвая покупка, ступенька перед
 // полной подпиской (живой вывод из ревью в чате: "многим проще заплатить
 // один раз 50-70 ₽, чем сразу оформить месячную подписку"). Не отдельная
 // таблица тарифов — просто второй "product" у того же /api/pay/create,
 // см. parsePayCreateRequest и ветку в /yookassa/webhook.
-export const EXTRA_PLAN_PRODUCT = "extra_plan";
 export const EXTRA_PLAN_PRICE_RUB = 59;
-const PRO_PRODUCT = "pro";
 
 function readJsonBody(req) {
   return new Promise((resolve, reject) => {
@@ -105,10 +121,12 @@ function readJsonBody(req) {
       if (total > 1_000_000) {
         // Раньше req.destroy() без reject — событие "end" после destroy не
         // приходит, промис никогда не резолвился и не отклонялся, запрос
-        // подвисал навсегда (баг из аудита).
+        // подвисал навсегда (баг из аудита). Теперь отклоняем и НЕ рвём
+        // сокет: иначе ответ 400 не успевает дойти до клиента, он видит
+        // только обрыв соединения. Остаток тела просто игнорируется (см.
+        // "if (settled) return" выше), в памяти не копится.
         settled = true;
         reject(new Error("слишком большое тело запроса"));
-        req.destroy();
         return;
       }
       chunks.push(chunk);
@@ -302,8 +320,8 @@ export function parsePricesRequest(body) {
   const { names } = body;
   if (!Array.isArray(names) || names.length === 0) return { ok: false, error: "names отсутствует или пуст" };
   if (names.length > MAX_INGREDIENT_NAMES) return { ok: false, error: `names слишком длинный (максимум ${MAX_INGREDIENT_NAMES})` };
-  if (!names.every((n) => typeof n === "string" && n.trim().length > 0)) {
-    return { ok: false, error: "names должен состоять из непустых строк" };
+  if (!names.every((n) => typeof n === "string" && n.trim().length > 0 && n.length <= MAX_INGREDIENT_NAME_LENGTH)) {
+    return { ok: false, error: `names должен состоять из непустых строк не длиннее ${MAX_INGREDIENT_NAME_LENGTH} символов` };
   }
   return { ok: true, value: { names } };
 }
@@ -313,9 +331,18 @@ export function parsePricesRequest(body) {
  * вебхука не подписано, статус из него использовать для решений нельзя).
  * Форма реального уведомления: {event, object: {id, status, ...}}. */
 export function parseYookassaWebhookBody(body) {
-  const paymentId = body?.object?.id;
-  if (!paymentId || typeof paymentId !== "string") return { ok: false, error: "object.id отсутствует" };
-  return { ok: true, value: { paymentId } };
+  const event = typeof body?.event === "string" ? body.event : null;
+  // Уведомление о возврате (refund.succeeded): object — это ВОЗВРАТ, его id —
+  // id возврата, а платёж лежит в object.payment_id. Раньше брали object.id
+  // как id платежа всегда — на возврате fetchPaymentStatus получал 404,
+  // вебхук отвечал 500, и ЮKassa повторяла его бесконечно (аудит 29.09.2026).
+  const isRefund = !!event && event.startsWith("refund.");
+  // Любые другие семейства событий (payout.*, deal.* и т.п.) нам не нужны —
+  // отвечаем 200, чтобы ЮKassa не повторяла, и ничего не делаем.
+  if (event && !isRefund && !event.startsWith("payment.")) return { ok: true, value: { ignored: true } };
+  const paymentId = isRefund ? body?.object?.payment_id : body?.object?.id;
+  if (!paymentId || typeof paymentId !== "string") return { ok: false, error: isRefund ? "object.payment_id отсутствует" : "object.id отсутствует" };
+  return { ok: true, value: { paymentId, event } };
 }
 
 /** {referrerTelegramId: number} — сам referredTelegramId берётся из
@@ -354,9 +381,8 @@ export function parseFamilyPantryRequest(body) {
   return { ok: true, value: { name: name.trim(), present } };
 }
 
-const DEFAULT_WEBAPP_URL = "https://paradox6499.github.io/meal-planner/";
-
 export function createApp(db, { botToken, adminTelegramId = null, webhookSecret = null, yookassa = null, webAppUrl = DEFAULT_WEBAPP_URL }) {
+  const paymentNotifyOpts = { botToken, adminTelegramId, webAppUrl };
   return createServer(async (req, res) => {
     if (req.method === "OPTIONS") {
       sendJson(res, 204, {});
@@ -508,8 +534,8 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
         sendJson(res, 400, { ok: false, error: parsed.error });
         return;
       }
-      // plan_generated — зарезервированное имя: теперь его пишет только
-      // сервер, как часть /api/plan (см. комментарий там) — реальный учёт
+      // plan_generated — зарезервированное имя: его пишет только сервер, в
+      // POST /api/plan/generate (см. комментарий там) — реальный учёт
       // бесплатного лимита не может зависеть от того, что клиент решит сюда
       // прислать. Если оно пришло отсюда — это либо старая (закэшированная)
       // версия фронтенда, либо кто-то пытается накрутить счётчик вручную; в
@@ -520,6 +546,14 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
       }
 
       try {
+        // Дневной потолок на пользователя поверх лимита запросов в минуту:
+        // тот не мешал медленно набивать таблицу events сутками (аудит
+        // 29.09.2026). Нормальному человеку десятков событий в день хватает.
+        const dayAgoISO = new Date(Date.now() - 24 * 3_600_000).toISOString();
+        if (countEventsSince(db, auth.user.id, dayAgoISO) >= EVENTS_PER_USER_PER_DAY) {
+          sendJson(res, 429, { ok: false, error: "слишком много событий за сутки" });
+          return;
+        }
         insertEvent(db, { ...parsed.value, createdAtISO: new Date().toISOString() });
         sendJson(res, 200, { ok: true });
       } catch (err) {
@@ -532,6 +566,19 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
     if (req.method === "POST" && req.url === "/api/plan-status") {
       const auth = await readAuthenticatedBody(req, botToken);
       if (!auth.ok) return sendJson(res, auth.status, { ok: false, error: auth.error });
+
+      // Человек вернулся из оплаты, а вебхук ещё не дошёл (или не дойдёт
+      // никогда) — сами спрашиваем ЮKassa про его незавершённые платежи, чтобы
+      // оплаченное выдалось сейчас, а не "когда-нибудь" (аудит 29.09.2026).
+      // Сбой сверки не должен ломать сам ответ про статус.
+      if (yookassa) {
+        try {
+          const results = await reconcilePendingPayments(db, yookassa, { telegramUserId: auth.telegramUserId, limit: 3 });
+          for (const r of results) await notifyPaymentResult(r, paymentNotifyOpts);
+        } catch (err) {
+          console.error("[api/plan-status] сверка платежей не удалась:", err.message);
+        }
+      }
 
       try {
         const isPro = getUserPro(db, auth.telegramUserId, new Date().toISOString());
@@ -547,6 +594,26 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
       } catch (err) {
         console.error("[api/plan-status] ошибка:", err);
         sendJson(res, 500, { ok: false, error: "не удалось получить статус" });
+      }
+      return;
+    }
+
+    // Право на удаление (152-ФЗ, ст. 14 и 21): пользователь удаляет свои
+    // данные сам, из Аккаунта, без обращения в поддержку. Платежи не
+    // удаляются (бухгалтерский учёт, см. deleteUserData и политику
+    // конфиденциальности). confirm:true — защита от случайного вызова.
+    if (req.method === "POST" && req.url === "/api/account/delete") {
+      const auth = await readAuthenticatedBody(req, botToken);
+      if (!auth.ok) return sendJson(res, auth.status, { ok: false, error: auth.error });
+      if (auth.body.confirm !== true) return sendJson(res, 400, { ok: false, error: "нужно подтверждение удаления" });
+
+      try {
+        const deleted = deleteUserData(db, auth.telegramUserId);
+        console.log(`[account/delete] данные пользователя удалены:`, JSON.stringify(deleted));
+        sendJson(res, 200, { ok: true });
+      } catch (err) {
+        console.error("[account/delete] ошибка удаления:", err);
+        sendJson(res, 500, { ok: false, error: "не удалось удалить данные" });
       }
       return;
     }
@@ -784,7 +851,10 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
       if (!parsed.ok) return sendJson(res, 400, { ok: false, error: parsed.error });
 
       try {
-        const resolved = await resolveIngredientPricesWithCache(db, parsed.value.names);
+        const resolved = await resolveIngredientPricesWithCache(db, parsed.value.names, {
+          maxLiveFetches: PRICES_LIVE_FETCHES_PER_REQUEST,
+          takeLiveBudget: (n) => takeBudget(`prices-live:${auth.telegramUserId}`, n, { capacity: PRICES_LIVE_FETCHES_PER_HOUR, windowMs: 3_600_000 }),
+        });
         sendJson(res, 200, { ok: true, prices: [...resolved.entries()].map(([name, v]) => ({ name, ...v })) });
       } catch (err) {
         console.error("[api/prices] ошибка резолвинга:", err);
@@ -847,7 +917,10 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
       const description = product === EXTRA_PLAN_PRODUCT ? "Съедим — ещё один план на этой неделе" : `Съедим Pro — ${PRO_PERIOD_DAYS} дней`;
 
       try {
-        const idempotenceKey = randomUUID();
+        // Детерминированный ключ (а не randomUUID на каждый запрос): двойной
+        // тап по "Оплатить" в пределах минуты вернёт тот же платёж, а не
+        // заведёт второй — см. paymentIdempotenceKey.
+        const idempotenceKey = paymentIdempotenceKey(auth.telegramUserId, product);
         const payment = await createPayment(yookassa, {
           amountRub,
           description,
@@ -856,10 +929,14 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
           idempotenceKey,
           receiptEmail: email,
         });
-        createPendingPayment(db, {
-          yookassaPaymentId: payment.id, telegramUserId: auth.telegramUserId,
-          amountRub, createdAtISO: new Date().toISOString(), product,
-        });
+        // Повтор с тем же ключом вернёт УЖЕ созданный платёж — вставлять его в
+        // payments второй раз нельзя (UNIQUE), это не ошибка.
+        if (!getPaymentByYookassaId(db, payment.id)) {
+          createPendingPayment(db, {
+            yookassaPaymentId: payment.id, telegramUserId: auth.telegramUserId,
+            amountRub, createdAtISO: new Date().toISOString(), product,
+          });
+        }
         // Раньше успешный путь не оставлял НИ ОДНОЙ строки в логах — тот же
         // класс путаницы, что и с отказом авторизации выше: диагностика
         // подключения (Аккаунт) подтвердила, что initData/адрес сервера у
@@ -910,55 +987,25 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
         return sendJson(res, 429, { ok: false, error: "слишком много запросов, попробуйте через минуту" });
       }
 
+      if (parsed.value.ignored) return sendJson(res, 200, { ok: true });
+
       try {
         const status = await fetchPaymentStatus(yookassa, parsed.value.paymentId);
-        const existing = getPaymentByYookassaId(db, status.id);
-        // Платёж, о котором мы вообще не просили (не создавали через
-        // /api/pay/create) — не наш, игнорируем: отвечаем 200, чтобы ЮKassa
-        // не повторяла, но ничего не меняем.
-        if (!existing) {
-          sendJson(res, 200, { ok: true });
-          return;
-        }
-        // Идемпотентность: ЮKassa может прислать одно и то же уведомление
-        // несколько раз — если платёж УЖЕ отмечен успешным, не продлеваем
-        // Pro/не начисляем кредит повторно на те же деньги. existing.product
-        // — что именно куплено (см. createPendingPayment/EXTRA_PLAN_PRODUCT
-        // выше), старые платежи до этой колонки читаются как 'pro' (DEFAULT).
-        let confirmationText = null;
-        if (status.status === "succeeded" && existing.status !== "succeeded") {
-          const nowISO = new Date().toISOString();
-          updatePaymentStatus(db, { yookassaPaymentId: status.id, status: "succeeded", confirmedAtISO: nowISO });
-          if (existing.product === EXTRA_PLAN_PRODUCT) {
-            addExtraPlanCredit(db, existing.telegram_user_id);
-            confirmationText = buildPaymentConfirmationText(EXTRA_PLAN_PRODUCT);
-          } else {
-            const proUntil = extendUserPro(db, existing.telegram_user_id, { fromISO: nowISO, addDays: PRO_PERIOD_DAYS });
-            confirmationText = buildPaymentConfirmationText(PRO_PRODUCT, proUntil);
-          }
-        } else if (status.status !== existing.status) {
-          updatePaymentStatus(db, { yookassaPaymentId: status.id, status: status.status, confirmedAtISO: null });
-        }
+        // Что делать с перепроверенным статусом — в payments.js (та же логика,
+        // что и у сверки зависших платежей): идемпотентно выдаёт оплаченное,
+        // обрабатывает возврат, замечает чужой платёж и несовпадение суммы.
+        const result = applyPaymentStatus(db, status);
         sendJson(res, 200, { ok: true });
-        // Подтверждение пользователю — ПОСЛЕ ответа ЮKassa и best-effort: сбой
-        // Telegram (бот заблокирован и т.п.) не должен превращать уже
-        // проведённую оплату в ошибку вебхука. Кнопка открывает Mini App
-        // сразу — человек попадает туда, где ждёт оплаченное.
-        if (confirmationText) {
-          try {
-            await sendTelegramMessage(botToken, existing.telegram_user_id, confirmationText, {
-              replyMarkup: { inline_keyboard: [[{ text: "Открыть «Съедим»", web_app: { url: webAppUrl } }]] },
-            });
-          } catch (err) {
-            console.error("[yookassa/webhook] не удалось отправить подтверждение оплаты:", err.message);
-          }
-        }
+        // Подтверждение пользователю и алерты админу — ПОСЛЕ ответа ЮKassa и
+        // best-effort: сбой Telegram не должен превращать уже проведённую
+        // оплату в ошибку вебхука.
+        await notifyPaymentResult(result, paymentNotifyOpts);
       } catch (err) {
         console.error("[yookassa/webhook] ошибка обработки:", err.message);
         // 500, а не 200 — на реальном сбое (например, сама ЮKassa API
         // недоступна секунду) ХОТИМ, чтобы ЮKassa повторила уведомление позже,
         // а не решила, что мы его успешно обработали.
-        sendJson(res, 500, { ok: false, error: "не удалось обработать уведомление" });
+        if (!res.headersSent) sendJson(res, 500, { ok: false, error: "не удалось обработать уведомление" });
       }
       return;
     }

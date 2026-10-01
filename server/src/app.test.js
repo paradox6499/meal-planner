@@ -1,8 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { createHmac } from "node:crypto";
-import { openDb, findCandidateSlots, summarizeEventsSince, setUserPro, insertEvent, listPlanHistory, listRecentFeedback, createPendingPayment, getPaymentByYookassaId, getUserPro, getExtraPlanCredits, addExtraPlanCredit, extendUserPro } from "./db.js";
-import { createApp, parsePlanRequest, parseEventRequest, parseSavePlanRequest, parseMealTimesRequest, parsePricesRequest, computePlanStatus, FREE_PLANS_PER_WEEK, EXTRA_PLAN_PRODUCT, EXTRA_PLAN_PRICE_RUB, PRO_PRICE_RUB, RATE_LIMIT_MAX_REQUESTS, PRICES_RATE_LIMIT_MAX_REQUESTS, PAY_RATE_LIMIT_MAX_REQUESTS } from "./app.js";
+import { request as httpRequest } from "node:http";
+import { openDb, findCandidateSlots, summarizeEventsSince, setUserPro, insertEvent, listPlanHistory, listRecentFeedback, createPendingPayment, getPaymentByYookassaId, getUserPro, getExtraPlanCredits, addExtraPlanCredit, extendUserPro, getProUntil } from "./db.js";
+import { createApp, parsePlanRequest, parseEventRequest, parseSavePlanRequest, parseMealTimesRequest, parsePricesRequest, computePlanStatus, FREE_PLANS_PER_WEEK, EXTRA_PLAN_PRODUCT, EXTRA_PLAN_PRICE_RUB, PRO_PRICE_RUB, RATE_LIMIT_MAX_REQUESTS, PRICES_RATE_LIMIT_MAX_REQUESTS, PAY_RATE_LIMIT_MAX_REQUESTS, EVENTS_PER_USER_PER_DAY } from "./app.js";
 import { clearRateLimitState } from "./rateLimit.js";
+import { clearReconcileState } from "./payments.js";
 
 const BOT_TOKEN = "123456:TEST-TOKEN";
 
@@ -1407,5 +1409,228 @@ describe("Rate limiting", () => {
     const res = await fetch(`${baseUrl}/api/prices`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ initData: validInitData(6), names: ["Лук"] }) });
     const body = await res.json();
     expect(body).toEqual({ ok: false, error: expect.stringMatching(/слишком много запросов/i) });
+  });
+});
+
+
+// ---------- Аудит 29.09.2026: платежи, защита диска, удаление, тело запроса ----------
+
+describe("Платежи: возвраты, чужие события, сверка, двойной тап", () => {
+  let db, server, baseUrl, telegramCalls, yookassaCalls, yookassaPayment;
+  const realFetch = globalThis.fetch;
+  const ADMIN = 777;
+
+  beforeEach(async () => {
+    db = openDb(":memory:");
+    telegramCalls = [];
+    yookassaCalls = [];
+    yookassaPayment = null;
+    server = createApp(db, { botToken: BOT_TOKEN, adminTelegramId: ADMIN, yookassa: YOOKASSA_CREDS });
+    await new Promise((resolve) => server.listen(0, resolve));
+    baseUrl = `http://127.0.0.1:${server.address().port}`;
+    vi.stubGlobal("fetch", vi.fn((url, opts) => {
+      if (String(url).includes("api.yookassa.ru")) {
+        yookassaCalls.push({ url: String(url), opts });
+        return Promise.resolve({ ok: true, json: async () => yookassaPayment });
+      }
+      if (String(url).includes("api.telegram.org")) {
+        telegramCalls.push(JSON.parse(opts.body));
+        return Promise.resolve({ ok: true, json: async () => ({ ok: true, result: {} }) });
+      }
+      return realFetch(url, opts);
+    }));
+  });
+  afterEach(async () => {
+    await new Promise((resolve) => server.close(resolve));
+    vi.unstubAllGlobals();
+  });
+
+  const webhook = (body) => fetch(`${baseUrl}/yookassa/webhook`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const planStatus = (id = 42) => fetch(`${baseUrl}/api/plan-status`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ initData: validInitData(id) }) }).then((r) => r.json());
+  const payment = (over = {}) => ({ id: "pay-1", status: "succeeded", paid: true, amount: { value: "299.00" }, metadata: { telegram_user_id: "42" }, ...over });
+
+  it("refund.succeeded: платёж берётся из object.payment_id, возврат подтверждается у ЮKassa, Pro снимается, админ получает алерт", async () => {
+    createPendingPayment(db, { yookassaPaymentId: "pay-1", telegramUserId: 42, amountRub: 299, createdAtISO: new Date().toISOString() });
+    yookassaPayment = payment();
+    await webhook({ event: "payment.succeeded", object: { id: "pay-1" } });
+    expect(getUserPro(db, 42, new Date(Date.now() + 1000).toISOString())).toBe(true);
+
+    yookassaPayment = payment({ refunded_amount: { value: "299.00", currency: "RUB" } });
+    // У возврата свой id (refund-9), платёж — в payment_id. Раньше брали object.id и ловили 404 -> 500 -> бесконечные повторы.
+    const res = await webhook({ event: "refund.succeeded", object: { id: "refund-9", payment_id: "pay-1", status: "succeeded" } });
+    expect(res.status).toBe(200);
+    expect(yookassaCalls.at(-1).url).toContain("/payments/pay-1");
+    expect(getPaymentByYookassaId(db, "pay-1").status).toBe("refunded");
+    expect(getUserPro(db, 42, new Date(Date.now() + 1000).toISOString())).toBe(false);
+    expect(telegramCalls.some((c) => c.chat_id === ADMIN && c.text.includes("Возврат"))).toBe(true);
+  });
+
+  it("поддельное refund.succeeded без настоящего возврата у ЮKassa ничего не снимает", async () => {
+    createPendingPayment(db, { yookassaPaymentId: "pay-1", telegramUserId: 42, amountRub: 299, createdAtISO: new Date().toISOString() });
+    yookassaPayment = payment();
+    await webhook({ object: { id: "pay-1" } });
+    // тело врёт, у ЮKassa refunded_amount нет
+    await webhook({ event: "refund.succeeded", object: { id: "fake", payment_id: "pay-1" } });
+    expect(getPaymentByYookassaId(db, "pay-1").status).toBe("succeeded");
+    expect(getUserPro(db, 42, new Date(Date.now() + 1000).toISOString())).toBe(true);
+  });
+
+  it("события других семейств (payout.*) -> 200, в ЮKassa не ходим вообще", async () => {
+    const res = await webhook({ event: "payout.succeeded", object: { id: "x" } });
+    expect(res.status).toBe(200);
+    expect(yookassaCalls).toHaveLength(0);
+  });
+
+  it("refund.* без payment_id -> 400", async () => {
+    expect((await webhook({ event: "refund.succeeded", object: { id: "refund-9" } })).status).toBe(400);
+  });
+
+  it("платёж не из нашей базы -> 200 и алерт админу (раньше молча терялся)", async () => {
+    yookassaPayment = payment({ id: "stranger", metadata: { telegram_user_id: "555" } });
+    const res = await webhook({ object: { id: "stranger" } });
+    expect(res.status).toBe(200);
+    expect(telegramCalls.some((c) => c.chat_id === ADMIN && c.text.includes("нет в базе"))).toBe(true);
+  });
+
+  it("сумма в ЮKassa не совпала с нашей -> Pro НЕ выдаётся, статус review, алерт админу", async () => {
+    createPendingPayment(db, { yookassaPaymentId: "pay-1", telegramUserId: 42, amountRub: 299, createdAtISO: new Date().toISOString() });
+    yookassaPayment = payment({ amount: { value: "1.00" } });
+    await webhook({ object: { id: "pay-1" } });
+    expect(getUserPro(db, 42, new Date(Date.now() + 1000).toISOString())).toBe(false);
+    expect(getPaymentByYookassaId(db, "pay-1").status).toBe("review");
+    expect(telegramCalls.some((c) => c.chat_id === ADMIN && c.text.includes("сумма"))).toBe(true);
+  });
+
+  it("/api/plan-status сам сверяет зависший платёж пользователя: вебхук не пришёл, а оплаченное уже выдано", async () => {
+    clearReconcileState();
+    createPendingPayment(db, { yookassaPaymentId: "pay-1", telegramUserId: 42, amountRub: 299, createdAtISO: new Date().toISOString() });
+    yookassaPayment = payment();
+    const status = await planStatus(42);
+    expect(status.isPro).toBe(true);
+    expect(telegramCalls.some((c) => c.chat_id === 42 && c.text.includes("Оплата прошла"))).toBe(true);
+  });
+
+  it("/api/plan-status не сверяет чужие платежи", async () => {
+    clearReconcileState();
+    createPendingPayment(db, { yookassaPaymentId: "pay-1", telegramUserId: 43, amountRub: 299, createdAtISO: new Date().toISOString() });
+    yookassaPayment = payment({ metadata: { telegram_user_id: "43" } });
+    await planStatus(42);
+    expect(yookassaCalls).toHaveLength(0);
+  });
+
+  it("двойной тап по «Оплатить»: тот же Idempotence-Key, одна запись в payments, оба запроса 200", async () => {
+    yookassaPayment = { id: "pay-new", status: "pending", confirmation: { confirmation_url: "https://yookassa.ru/checkout/pay-new" } };
+    const pay = () => fetch(`${baseUrl}/api/pay/create`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ initData: validInitData(42), email: "a@b.ru" }) });
+    const [r1, r2] = [await pay(), await pay()];
+    expect(r1.status).toBe(200);
+    expect(r2.status).toBe(200);
+    const keys = yookassaCalls.filter((c) => c.opts?.method === "POST").map((c) => c.opts.headers["Idempotence-Key"]);
+    expect(keys).toHaveLength(2);
+    expect(keys[0]).toBe(keys[1]);
+    expect(db.prepare("SELECT COUNT(*) AS c FROM payments").get().c).toBe(1);
+  });
+});
+
+describe("Защита диска и размеры запросов", () => {
+  let db, server, baseUrl;
+  beforeEach(async () => {
+    db = openDb(":memory:");
+    server = createApp(db, { botToken: BOT_TOKEN });
+    await new Promise((resolve) => server.listen(0, resolve));
+    baseUrl = `http://127.0.0.1:${server.address().port}`;
+  });
+  afterEach(() => new Promise((resolve) => server.close(resolve)));
+  const post = (path, body) => fetch(`${baseUrl}${path}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+
+  it("/events: props крупнее 600 байт отклоняются", async () => {
+    const res = await post("/events", { initData: validInitData(42), eventName: "x", props: { message: "я".repeat(700) } });
+    expect(res.status).toBe(400);
+  });
+
+  it("/events: обычное app_error (300 символов) проходит", async () => {
+    const res = await post("/events", { initData: validInitData(42), eventName: "app_error", props: { message: "я".repeat(300), source: "window.onerror" } });
+    expect(res.status).toBe(200);
+  });
+
+  it(`/events: после ${EVENTS_PER_USER_PER_DAY} событий за сутки пользователю -> 429, другой пользователь не затронут`, async () => {
+    const nowISO = new Date().toISOString();
+    db.exec("BEGIN");
+    for (let i = 0; i < EVENTS_PER_USER_PER_DAY; i++) insertEvent(db, { telegramUserId: 42, eventName: "spam", props: null, createdAtISO: nowISO });
+    db.exec("COMMIT");
+    expect((await post("/events", { initData: validInitData(42), eventName: "x" })).status).toBe(429);
+    expect((await post("/events", { initData: validInitData(43), eventName: "x" })).status).toBe(200);
+  });
+
+  it("/events: события старше суток не считаются в дневной потолок", async () => {
+    const old = new Date(Date.now() - 2 * 86_400_000).toISOString();
+    db.exec("BEGIN");
+    for (let i = 0; i < EVENTS_PER_USER_PER_DAY; i++) insertEvent(db, { telegramUserId: 42, eventName: "old", props: null, createdAtISO: old });
+    db.exec("COMMIT");
+    expect((await post("/events", { initData: validInitData(42), eventName: "x" })).status).toBe(200);
+  });
+
+  it("/api/prices: название длиннее 80 символов отклоняется", async () => {
+    const res = await post("/api/prices", { initData: validInitData(42), names: ["ю".repeat(81)] });
+    expect(res.status).toBe(400);
+  });
+
+  it("слишком большое тело запроса -> 400 (раньше запрос подвисал навсегда)", async () => {
+    const res = await post("/api/plans", { initData: validInitData(42), junk: "x".repeat(1_100_000) });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/слишком большое/);
+  }, 15000);
+
+  // Регрессия на баг из аудита (приложение B): тело, разрезанное сетевыми
+  // кусками посреди кириллической буквы, портилось ("�") при конкатенации строк.
+  it("кириллица на границе двух сетевых кусков сохраняется без искажений", async () => {
+    const note = "Жук в Щавеле";
+    const body = Buffer.from(JSON.stringify({ initData: validInitData(42), storeId: "vv", storeName: "ВкусВилл", budget: 3000, family: 2, totalCost: 2500, plan: { note } }));
+    const splitAt = body.indexOf(Buffer.from("Ж")) + 1; // ровно между двумя байтами буквы "Ж"
+    await new Promise((resolve, reject) => {
+      const req = httpRequest(
+        { hostname: "127.0.0.1", port: server.address().port, path: "/api/plans", method: "POST", headers: { "Content-Type": "application/json", "Content-Length": body.length } },
+        (res) => { res.resume(); res.on("end", () => (res.statusCode === 200 ? resolve() : reject(new Error(`status ${res.statusCode}`)))); }
+      );
+      req.on("error", reject);
+      req.write(body.subarray(0, splitAt));
+      setTimeout(() => { req.write(body.subarray(splitAt)); req.end(); }, 60);
+    });
+    expect(listPlanHistory(db, 42)[0].plan.note).toBe(note);
+  });
+});
+
+describe("POST /api/account/delete (право на удаление)", () => {
+  let db, server, baseUrl;
+  beforeEach(async () => {
+    db = openDb(":memory:");
+    server = createApp(db, { botToken: BOT_TOKEN });
+    await new Promise((resolve) => server.listen(0, resolve));
+    baseUrl = `http://127.0.0.1:${server.address().port}`;
+  });
+  afterEach(() => new Promise((resolve) => server.close(resolve)));
+  const del = (body) => fetch(`${baseUrl}/api/account/delete`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+
+  it("без confirm:true ничего не удаляет (защита от случайного вызова)", async () => {
+    insertEvent(db, { telegramUserId: 42, eventName: "x", props: null, createdAtISO: new Date().toISOString() });
+    expect((await del({ initData: validInitData(42) })).status).toBe(400);
+    expect(db.prepare("SELECT COUNT(*) AS c FROM events WHERE telegram_user_id = 42").get().c).toBe(1);
+  });
+
+  it("без initData -> 401", async () => {
+    expect((await del({ confirm: true })).status).toBe(401);
+  });
+
+  it("удаляет данные ТОЛЬКО авторизованного пользователя, платежи остаются", async () => {
+    const nowISO = new Date().toISOString();
+    for (const id of [42, 43]) {
+      insertEvent(db, { telegramUserId: id, eventName: "x", props: null, createdAtISO: nowISO });
+      listPlanHistory(db, id);
+    }
+    createPendingPayment(db, { yookassaPaymentId: "pay-42", telegramUserId: 42, amountRub: 299, createdAtISO: nowISO });
+    const res = await del({ initData: validInitData(42), confirm: true });
+    expect(res.status).toBe(200);
+    expect(db.prepare("SELECT COUNT(*) AS c FROM events WHERE telegram_user_id = 42").get().c).toBe(0);
+    expect(db.prepare("SELECT COUNT(*) AS c FROM events WHERE telegram_user_id = 43").get().c).toBe(1);
+    expect(getPaymentByYookassaId(db, "pay-42")).not.toBeNull();
   });
 });

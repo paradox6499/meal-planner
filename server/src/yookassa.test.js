@@ -71,7 +71,15 @@ describe("fetchPaymentStatus", () => {
       json: async () => ({ id: "pay-1", status: "succeeded", paid: true, amount: { value: "299.00" }, metadata: { telegram_user_id: "42" } }),
     }));
     const result = await fetchPaymentStatus(CREDS, "pay-1");
-    expect(result).toEqual({ id: "pay-1", status: "succeeded", paid: true, amountRub: 299, telegramUserId: 42 });
+    expect(result).toEqual({ id: "pay-1", status: "succeeded", paid: true, amountRub: 299, refundedAmountRub: 0, telegramUserId: 42 });
+  });
+
+  it("возвращает refundedAmountRub из refunded_amount (так возврат подтверждается прямым запросом)", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ id: "pay-1", status: "succeeded", paid: true, amount: { value: "299.00" }, refunded_amount: { value: "299.00", currency: "RUB" }, metadata: { telegram_user_id: "42" } }),
+    }));
+    expect((await fetchPaymentStatus(CREDS, "pay-1")).refundedAmountRub).toBe(299);
   });
 
   it("GET с Basic-авторизацией по правильному URL", async () => {

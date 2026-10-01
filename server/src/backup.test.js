@@ -99,3 +99,25 @@ describe("sendBackupNow", () => {
     expect(autoRun.sent).toBe(false); // интервал не прошёл с ручной отправки
   });
 });
+
+describe("sendBackupNow: слишком большая база", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("при размере больше лимита Bot API не пытается слать документ, а предупреждает админа сообщением", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ ok: true, result: {} }) });
+    vi.stubGlobal("fetch", fetchMock);
+    const db = openDb(":memory:");
+    // Раздуваем базу выше 45 МБ одной крупной строкой (blob в памяти ~46 МБ — быстро и без файлов)
+    db.exec("CREATE TABLE IF NOT EXISTS ballast (data BLOB)");
+    db.prepare("INSERT INTO ballast (data) VALUES (?)").run(new Uint8Array(46 * 1024 * 1024));
+
+    const result = await sendBackupNow(db, { botToken: "T", adminTelegramId: 777 }, new Date("2026-09-10T09:00:00Z"));
+
+    expect(result.sent).toBe(false);
+    expect(result.reason).toMatch(/слишком большая/);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][0]).toContain("/sendMessage"); // не sendDocument
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body).text).toContain("МБ");
+    expect(getLastBackupAt(db)).toBeNull(); // не считаем, что бэкап состоялся
+  }, 20000);
+});

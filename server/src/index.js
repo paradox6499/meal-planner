@@ -8,6 +8,8 @@ import { runReminderTick, runFreeNudgeTick } from "./scheduler.js";
 import { runDigest } from "./digest.js";
 import { runBackup } from "./backup.js";
 import { runProRenewalTick } from "./proRenewal.js";
+import { runPaymentReconcileTick } from "./payments.js";
+import { runMaintenance } from "./maintenance.js";
 
 const PORT = Number(process.env.PORT) || 3000;
 const DB_PATH = process.env.DB_PATH || "./data.db";
@@ -55,7 +57,11 @@ if (!YOOKASSA) {
 }
 
 const db = openDb(DB_PATH);
-const server = createApp(db, { botToken: BOT_TOKEN, adminTelegramId: ADMIN_TELEGRAM_ID, webhookSecret: WEBHOOK_SECRET, yookassa: YOOKASSA });
+// Адрес Mini App для кнопки "Открыть «Съедим»" в сообщении об оплате; без
+// переменной — адрес по умолчанию (GitHub Pages). Понадобится при переезде
+// фронтенда на другой хостинг/домен.
+const WEBAPP_URL = process.env.WEBAPP_URL || undefined;
+const server = createApp(db, { botToken: BOT_TOKEN, adminTelegramId: ADMIN_TELEGRAM_ID, webhookSecret: WEBHOOK_SECRET, yookassa: YOOKASSA, webAppUrl: WEBAPP_URL });
 
 server.listen(PORT, () => {
   console.log(`meal-planner-server слушает порт ${PORT}, БД: ${DB_PATH}`);
@@ -145,3 +151,34 @@ async function freeNudgeTick() {
 }
 setInterval(freeNudgeTick, FREE_NUDGE_CHECK_INTERVAL_MS);
 freeNudgeTick();
+
+// Сверка платежей, застрявших в pending (вебхук ЮKassa не дошёл — неверный
+// URL в настройках, простой сервера дольше окна повторов), см. payments.js.
+// Раз в 10 минут: нормальный платёж подтверждается за секунды, а человеку,
+// заплатившему и ничего не получившему, ждать дольше незачем.
+const PAYMENT_RECONCILE_INTERVAL_MS = 10 * 60 * 1000;
+async function paymentReconcileTick() {
+  try {
+    const results = await runPaymentReconcileTick(db, YOOKASSA, { botToken: BOT_TOKEN, adminTelegramId: ADMIN_TELEGRAM_ID, webAppUrl: WEBAPP_URL });
+    if (results.length > 0) console.log(`[payments] сверка: ${results.length} платежей, из них выдано: ${results.filter((r) => r.kind === "fulfilled").length}`);
+  } catch (err) {
+    console.error("[payments] ошибка сверки:", err);
+  }
+}
+if (YOOKASSA) {
+  setInterval(paymentReconcileTick, PAYMENT_RECONCILE_INTERVAL_MS);
+  paymentReconcileTick();
+}
+
+// Уборка БД: старые события и устаревший кэш цен (см. maintenance.js).
+const MAINTENANCE_INTERVAL_MS = 6 * 60 * 60 * 1000;
+function maintenanceTick() {
+  try {
+    const { eventsDeleted, pricesDeleted } = runMaintenance(db);
+    if (eventsDeleted > 0 || pricesDeleted > 0) console.log(`[maintenance] удалено событий: ${eventsDeleted}, устаревших цен: ${pricesDeleted}`);
+  } catch (err) {
+    console.error("[maintenance] ошибка:", err);
+  }
+}
+setInterval(maintenanceTick, MAINTENANCE_INTERVAL_MS);
+maintenanceTick();

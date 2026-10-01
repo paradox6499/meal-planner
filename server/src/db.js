@@ -62,6 +62,9 @@ export function openDb(path) {
       created_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_events_name_time ON events (event_name, created_at);
+    -- Дневной потолок событий на пользователя (см. countEventsSince) и
+    -- удаление данных пользователя (deleteUserData) ходят по этой паре.
+    CREATE INDEX IF NOT EXISTS idx_events_user_time ON events (telegram_user_id, created_at);
 
     -- Единственная строка состояния планировщика дайджеста — когда он
     -- последний раз реально отправлялся, чтобы не задваивать/не терять
@@ -145,6 +148,7 @@ export function openDb(path) {
       confirmed_at TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_payments_created ON payments (created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_payments_status ON payments (status, created_at);
 
     -- Кто кого пригласил (см. referrals.js) — referred_telegram_id UNIQUE:
     -- у одного приглашённого может быть только ОДИН пригласивший, первая
@@ -830,4 +834,111 @@ export function setLastBackupAt(db, isoString) {
     `INSERT INTO backup_state (id, last_backup_at) VALUES (1, ?)
      ON CONFLICT(id) DO UPDATE SET last_backup_at = excluded.last_backup_at`
   ).run(isoString);
+}
+
+
+// ---------- Платежи: сверка, возвраты (см. payments.js) ----------
+
+/** Платежи в статусе pending не старше sinceISO — кандидаты на сверку у
+ * ЮKassa. telegramUserId — только этого пользователя (вызов из
+ * /api/plan-status), null — все (периодический тик). */
+export function listPendingPayments(db, { sinceISO, telegramUserId = null, limit = 20 }) {
+  if (telegramUserId != null) {
+    return db
+      .prepare("SELECT * FROM payments WHERE status = 'pending' AND created_at >= ? AND telegram_user_id = ? ORDER BY created_at DESC LIMIT ?")
+      .all(sinceISO, telegramUserId, limit);
+  }
+  return db.prepare("SELECT * FROM payments WHERE status = 'pending' AND created_at >= ? ORDER BY created_at DESC LIMIT ?").all(sinceISO, limit);
+}
+
+/** Сколько платежей "зависло" в pending — созданы между newerThanISO и
+ * olderThanISO (обычно: старше часа, но моложе недели). Нормальный платёж
+ * подтверждается за минуты, всё, что висит дольше, — повод посмотреть
+ * (вебхук не дошёл, неверный URL в настройках ЮKassa и т.п.). */
+export function countStalePendingPayments(db, { olderThanISO, newerThanISO }) {
+  return db
+    .prepare("SELECT COUNT(*) AS count FROM payments WHERE status = 'pending' AND created_at <= ? AND created_at >= ?")
+    .get(olderThanISO, newerThanISO).count;
+}
+
+/** Возврат за Pro — сокращает оплаченный срок на days, но не глубже "сейчас"
+ * (тогда Pro заканчивается немедленно). Ручной тумблер is_pro не трогает. */
+export function shortenUserPro(db, telegramUserId, { nowISO, days }) {
+  const row = db.prepare("SELECT pro_until FROM users WHERE telegram_user_id = ?").get(telegramUserId);
+  if (!row?.pro_until) return null;
+  const shortened = new Date(new Date(row.pro_until).getTime() - days * 24 * 60 * 60 * 1000).toISOString();
+  const until = shortened < nowISO ? nowISO : shortened;
+  db.prepare("UPDATE users SET pro_until = ? WHERE telegram_user_id = ?").run(until, telegramUserId);
+  return until;
+}
+
+// ---------- Защита диска ----------
+
+/** Сколько событий пользователь уже прислал с sinceISO — для дневного
+ * потолка в /events (иначе один аккаунт в пределах общего лимита запросов
+ * в минуту набивал бы таблицу сотнями мегабайт в сутки). */
+export function countEventsSince(db, telegramUserId, sinceISO) {
+  return db.prepare("SELECT COUNT(*) AS count FROM events WHERE telegram_user_id = ? AND created_at >= ?").get(telegramUserId, sinceISO).count;
+}
+
+/** Удаляет события старше beforeISO (аналитика не нужна вечно, а окно
+ * бесплатного лимита и напоминание вернуться смотрят максимум на ~10 дней
+ * назад). Возвращает, сколько строк удалено. */
+export function purgeOldEvents(db, beforeISO) {
+  return Number(db.prepare("DELETE FROM events WHERE created_at < ?").run(beforeISO).changes);
+}
+
+/** Устаревший общий кэш цен ВкусВилл — живые названия обновляются каждые
+ * часы (см. TTL в vkusvillPrices.js), строка, к которой не обращались
+ * месяц, — мусор (в том числе выдуманные названия). */
+export function purgeOldIngredientPrices(db, beforeISO) {
+  return Number(db.prepare("DELETE FROM ingredient_prices WHERE updated_at < ?").run(beforeISO).changes);
+}
+
+/** Размер файла БД — для дайджеста админу (диск на Render небольшой). */
+export function getDbSizeBytes(db) {
+  const pageCount = db.prepare("PRAGMA page_count").get().page_count;
+  const pageSize = db.prepare("PRAGMA page_size").get().page_size;
+  return pageCount * pageSize;
+}
+
+// ---------- Удаление данных пользователя (152-ФЗ: право на удаление) ----------
+
+/** Удаляет ВСЕ личные данные пользователя одной транзакцией: профиль и
+ * Pro-статус, план для напоминаний, историю планов, события, обращения в
+ * поддержку, реферальные связи (в обеих ролях), участие в семье (владелец —
+ * семья распускается целиком, как и при ручном выходе владельца).
+ *
+ * НЕ удаляет payments: записи об оплатах — первичные документы бухучёта,
+ * их хранение обязательно по закону (в политике конфиденциальности это
+ * прямо сказано). Они остаются привязанными к числовому telegram_user_id
+ * без остальных данных профиля. Резервные копии БД (backup.js) этой
+ * функцией не затрагиваются. Возвращает {таблица: сколько строк удалено}. */
+export function deleteUserData(db, telegramUserId) {
+  const deleted = {};
+  const del = (label, sql, ...params) => {
+    deleted[label] = Number(db.prepare(sql).run(...params).changes);
+  };
+  db.exec("BEGIN");
+  try {
+    const family = getFamilyForUser(db, telegramUserId);
+    if (family && family.owner_telegram_id === telegramUserId) {
+      dissolveFamily(db, family.id);
+      deleted.family = "распущена";
+    } else if (family) {
+      removeFamilyMember(db, telegramUserId);
+      deleted.family = "участие удалено";
+    }
+    del("meal_slots", "DELETE FROM meal_slots WHERE telegram_user_id = ?", telegramUserId);
+    del("events", "DELETE FROM events WHERE telegram_user_id = ?", telegramUserId);
+    del("plan_history", "DELETE FROM plan_history WHERE telegram_user_id = ?", telegramUserId);
+    del("feedback", "DELETE FROM feedback WHERE telegram_user_id = ?", telegramUserId);
+    del("referrals", "DELETE FROM referrals WHERE referrer_telegram_id = ? OR referred_telegram_id = ?", telegramUserId, telegramUserId);
+    del("users", "DELETE FROM users WHERE telegram_user_id = ?", telegramUserId);
+    db.exec("COMMIT");
+  } catch (err) {
+    db.exec("ROLLBACK");
+    throw err;
+  }
+  return deleted;
 }

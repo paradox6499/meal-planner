@@ -20,8 +20,11 @@ function authHeader(shopId, secretKey) {
  * @param {{amountRub: number, description: string, returnUrl: string, telegramUserId: number, idempotenceKey: string, receiptEmail: string}} params
  * idempotenceKey — свой (не сгенерированный тут), чтобы вызывающий код мог
  * гарантированно не создать дубль платежа при повторе запроса (например,
- * если ответ ЮKassa потерялся в сети, а фронтенд ретраит) — тот же payment
- * id вернётся повторно вместо второго списания.
+ * если ответ ЮKassa потерялся в сети, а фронтенд ретраит, или человек
+ * дважды нажал "оплатить") — тот же payment id вернётся повторно вместо
+ * второго платежа. Ключ должен быть ДЕТЕРМИНИРОВАННЫМ для "того же"
+ * намерения (см. paymentIdempotenceKey в payments.js) — случайный
+ * randomUUID на каждый запрос, как было раньше, не защищал ни от чего.
  *
  * receipt — обязателен для этого магазина (живая жалоба в чате: без него
  * ЮKassa отвечала "Receipt is missing or illegal") — магазин подключён с
@@ -90,6 +93,10 @@ export async function fetchPaymentStatus({ shopId, secretKey }, paymentId) {
     status: body.status, // "pending" | "waiting_for_capture" | "succeeded" | "canceled"
     paid: !!body.paid,
     amountRub: body.amount ? Number(body.amount.value) : null,
+    // Сколько уже возвращено (ЮKassa отдаёт refunded_amount в самом платеже):
+    // так возврат подтверждается тем же прямым запросом, а не телом вебхука
+    // refund.succeeded, которому, как и любому уведомлению, верить нельзя.
+    refundedAmountRub: body.refunded_amount ? Number(body.refunded_amount.value) : 0,
     telegramUserId: body.metadata?.telegram_user_id ? Number(body.metadata.telegram_user_id) : null,
   };
 }

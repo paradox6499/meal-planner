@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { isRateLimited, clearRateLimitState } from "./rateLimit.js";
+import { isRateLimited, clearRateLimitState, takeBudget } from "./rateLimit.js";
 
 const OPTS = { maxRequests: 3, windowMs: 60_000 };
 
@@ -56,5 +56,35 @@ describe("isRateLimited", () => {
     isRateLimited("user:1", { ...OPTS, now: 0 });
     clearRateLimitState();
     expect(isRateLimited("user:1", { ...OPTS, now: 0 })).toBe(false);
+  });
+});
+
+describe("takeBudget", () => {
+  beforeEach(() => {
+    clearRateLimitState();
+  });
+  const OPTS = { capacity: 10, windowMs: 60_000 };
+
+  it("выдаёт запрошенное, пока хватает бюджета", () => {
+    expect(takeBudget("u:1", 4, { ...OPTS, now: 0 })).toBe(4);
+    expect(takeBudget("u:1", 6, { ...OPTS, now: 1000 })).toBe(6);
+  });
+
+  it("когда бюджет кончается — выдаёт остаток, потом 0", () => {
+    takeBudget("u:1", 8, { ...OPTS, now: 0 });
+    expect(takeBudget("u:1", 5, { ...OPTS, now: 1000 })).toBe(2);
+    expect(takeBudget("u:1", 5, { ...OPTS, now: 2000 })).toBe(0);
+  });
+
+  it("новое окно — бюджет восстанавливается; разные ключи независимы", () => {
+    takeBudget("u:1", 10, { ...OPTS, now: 0 });
+    expect(takeBudget("u:2", 10, { ...OPTS, now: 0 })).toBe(10);
+    expect(takeBudget("u:1", 3, { ...OPTS, now: 60_000 })).toBe(3);
+  });
+
+  it("clearRateLimitState сбрасывает и бюджеты", () => {
+    takeBudget("u:1", 10, { ...OPTS, now: 0 });
+    clearRateLimitState();
+    expect(takeBudget("u:1", 10, { ...OPTS, now: 0 })).toBe(10);
   });
 });

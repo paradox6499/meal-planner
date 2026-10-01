@@ -538,3 +538,119 @@ describe("getUsersDueForFreeNudge / markFreeNudgeSent", () => {
     expect(due).toHaveLength(0);
   });
 });
+
+// ---------- Платежи: сверка/возвраты, защита диска, удаление данных ----------
+import {
+  listPendingPayments, countStalePendingPayments, shortenUserPro, countEventsSince, getDbSizeBytes, deleteUserData,
+  createFamily, addFamilyMember, setFamilyPantryItem, getFamilyForUser, getFamilyPantry,
+  claimReferral, getPaymentByYookassaId, getProUntil,
+} from "./db.js";
+
+describe("listPendingPayments / countStalePendingPayments", () => {
+  it("возвращает только pending не старше sinceISO, фильтрует по пользователю и лимиту", () => {
+    const db = openDb(":memory:");
+    createPendingPayment(db, { yookassaPaymentId: "a", telegramUserId: 1, amountRub: 299, createdAtISO: "2026-09-10T08:00:00.000Z" });
+    createPendingPayment(db, { yookassaPaymentId: "b", telegramUserId: 2, amountRub: 299, createdAtISO: "2026-09-10T08:30:00.000Z" });
+    createPendingPayment(db, { yookassaPaymentId: "old", telegramUserId: 1, amountRub: 299, createdAtISO: "2026-09-01T08:00:00.000Z" });
+    createPendingPayment(db, { yookassaPaymentId: "done", telegramUserId: 1, amountRub: 299, createdAtISO: "2026-09-10T08:10:00.000Z" });
+    updatePaymentStatus(db, { yookassaPaymentId: "done", status: "succeeded", confirmedAtISO: "2026-09-10T08:11:00.000Z" });
+
+    const since = "2026-09-09T00:00:00.000Z";
+    expect(listPendingPayments(db, { sinceISO: since }).map((p) => p.yookassa_payment_id).sort()).toEqual(["a", "b"]);
+    expect(listPendingPayments(db, { sinceISO: since, telegramUserId: 1 }).map((p) => p.yookassa_payment_id)).toEqual(["a"]);
+    expect(listPendingPayments(db, { sinceISO: since, limit: 1 })).toHaveLength(1);
+  });
+
+  it("stale — pending старше часа, но моложе недели", () => {
+    const db = openDb(":memory:");
+    createPendingPayment(db, { yookassaPaymentId: "fresh", telegramUserId: 1, amountRub: 1, createdAtISO: "2026-09-10T08:30:00.000Z" });
+    createPendingPayment(db, { yookassaPaymentId: "stale", telegramUserId: 1, amountRub: 1, createdAtISO: "2026-09-10T06:00:00.000Z" });
+    createPendingPayment(db, { yookassaPaymentId: "ancient", telegramUserId: 1, amountRub: 1, createdAtISO: "2026-08-01T06:00:00.000Z" });
+    expect(countStalePendingPayments(db, { olderThanISO: "2026-09-10T08:00:00.000Z", newerThanISO: "2026-09-03T09:00:00.000Z" })).toBe(1);
+  });
+});
+
+describe("shortenUserPro", () => {
+  it("сокращает срок на days, но не глубже 'сейчас'", () => {
+    const db = openDb(":memory:");
+    extendUserPro(db, 1, { fromISO: "2026-09-10T09:00:00.000Z", addDays: 30 });
+    expect(shortenUserPro(db, 1, { nowISO: "2026-09-10T09:00:00.000Z", days: 10 })).toBe("2026-09-30T09:00:00.000Z");
+    expect(shortenUserPro(db, 1, { nowISO: "2026-09-10T09:00:00.000Z", days: 365 })).toBe("2026-09-10T09:00:00.000Z");
+    expect(getUserPro(db, 1, "2026-09-10T09:00:01.000Z")).toBe(false);
+  });
+  it("у пользователя без оплаченного срока — null, ручной is_pro не трогает", () => {
+    const db = openDb(":memory:");
+    setUserPro(db, 1, true);
+    expect(shortenUserPro(db, 1, { nowISO: "2026-09-10T09:00:00.000Z", days: 30 })).toBeNull();
+    expect(getUserPro(db, 1, "2026-09-10T09:00:00.000Z")).toBe(true);
+  });
+});
+
+describe("countEventsSince / getDbSizeBytes", () => {
+  it("считает события конкретного пользователя после sinceISO", () => {
+    const db = openDb(":memory:");
+    insertEvent(db, { telegramUserId: 1, eventName: "a", props: null, createdAtISO: "2026-09-10T09:00:00.000Z" });
+    insertEvent(db, { telegramUserId: 1, eventName: "b", props: null, createdAtISO: "2026-09-08T09:00:00.000Z" });
+    insertEvent(db, { telegramUserId: 2, eventName: "c", props: null, createdAtISO: "2026-09-10T09:00:00.000Z" });
+    expect(countEventsSince(db, 1, "2026-09-09T00:00:00.000Z")).toBe(1);
+  });
+  it("размер БД — положительное число", () => {
+    expect(getDbSizeBytes(openDb(":memory:"))).toBeGreaterThan(0);
+  });
+});
+
+describe("deleteUserData", () => {
+  const NOW = "2026-09-10T09:00:00.000Z";
+  function seedUser(db, id) {
+    saveUserPlan(db, { telegramUserId: id, timezoneOffsetMinutes: 180, reminderLeadMinutes: 30, mealSlots: [{ scheduledDate: "2026-09-11", mealType: "dinner", mealLabel: "Ужин", mealTime: "19:00", recipeName: "Паста" }] });
+    insertEvent(db, { telegramUserId: id, eventName: "e", props: null, createdAtISO: NOW });
+    savePlanHistory(db, { telegramUserId: id, createdAtISO: NOW, storeId: "vv", storeName: "ВкусВилл", budget: 3000, family: 2, totalCost: 2500, plan: { days: [] } });
+    saveFeedback(db, { telegramUserId: id, text: "привет", createdAtISO: NOW });
+    createPendingPayment(db, { yookassaPaymentId: `pay-${id}`, telegramUserId: id, amountRub: 299, createdAtISO: NOW });
+  }
+
+  it("удаляет всё личное, но оставляет платежи (бухучёт) и чужие данные", () => {
+    const db = openDb(":memory:");
+    seedUser(db, 1);
+    seedUser(db, 2);
+    claimReferral(db, { referrerTelegramId: 1, referredTelegramId: 3, createdAtISO: NOW });
+    claimReferral(db, { referrerTelegramId: 9, referredTelegramId: 1, createdAtISO: NOW });
+
+    deleteUserData(db, 1);
+
+    expect(db.prepare("SELECT COUNT(*) AS c FROM meal_slots WHERE telegram_user_id = 1").get().c).toBe(0);
+    expect(db.prepare("SELECT COUNT(*) AS c FROM events WHERE telegram_user_id = 1").get().c).toBe(0);
+    expect(listPlanHistory(db, 1)).toEqual([]);
+    expect(listRecentFeedback(db).map((f) => f.telegramUserId)).toEqual([2]);
+    expect(db.prepare("SELECT COUNT(*) AS c FROM users WHERE telegram_user_id = 1").get().c).toBe(0);
+    expect(db.prepare("SELECT COUNT(*) AS c FROM referrals").get().c).toBe(0); // обе роли
+    expect(getPaymentByYookassaId(db, "pay-1")).not.toBeNull(); // платёж остался
+    // данные другого пользователя не тронуты
+    expect(listPlanHistory(db, 2)).toHaveLength(1);
+    expect(db.prepare("SELECT COUNT(*) AS c FROM users WHERE telegram_user_id = 2").get().c).toBe(1);
+  });
+
+  it("владелец семьи удаляет данные -> семья распускается целиком", () => {
+    const db = openDb(":memory:");
+    const familyId = createFamily(db, { ownerTelegramId: 1, ownerDisplayName: "Аня", nowISO: NOW });
+    addFamilyMember(db, { familyId, telegramUserId: 2, displayName: "Боря", nowISO: NOW });
+    setFamilyPantryItem(db, familyId, "Молоко", true);
+    deleteUserData(db, 1);
+    expect(getFamilyForUser(db, 1)).toBeNull();
+    expect(getFamilyForUser(db, 2)).toBeNull();
+    expect(getFamilyPantry(db, familyId)).toEqual([]);
+  });
+
+  it("участник семьи удаляет данные -> выходит из семьи, семья остаётся", () => {
+    const db = openDb(":memory:");
+    const familyId = createFamily(db, { ownerTelegramId: 1, ownerDisplayName: "Аня", nowISO: NOW });
+    addFamilyMember(db, { familyId, telegramUserId: 2, displayName: "Боря", nowISO: NOW });
+    deleteUserData(db, 2);
+    expect(getFamilyForUser(db, 2)).toBeNull();
+    expect(getFamilyForUser(db, 1)).not.toBeNull();
+  });
+
+  it("пользователь без данных — не ошибка", () => {
+    expect(() => deleteUserData(openDb(":memory:"), 12345)).not.toThrow();
+  });
+});

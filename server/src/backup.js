@@ -3,11 +3,13 @@
 // хранилище (S3 и т.п.): пока это один процесс с одним диском на Render,
 // заводить лишний вендор ради бэкапа нескольких мегабайт не имеет смысла —
 // переиспользуем то, что уже есть.
-import { readFileSync, unlinkSync, existsSync } from "node:fs";
+import { readFileSync, unlinkSync, existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { getLastBackupAt, setLastBackupAt } from "./db.js";
-import { sendTelegramDocument } from "./telegram.js";
+import { sendTelegramDocument, sendTelegramMessage } from "./telegram.js";
+
+const MAX_BACKUP_BYTES = 45 * 1024 * 1024; // запас под лимит Bot API в 50 МБ
 
 export function shouldRunBackup(now, lastBackupAt, intervalHours) {
   if (!lastBackupAt) return true;
@@ -38,6 +40,15 @@ export async function sendBackupNow(db, { botToken, adminTelegramId }, now = new
   const tmpPath = join(tmpdir(), `sedim-backup-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
   try {
     vacuumInto(db, tmpPath);
+    // Bot API не принимает документы больше 50 МБ — раньше бэкап после этого
+    // порога молча переставал отправляться (только строка в логах). Теперь
+    // админ узнаёт об этом сообщением, пока потеря данных ещё не случилась.
+    const sizeBytes = statSync(tmpPath).size;
+    if (sizeBytes > MAX_BACKUP_BYTES) {
+      const text = `⚠️ База выросла до ${(sizeBytes / 1_048_576).toFixed(1)} МБ — бэкап через Telegram больше не отправляется (лимит Bot API 50 МБ). Нужно другое хранилище для бэкапов.`;
+      await sendTelegramMessage(botToken, adminTelegramId, text).catch((err) => console.error("[backup] не удалось предупредить админа:", err.message));
+      return { sent: false, reason: "база слишком большая для отправки через Telegram", sizeBytes };
+    }
     const buffer = readFileSync(tmpPath);
     const filename = `sedim-${now.toISOString().slice(0, 10)}.db`;
     await sendTelegramDocument(botToken, adminTelegramId, buffer, filename, `Бэкап базы «Съедим» — ${now.toISOString()}`);

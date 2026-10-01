@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { sendTelegramMessage, buildReminderText, buildFreeNudgeText, sendTelegramDocument } from "./telegram.js";
+import { sendTelegramMessage, buildReminderText, buildFreeNudgeText, sendTelegramDocument, buildPaymentConfirmationText } from "./telegram.js";
 
 describe("sendTelegramMessage", () => {
   afterEach(() => vi.unstubAllGlobals());
@@ -75,5 +75,49 @@ describe("buildFreeNudgeText", () => {
     const text = buildFreeNudgeText();
     expect(text.length).toBeGreaterThan(0);
     expect(text).toMatch(/план/i);
+  });
+});
+
+// Регрессия на баг из тех. аудита #3: sendMessage по умолчанию слал
+// parse_mode "Markdown", и любое "_"/"*" в тексте (обращение пользователя,
+// имя события, название рецепта) отклонялось Telegram целиком.
+describe("sendTelegramMessage: разметка и кнопки", () => {
+  afterEach(() => vi.unstubAllGlobals());
+  const stub = () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ ok: true, result: {} }) });
+    vi.stubGlobal("fetch", fetchMock);
+    return () => JSON.parse(fetchMock.mock.calls[0][1].body);
+  };
+
+  it("по умолчанию parse_mode не отправляется вообще (текст с _ и * доходит как есть)", async () => {
+    const body = stub();
+    await sendTelegramMessage("T", 1, "family_created и *звёздочки* и s_edim_bot");
+    expect("parse_mode" in body()).toBe(false);
+    expect(body().text).toBe("family_created и *звёздочки* и s_edim_bot");
+  });
+
+  it("parseMode передаётся только когда явно запрошен", async () => {
+    const body = stub();
+    await sendTelegramMessage("T", 1, "x", { parseMode: "HTML" });
+    expect(body().parse_mode).toBe("HTML");
+  });
+
+  it("replyMarkup уходит как reply_markup (кнопка открытия Mini App)", async () => {
+    const body = stub();
+    const markup = { inline_keyboard: [[{ text: "Открыть", web_app: { url: "https://example.com" } }]] };
+    await sendTelegramMessage("T", 1, "x", { replyMarkup: markup });
+    expect(body().reply_markup).toEqual(markup);
+  });
+
+  it("buildReminderText не оборачивает название блюда в markdown", () => {
+    expect(buildReminderText("Ужин", "Паста_с*чем-то")).toBe("🍽 Скоро ужин: Паста_с*чем-то. Самое время начинать готовить.");
+  });
+});
+
+describe("buildPaymentConfirmationText", () => {
+  it("Pro — с датой окончания, extra_plan — без неё", () => {
+    expect(buildPaymentConfirmationText("pro", "2026-10-10T09:00:00.000Z")).toMatch(/Pro активен до 10 октября/);
+    expect(buildPaymentConfirmationText("pro")).toContain("Pro активен");
+    expect(buildPaymentConfirmationText("extra_plan")).toContain("ещё один план");
   });
 });
