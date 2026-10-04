@@ -26,8 +26,9 @@ function ensureColumn(db, table, column, definitionSql) {
   db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definitionSql}`);
 }
 
-export function openDb(path) {
-  const db = new DatabaseSync(path);
+// Миграция 1: все таблицы и индексы (CREATE ... IF NOT EXISTS — безопасна на уже
+// существующей базе с данными: ничего не трогает, если таблица есть).
+function migrateBaseline(db) {
   db.exec(`
     CREATE TABLE IF NOT EXISTS users (
       telegram_user_id INTEGER PRIMARY KEY,
@@ -228,6 +229,12 @@ export function openDb(path) {
     );
   `);
 
+}
+
+// Миграция 2: колонки, которые добавлялись к УЖЕ задеплоенным таблицам по одной
+// (ensureColumn пропускает существующие) и их бэкфилл. Идемпотентна — на проде,
+// где всё это уже сделано, ничего не меняет, а новая база проходит её целиком.
+function migrateLegacyColumns(db) {
   // НАЙДЕНО ЖИВЬЁМ НА PRODUCTION (лог Render: "no such column: is_pro"):
   // is_pro появился в строке CREATE TABLE IF NOT EXISTS users не с первого
   // коммита бэкенда (56ae78d создал users БЕЗ is_pro), а позже (99307fc)
@@ -317,7 +324,65 @@ export function openDb(path) {
              SELECT COUNT(*) FROM referrals r WHERE r.referrer_telegram_id = users.telegram_user_id AND r.rewarded_at IS NOT NULL
            ) WHERE referral_rewards_total = 0
              AND EXISTS (SELECT 1 FROM referrals r WHERE r.referrer_telegram_id = users.telegram_user_id AND r.rewarded_at IS NOT NULL)`);
+}
 
+// ---------- Версионирование схемы ----------
+//
+// Версия схемы живёт в самой БД (PRAGMA user_version), а не в догадках «есть ли
+// такая колонка». Раньше все изменения схемы были россыпью ensureColumn прямо в
+// openDb: непонятно, что уже применено, нельзя отличить старую базу от новой и
+// нельзя защититься от запуска старого кода на более новой базе.
+//
+// КАК ДОБАВИТЬ ИЗМЕНЕНИЕ СХЕМЫ: допишите в конец MIGRATIONS объект с версией на
+// единицу больше последней, `up(db)` — любые CREATE/ALTER/бэкфилл. Старые
+// миграции НЕ правьте и не удаляйте: на проде они уже применены. Каждая
+// миграция выполняется в транзакции вместе с записью новой версии — при сбое
+// откатывается целиком и приложение не стартует (лучше не запуститься, чем
+// работать на половине схемы).
+//
+// Базы, созданные до появления версий (user_version = 0), проходят миграции 1 и
+// 2 как есть — обе идемпотентны, данные не затрагиваются — и получают версию 2.
+export const MIGRATIONS = [
+  { version: 1, name: "baseline", up: migrateBaseline },
+  { version: 2, name: "legacy-columns", up: migrateLegacyColumns },
+  // Добавляйте новые миграции здесь.
+];
+export const SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;
+
+export function getSchemaVersion(db) {
+  return Number(db.prepare("PRAGMA user_version").get().user_version);
+}
+
+/** Применяет недостающие миграции. Возвращает список применённых версий. */
+export function runMigrations(db, migrations = MIGRATIONS, { log = () => {} } = {}) {
+  const current = getSchemaVersion(db);
+  const latest = migrations[migrations.length - 1].version;
+  if (current > latest) {
+    // Старый код на более новой базе: молча «чинить» нельзя — можно испортить
+    // данные. Остановиться и сказать причину.
+    throw new Error(`Версия схемы БД (${current}) новее, чем знает этот код (${latest}) — обновите сервер, а не откатывайте его`);
+  }
+  const applied = [];
+  for (const m of migrations) {
+    if (m.version <= current) continue;
+    db.exec("BEGIN");
+    try {
+      m.up(db);
+      db.exec(`PRAGMA user_version = ${m.version}`);
+      db.exec("COMMIT");
+    } catch (err) {
+      db.exec("ROLLBACK");
+      throw new Error(`Миграция ${m.version} (${m.name}) не применилась: ${err.message}`);
+    }
+    log(`[db] применена миграция ${m.version}: ${m.name}`);
+    applied.push(m.version);
+  }
+  return applied;
+}
+
+export function openDb(path) {
+  const db = new DatabaseSync(path);
+  runMigrations(db, MIGRATIONS, { log: path === ":memory:" ? () => {} : console.log });
   return db;
 }
 
