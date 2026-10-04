@@ -114,3 +114,48 @@ describe("planReplyForUpdate", () => {
     expect(planReplyForUpdate({ message: { chat: { id: 42 }, sticker: {} } }, {})).toBeNull();
   });
 });
+
+
+// Скриншоты в поддержку: раньше любое сообщение без текста молча игнорировалось.
+describe("planReplyForUpdate: скриншот в поддержку", () => {
+  const photoUpdate = (over = {}) => ({ message: { message_id: 55, chat: { id: 42 }, from: { id: 42 }, photo: [{ file_id: "a", width: 90 }, { file_id: "b", width: 800 }], ...over } });
+
+  it("фото с подписью -> обращение с текстом подписи и ссылкой на сообщение для копирования админу", () => {
+    const reply = planReplyForUpdate(photoUpdate({ caption: "  не открывается рецепт  " }), { adminTelegramId: 777 });
+    expect(reply).toEqual({
+      chatId: 42, kind: "feedback", telegramUserId: 42,
+      text: "📎 скриншот: не открывается рецепт",
+      attachment: { chatId: 42, messageId: 55 },
+    });
+  });
+
+  it("фото без подписи -> обращение 'скриншот без подписи'", () => {
+    expect(planReplyForUpdate(photoUpdate(), { adminTelegramId: 777 }).text).toBe("📎 скриншот без подписи");
+  });
+
+  it("картинка файлом (document image/*) тоже принимается", () => {
+    const reply = planReplyForUpdate({ message: { message_id: 9, chat: { id: 42 }, from: { id: 42 }, document: { mime_type: "image/png", file_id: "d" } } }, { adminTelegramId: 777 });
+    expect(reply.kind).toBe("feedback");
+    expect(reply.attachment.messageId).toBe(9);
+  });
+
+  it("не картинка (pdf, голосовое) и сообщение без текста и вложений — по-прежнему игнорируется", () => {
+    expect(planReplyForUpdate({ message: { message_id: 9, chat: { id: 42 }, from: { id: 42 }, document: { mime_type: "application/pdf" } } })).toBeNull();
+    expect(planReplyForUpdate({ message: { message_id: 9, chat: { id: 42 }, from: { id: 42 }, voice: {} } })).toBeNull();
+  });
+
+  it("фото от самого админа не засоряет ленту обращений", () => {
+    expect(planReplyForUpdate(photoUpdate({ chat: { id: 777 }, from: { id: 777 } }), { adminTelegramId: 777 })).toBeNull();
+  });
+
+  it("текстовое обращение без вложения — как раньше, без attachment", () => {
+    const reply = planReplyForUpdate({ message: { message_id: 1, chat: { id: 42 }, from: { id: 42 }, text: "привет" } }, { adminTelegramId: 777 });
+    expect(reply).toEqual({ chatId: 42, kind: "feedback", telegramUserId: 42, text: "привет" });
+  });
+});
+
+describe("buildSupportPromptText", () => {
+  it("подсказывает, что можно приложить скриншот", () => {
+    expect(buildSupportPromptText()).toMatch(/скриншот/);
+  });
+});

@@ -5,6 +5,7 @@
 // оркестрирующую runDigest — первые тестируются без сети и без времени "как есть".
 import { summarizeEventsSince, getLastDigestAt, setLastDigestAt, summarizePaymentsSince, countStalePendingPayments, getDbSizeBytes } from "./db.js";
 import { sendTelegramMessage } from "./telegram.js";
+import { getCatalogState } from "./catalogMonitor.js";
 
 /** Пора ли слать дайджест: раз в сутки, в первый тик после наступления
  * digestHour по UTC (сервер не знает часовой пояс разработчика — час задаётся
@@ -57,7 +58,7 @@ const EVENT_LABELS = {
 // — платежи (payments — отдельная таблица, не events) в этом случае вообще
 // не показывались бы, даже если за тот же день кто-то реально оплатил Pro.
 // Теперь блок с оплатами не зависит от того, были ли события.
-export function buildDigestText(summary, { sinceISO, now, paymentsSummary = { count: 0, totalRub: 0 }, stalePending = 0, dbSizeBytes = null }) {
+export function buildDigestText(summary, { sinceISO, now, paymentsSummary = { count: 0, totalRub: 0 }, stalePending = 0, dbSizeBytes = null, catalogDown = null }) {
   const periodHours = Math.max(1, Math.round((now.getTime() - new Date(sinceISO).getTime()) / 3_600_000));
   const lines = [`📊 Съедим — отчёт за последние ${periodHours} ч`, ""];
 
@@ -70,6 +71,11 @@ export function buildDigestText(summary, { sinceISO, now, paymentsSummary = { co
   // подхватит, но видеть это админу нужно).
   if (stalePending > 0) {
     lines.push(`⚠️ Платежей в ожидании дольше часа: ${stalePending} — проверьте вебхук в личном кабинете ЮKassa`, "");
+  }
+  // Каталог ВкусВилл с сервера не отвечает (см. catalogMonitor.js) — главное, что
+  // ломает продукт, должно быть видно сразу в первой же строке отчёта.
+  if (catalogDown) {
+    lines.splice(2, 0, `🛑 ВкусВилл с сервера не отвечает: ${catalogDown.detail}${catalogDown.httpStatus ? ` [HTTP ${catalogDown.httpStatus}]` : ""} — планы собираются без каталога`, "");
   }
   const tail = dbSizeBytes != null ? ["", `💾 База данных: ${(dbSizeBytes / 1_048_576).toFixed(1)} МБ`] : [];
 
@@ -127,7 +133,7 @@ export async function sendDigestNow(db, { botToken, adminTelegramId }, now = new
     olderThanISO: new Date(now.getTime() - 3_600_000).toISOString(),
     newerThanISO: new Date(now.getTime() - 7 * 24 * 3_600_000).toISOString(),
   });
-  const text = buildDigestText(summary, { sinceISO, now, paymentsSummary, stalePending, dbSizeBytes: getDbSizeBytes(db) });
+  const text = buildDigestText(summary, { sinceISO, now, paymentsSummary, stalePending, dbSizeBytes: getDbSizeBytes(db), catalogDown: (() => { const c = getCatalogState(); return c.ok === false ? c.lastProbe : null; })() });
 
   try {
     await sendTelegramMessage(botToken, adminTelegramId, text);

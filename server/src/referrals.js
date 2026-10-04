@@ -4,7 +4,7 @@
 // существует — plan_generated/POST api/plan, ничего нового отслеживать не
 // пришлось). Дни Pro — а не деньги/скидка: ничего не стоит начислить лишний
 // раз, в отличие от реальной скидки на оплату.
-import { userExists, claimReferral as dbClaimReferral, getPendingReferral, markReferralRewarded, countRewardedReferrals, extendUserPro } from "./db.js";
+import { userExists, getDeletedAccount, claimReferral as dbClaimReferral, getPendingReferral, markReferralRewarded, countRewardedReferrals, extendUserPro } from "./db.js";
 import { sendTelegramMessage } from "./telegram.js";
 
 export const REFERRAL_REWARD_DAYS = 7;
@@ -31,11 +31,17 @@ function pluralDays(n) {
  * уже существующий пользователь, уже была заявка на этого приглашённого) —
  * ни один из них не должен выглядеть как ошибка сервера перед пользователем,
  * это просто "реферал не засчитан", решается на уровне бизнес-логики, не HTTP. */
-export function claimReferral(db, { referrerTelegramId, referredTelegramId, nowISO }) {
+export function claimReferral(db, { referrerTelegramId, referredTelegramId, nowISO, hashSecret = null }) {
   if (referrerTelegramId === referredTelegramId) {
     return { ok: false, reason: "нельзя пригласить самого себя" };
   }
   if (userExists(db, referredTelegramId)) {
+    return { ok: false, reason: "пользователь уже существует — реферал засчитывается только новым" };
+  }
+  // Удалённый аккаунт — не "новый": иначе цикл "заявка -> сборка -> удалить данные
+  // -> снова заявка" давал бы пригласившему +7 дней Pro на каждом круге
+  // (перепроверка аудита 04.10.2026). Проверяем по необратимому хэшу.
+  if (hashSecret && getDeletedAccount(db, hashSecret, referredTelegramId)) {
     return { ok: false, reason: "пользователь уже существует — реферал засчитывается только новым" };
   }
   try {

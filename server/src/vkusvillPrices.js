@@ -33,7 +33,38 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 export const MATCHED_TTL_MS = 12 * 60 * 60 * 1000; // 12 часов
 export const NOT_FOUND_TTL_MS = 2 * 60 * 60 * 1000; // 2 часа
 
-async function callToolOnce(name, args, timeoutMs = DEFAULT_TIMEOUT_MS) {
+// Общий потолок запросов к ВкусВиллу С НАШЕГО сервера. У них лимит 60 в минуту
+// (заголовок X-RateLimit-Limit в ответе mcp.vkusvill.ru) — на IP, а у нас все
+// пользователи ходят с одного IP (сервера), в отличие от прямых запросов из
+// браузеров, где у каждого свой. Без общего ограничителя пара одновременных
+// сборок плана выбирала бы лимит за секунды и все получали бы 429. Держим
+// запас до 50. Ждём слот не дольше maxWaitMs, потом честно отдаём 429.
+export const UPSTREAM_MAX_PER_MINUTE = 50;
+const upstreamTimes = [];
+export function resetUpstreamGate() {
+  upstreamTimes.length = 0;
+}
+async function acquireUpstreamSlot(maxWaitMs = 8000) {
+  const startedAt = Date.now();
+  for (;;) {
+    const now = Date.now();
+    while (upstreamTimes.length > 0 && now - upstreamTimes[0] >= 60_000) upstreamTimes.shift();
+    if (upstreamTimes.length < UPSTREAM_MAX_PER_MINUTE) {
+      upstreamTimes.push(now);
+      return;
+    }
+    const waitMs = 60_000 - (now - upstreamTimes[0]) + 5;
+    if (now - startedAt + waitMs > maxWaitMs) {
+      const e = new Error("VkusVill MCP: наш общий лимит запросов к каталогу исчерпан, попробуйте через минуту");
+      e.httpStatus = 429;
+      throw e;
+    }
+    await sleep(waitMs);
+  }
+}
+
+async function callToolOnce(name, args, timeoutMs = DEFAULT_TIMEOUT_MS, { skipGate = false } = {}) {
+  if (!skipGate) await acquireUpstreamSlot();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
@@ -74,6 +105,26 @@ async function callToolOnce(name, args, timeoutMs = DEFAULT_TIMEOUT_MS) {
     throw err;
   }
   return inner.data;
+}
+
+export async function callVkusvillTool(name, args) {
+  return callTool(name, args);
+}
+
+/** Одна проверка "отвечает ли ВкусВилл С НАШЕГО сервера" — без повторов и без
+ * общего ограничителя (это диагностика: ответ должен быть честным "да/нет, и
+ * почему", а не "подождали и получилось"). Нужна, потому что браузерные
+ * вызовы к mcp.vkusvill.ru перестали проходить (CORS-preflight отвечает 401),
+ * и важно знать, проходят ли серверные с адреса, где стоит наш сервер. */
+export async function probeVkusvill(timeoutMs = 8000) {
+  const startedAt = Date.now();
+  try {
+    const data = await callToolOnce("vkusvill_products_search", { q: "молоко", page: 1, sort: "popularity", vvonly: 1, mode: "short" }, timeoutMs, { skipGate: true });
+    const items = Array.isArray(data?.items) ? data.items.length : 0;
+    return { ok: items > 0, ms: Date.now() - startedAt, detail: items > 0 ? `найдено товаров: ${items}` : "ответ пустой" };
+  } catch (err) {
+    return { ok: false, ms: Date.now() - startedAt, detail: err.message, httpStatus: err.httpStatus ?? null };
+  }
 }
 
 async function callTool(name, args) {
@@ -164,7 +215,38 @@ function isFresh(cached, nowMs) {
  * запрос (после исчерпания ретраев) не кэшируется вообще — как и на
  * фронтенде (см. комментарий у callToolOnce в vkusvillMcp.js): временный
  * сбой не должен залипать в кэше как будто товар не найден. */
-export async function resolveIngredientPricesWithCache(db, names, { maxLiveFetches = Infinity, takeLiveBudget = null } = {}) {
+// Названия, до которых в этот раз не дошли (потолок запросов или общий лимит
+// ВкусВилла) — их по одному подогревает фоновый тик (runPriceWarmTick), чтобы
+// при следующей сборке цены уже лежали в кэше. Без этого каждый новый пользователь
+// на холодном кэше упирался бы в те же 50 запросов в минуту заново.
+const WARM_QUEUE_MAX = 2000;
+const warmQueue = new Set();
+export function queueNamesForWarming(names) {
+  for (const n of names) {
+    if (warmQueue.size >= WARM_QUEUE_MAX) break;
+    warmQueue.add(n);
+  }
+}
+export function getWarmQueueSize() {
+  return warmQueue.size;
+}
+export function clearWarmQueue() {
+  warmQueue.clear();
+}
+/** Один проход фонового подогрева: берёт до batch названий из очереди и
+ * получает для них цены (общий ограничитель запросов тот же, что у
+ * пользователей — подогрев никого не вытесняет дольше нескольких секунд).
+ * Неудавшиеся назад в очередь НЕ ставим — если ВкусВилл недоступен, тик не
+ * должен молотить впустую; следующий пользовательский запрос поставит их сам. */
+export async function runPriceWarmTick(db, { batch = 20 } = {}) {
+  const names = [...warmQueue].slice(0, batch);
+  names.forEach((n) => warmQueue.delete(n));
+  if (names.length === 0) return { warmed: 0 };
+  await resolveIngredientPricesWithCache(db, names, { maxLiveFetches: batch, warm: true });
+  return { warmed: names.length };
+}
+
+export async function resolveIngredientPricesWithCache(db, names, { maxLiveFetches = Infinity, takeLiveBudget = null, warm = false } = {}) {
   const uniqueNames = [...new Set(names.filter((n) => typeof n === "string" && n.trim().length > 0))];
   const result = new Map();
   if (uniqueNames.length === 0) return result;
@@ -192,6 +274,7 @@ export async function resolveIngredientPricesWithCache(db, names, { maxLiveFetch
   if (takeLiveBudget) allowed = takeLiveBudget(allowed);
   const skipped = toFetch.slice(allowed);
   toFetch.length = allowed;
+  if (!warm) queueNamesForWarming(skipped);
   for (const name of skipped) {
     const stale = cached.get(name);
     result.set(
@@ -215,6 +298,7 @@ export async function resolveIngredientPricesWithCache(db, names, { maxLiveFetch
       // чем ничего: устаревшая цена почти наверняка честнее, чем "нет цены
       // вообще" при временном сбое ВкусВилл.
       const stale = cached.get(name);
+      if (!warm) queueNamesForWarming([name]);
       result.set(
         name,
         stale

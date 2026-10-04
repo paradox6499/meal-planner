@@ -6,22 +6,23 @@ import { createServer } from "node:http";
 import { validateInitData } from "./initData.js";
 import {
   saveUserPlan, insertEvent,
-  getUserPro, countPlanGenerationsSince, savePlanHistory, listPlanHistory,
+  getUserPro, savePlanHistory, listPlanHistory,
   saveFeedback, listRecentFeedback, updateMealTimesForUser,
   createPendingPayment, getPaymentByYookassaId,
   countRewardedReferrals,
-  getExtraPlanCredits, consumeExtraPlanCredit, listPlanGenerationTimesSince, getProUntil,
-  countEventsSince, deleteUserData, getFamilyForUser, getFamilyByInviteCode,
+  getExtraPlanCredits, consumeExtraPlanCredit, getProUntil,
+  countEventsSince, deleteUserData, getFamilyForUser, getFamilyByInviteCode, freeGenerationTimesSince,
 } from "./db.js";
-import { planReplyForUpdate, buildWelcomeText, buildFeedbackAckText, buildFeedbackListText, buildFeedbackAdminNotifyText, buildSupportPromptText } from "./webhook.js";
-import { sendTelegramMessage } from "./telegram.js";
+import { planReplyForUpdate, buildDiagText, buildWelcomeText, buildFeedbackAckText, buildFeedbackListText, buildFeedbackAdminNotifyText, buildSupportPromptText } from "./webhook.js";
+import { sendTelegramMessage, copyTelegramMessage } from "./telegram.js";
 import {
   PRO_PRODUCT, EXTRA_PLAN_PRODUCT, PRO_PERIOD_DAYS, DEFAULT_WEBAPP_URL,
   applyPaymentStatus, notifyPaymentResult, reconcilePendingPayments, paymentIdempotenceKey,
 } from "./payments.js";
 import { sendDigestNow } from "./digest.js";
 import { sendBackupNow } from "./backup.js";
-import { resolveIngredientPricesWithCache } from "./vkusvillPrices.js";
+import { resolveIngredientPricesWithCache, probeVkusvill, getWarmQueueSize } from "./vkusvillPrices.js";
+import { parseVkusvillCallRequest, callVkusvillCached } from "./vkusvillProxy.js";
 import { createPayment, fetchPaymentStatus } from "./yookassa.js";
 import { claimReferral, maybeRewardReferral, REFERRAL_REWARD_DAYS } from "./referrals.js";
 import { createFamily, joinFamily, leaveFamily, getFamilyStatus, toggleFamilyPantryItem } from "./family.js";
@@ -53,8 +54,20 @@ export const EVENTS_PER_USER_PER_DAY = 300;
 // операция сервера, а лимит ВкусВилл общий на всех. За один запрос — не
 // больше стольких промахов кэша, за час на пользователя — не больше стольких
 // живых запросов вообще (остальное честно вернётся "цена не найдена").
-export const PRICES_LIVE_FETCHES_PER_REQUEST = 60;
-export const PRICES_LIVE_FETCHES_PER_HOUR = 240;
+//
+// Потолок поднят с 60/240 до 200/600 (перепроверка аудита 04.10.2026, п. 4.4):
+// пул одной сборки — 80-160 уникальных названий, при потолке 60 больше половины
+// возвращалось как "не найдено" и неотличимо от настоящего отсутствия товара.
+// Реальное ограничение — общий лимит самого ВкусВилла (50 в минуту на наш IP, см.
+// UPSTREAM_MAX_PER_MINUTE): что не успели, подогревается фоном (queueNamesForWarming).
+export const PRICES_LIVE_FETCHES_PER_REQUEST = 200;
+export const PRICES_LIVE_FETCHES_PER_HOUR = 600;
+// Прокси каталога (POST /api/vkusvill/call): запросов в минуту на пользователя
+// (попадания в общий кэш дешёвые) и живых — не попавших в кэш — в час.
+export const VKUSVILL_PROXY_RATE_LIMIT_MAX_REQUESTS = 120;
+export const VKUSVILL_PROXY_LIVE_PER_HOUR = 400;
+// Сколько /api/plan-status ждёт сверку платежей у ЮKassa, прежде чем ответить.
+export const PLAN_STATUS_RECONCILE_WAIT_MS = 3500;
 const MAX_INGREDIENT_NAME_LENGTH = 80;
 // "1 план в неделю" — тот же лимит, что уже честно анонсирован пользователям
 // текстом в SUBSCRIPTION_BENEFITS (src/App.jsx) задолго до того, как он
@@ -381,7 +394,11 @@ export function parseFamilyPantryRequest(body) {
   return { ok: true, value: { name: name.trim(), present } };
 }
 
-export function createApp(db, { botToken, adminTelegramId = null, webhookSecret = null, yookassa = null, webAppUrl = DEFAULT_WEBAPP_URL }) {
+export function createApp(db, { botToken, adminTelegramId = null, webhookSecret = null, yookassa = null, webAppUrl = DEFAULT_WEBAPP_URL, hashSecret = null }) {
+  // Секрет для хэшей "надгробий" удалённых аккаунтов (db.js: hashAccountId).
+  // По умолчанию — токен бота; при его смене старые надгробия перестанут
+  // совпадать, поэтому на проде лучше отдельный HASH_SECRET (см. server/README.md).
+  const accountHashSecret = hashSecret ?? botToken;
   const paymentNotifyOpts = { botToken, adminTelegramId, webAppUrl };
 
   // Семья работает, пока у её ВЛАДЕЛЬЦА активен Pro (решение автора
@@ -447,17 +464,7 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
         sendJson(res, 500, { ok: false, error: "не удалось сохранить план" });
         return;
       }
-      // Реальная сборка плана — это и есть "приглашённый активировался" (см.
-      // referrals.js) — если у него есть ожидающий реферал, начисляет
-      // награду обеим сторонам. Идемпотентно (проверено внутри), безопасно
-      // звать на каждую сборку/синхронизацию, не только первую. Ответ 200
-      // пользователю уже ушёл выше — сбой здесь (например Telegram не даёт
-      // написать пригласившему) не должен выглядеть как сбой сохранения плана.
-      try {
-        await maybeRewardReferral(db, auth.user.id, { botToken });
-      } catch (err) {
-        console.error("[api/plan] ошибка начисления реферальной награды:", err.message);
-      }
+      // Реферальная награда здесь больше НЕ начисляется — см. POST /api/plan/generate.
       return;
     }
 
@@ -479,28 +486,43 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
       const auth = await readAuthenticatedBody(req, botToken);
       if (!auth.ok) return sendJson(res, auth.status, { ok: false, error: auth.error });
 
+      // Реферальная награда — здесь, а не в синхронизации /api/plan (перепроверка
+      // аудита 04.10.2026, п. 4.6): "приглашённый активировался" значит РЕАЛЬНО
+      // собрал план, а /api/plan клиент может прислать и без сборки. Идемпотентно
+      // (см. maybeRewardReferral). Ответ уже отправлен — сбой уведомления
+      // пригласившему не должен выглядеть как сбой сборки.
+      const respondAndReward = async (source) => {
+        sendJson(res, 200, { ok: true, source });
+        try {
+          await maybeRewardReferral(db, auth.telegramUserId, { botToken });
+        } catch (err) {
+          console.error("[api/plan/generate] ошибка начисления реферальной награды:", err.message);
+        }
+      };
+
       const nowISO = new Date().toISOString();
       const isPro = getUserPro(db, auth.telegramUserId, nowISO);
       if (isPro) {
-        insertEvent(db, { telegramUserId: auth.telegramUserId, eventName: "plan_generated", props: null, createdAtISO: nowISO });
-        sendJson(res, 200, { ok: true, source: "pro" });
-        return;
+        // Отдельное имя (раньше plan_generated): сборки периода Pro иначе после
+        // его окончания до 7 дней блокировали бесплатный план (аудит 04.10.2026, п. 4.5).
+        insertEvent(db, { telegramUserId: auth.telegramUserId, eventName: "plan_generated_pro", props: null, createdAtISO: nowISO });
+        return respondAndReward("pro");
       }
 
       const sinceISO = new Date(Date.now() - FREE_WINDOW_MS).toISOString();
-      const freeUsedThisWeek = countPlanGenerationsSince(db, auth.telegramUserId, sinceISO);
+      // freeGenerationTimesSince учитывает и "надгробие" удалённого аккаунта:
+      // удаление данных не должно обнулять бесплатный лимит.
+      const freeUsedThisWeek = freeGenerationTimesSince(db, auth.telegramUserId, sinceISO, accountHashSecret).length;
       if (freeUsedThisWeek < FREE_PLANS_PER_WEEK) {
         insertEvent(db, { telegramUserId: auth.telegramUserId, eventName: "plan_generated", props: null, createdAtISO: nowISO });
-        sendJson(res, 200, { ok: true, source: "free" });
-        return;
+        return respondAndReward("free");
       }
 
       const extraPlanCredits = getExtraPlanCredits(db, auth.telegramUserId);
       if (extraPlanCredits > 0) {
         insertEvent(db, { telegramUserId: auth.telegramUserId, eventName: "plan_generated_credit", props: null, createdAtISO: nowISO });
         consumeExtraPlanCredit(db, auth.telegramUserId);
-        sendJson(res, 200, { ok: true, source: "credit" });
-        return;
+        return respondAndReward("credit");
       }
 
       sendJson(res, 403, { ok: false, error: "лимит бесплатных планов на эту неделю исчерпан" });
@@ -579,10 +601,20 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
       // никогда) — сами спрашиваем ЮKassa про его незавершённые платежи, чтобы
       // оплаченное выдалось сейчас, а не "когда-нибудь" (аудит 29.09.2026).
       // Сбой сверки не должен ломать сам ответ про статус.
+      // Ждём сверку не дольше PLAN_STATUS_RECONCILE_WAIT_MS (клиент сам сдаётся
+      // через 6 с — ответ должен успеть), остальное доделывается в фоне, а
+      // уведомления пользователю уходят уже ПОСЛЕ ответа (перепроверка аудита
+      // 04.10.2026, п. 4.1: раньше ответ ждал ЮKassa и Telegram последовательно —
+      // именно в момент возвращения из оплаты, когда статус нужнее всего).
+      let reconcileResults = [];
+      let reconcileLater = null;
       if (yookassa) {
+        const reconcilePromise = reconcilePendingPayments(db, yookassa, { telegramUserId: auth.telegramUserId, limit: 3 });
+        const timedOut = Symbol("timeout");
         try {
-          const results = await reconcilePendingPayments(db, yookassa, { telegramUserId: auth.telegramUserId, limit: 3 });
-          for (const r of results) await notifyPaymentResult(r, paymentNotifyOpts);
+          const first = await Promise.race([reconcilePromise, new Promise((resolve) => setTimeout(() => resolve(timedOut), PLAN_STATUS_RECONCILE_WAIT_MS))]);
+          if (first === timedOut) reconcileLater = reconcilePromise;
+          else reconcileResults = first;
         } catch (err) {
           console.error("[api/plan-status] сверка платежей не удалась:", err.message);
         }
@@ -591,17 +623,23 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
       try {
         const isPro = getUserPro(db, auth.telegramUserId, new Date().toISOString());
         const sinceISO = new Date(Date.now() - FREE_WINDOW_MS).toISOString();
-        const usedThisWeek = countPlanGenerationsSince(db, auth.telegramUserId, sinceISO);
+        const freeTimes = freeGenerationTimesSince(db, auth.telegramUserId, sinceISO, accountHashSecret);
         const extraPlanCredits = getExtraPlanCredits(db, auth.telegramUserId);
-        const freeTimes = listPlanGenerationTimesSince(db, auth.telegramUserId, sinceISO);
         sendJson(res, 200, {
           ok: true,
-          ...computePlanStatus(isPro, usedThisWeek, new Date(), extraPlanCredits, freeTimes),
+          ...computePlanStatus(isPro, freeTimes.length, new Date(), extraPlanCredits, freeTimes),
           proUntil: getProUntil(db, auth.telegramUserId, new Date().toISOString()),
         });
       } catch (err) {
         console.error("[api/plan-status] ошибка:", err);
         sendJson(res, 500, { ok: false, error: "не удалось получить статус" });
+      }
+
+      try {
+        for (const r of reconcileResults) await notifyPaymentResult(r, paymentNotifyOpts);
+        if (reconcileLater) for (const r of await reconcileLater) await notifyPaymentResult(r, paymentNotifyOpts);
+      } catch (err) {
+        console.error("[api/plan-status] уведомления о платеже не отправлены:", err.message);
       }
       return;
     }
@@ -616,7 +654,7 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
       if (auth.body.confirm !== true) return sendJson(res, 400, { ok: false, error: "нужно подтверждение удаления" });
 
       try {
-        const deleted = deleteUserData(db, auth.telegramUserId);
+        const deleted = deleteUserData(db, auth.telegramUserId, { hashSecret: accountHashSecret });
         console.log(`[account/delete] данные пользователя удалены:`, JSON.stringify(deleted));
         sendJson(res, 200, { ok: true });
       } catch (err) {
@@ -715,6 +753,7 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
           referrerTelegramId: parsed.value.referrerTelegramId,
           referredTelegramId: auth.telegramUserId,
           nowISO: new Date().toISOString(),
+          hashSecret: accountHashSecret,
         });
         sendJson(res, 200, { ok: true, claimed: result.ok, reason: result.ok ? undefined : result.reason });
       } catch (err) {
@@ -845,6 +884,34 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
       return;
     }
 
+    // Прокси к MCP ВкусВилл для фронтенда — зачем, см. шапку vkusvillProxy.js
+    // (браузерные вызовы блокирует CORS-preflight, ответ QRATOR 401). Ответ:
+    // {ok:true, data} | {ok:false, error, upstreamStatus} с кодом 429 (наш лимит
+    // или общий лимит ВкусВилла) / 502 (ВкусВилл не ответил). Своя ошибка 429 от
+    // "слишком много" — фронтенд повторит с паузой; 502 — повторять смысла нет,
+    // сервер уже сделал свои повторы.
+    if (req.method === "POST" && req.url === "/api/vkusvill/call") {
+      const auth = await readAuthenticatedBody(req, botToken);
+      if (!auth.ok) return sendJson(res, auth.status, { ok: false, error: auth.error });
+
+      if (isRateLimited(`vv:${auth.telegramUserId}`, { maxRequests: VKUSVILL_PROXY_RATE_LIMIT_MAX_REQUESTS, windowMs: RATE_LIMIT_WINDOW_MS })) {
+        return sendJson(res, 429, { ok: false, error: "слишком много запросов, попробуйте через минуту" });
+      }
+      const parsed = parseVkusvillCallRequest(auth.body);
+      if (!parsed.ok) return sendJson(res, 400, { ok: false, error: parsed.error });
+
+      try {
+        const data = await callVkusvillCached(parsed.tool, parsed.args, {
+          takeLiveBudget: (n) => takeBudget(`vv-live:${auth.telegramUserId}`, n, { capacity: VKUSVILL_PROXY_LIVE_PER_HOUR, windowMs: 3_600_000 }),
+        });
+        sendJson(res, 200, { ok: true, data });
+      } catch (err) {
+        const status = err.httpStatus === 429 ? 429 : 502;
+        sendJson(res, status, { ok: false, error: err.message, upstreamStatus: err.httpStatus ?? null });
+      }
+      return;
+    }
+
     // Общий кэш цен ВкусВилл (см. vkusvillPrices.js) — не привязан к
     // конкретному плану/пользователю, просто "по этим названиям — вот что
     // знаем", поэтому отдельная auth-обвязка (readAuthenticatedBody), а не
@@ -936,15 +1003,20 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
         // Детерминированный ключ (а не randomUUID на каждый запрос): двойной
         // тап по "Оплатить" в пределах минуты вернёт тот же платёж, а не
         // заведёт второй — см. paymentIdempotenceKey.
-        const idempotenceKey = paymentIdempotenceKey(auth.telegramUserId, product);
-        const payment = await createPayment(yookassa, {
+        const createArgs = {
           amountRub,
           description,
           returnUrl: "https://t.me/s_edim_bot",
           telegramUserId: auth.telegramUserId,
-          idempotenceKey,
           receiptEmail: email,
-        });
+        };
+        let payment = await createPayment(yookassa, { ...createArgs, idempotenceKey: paymentIdempotenceKey(auth.telegramUserId, product, { email }) });
+        // Тот же ключ в ту же минуту вернул УЖЕ завершённый (например отменённый)
+        // платёж — ссылка мёртвая. Один раз повторяем с другим ключом
+        // (перепроверка аудита 04.10.2026, п. 4.3).
+        if (payment.status && payment.status !== "pending") {
+          payment = await createPayment(yookassa, { ...createArgs, idempotenceKey: paymentIdempotenceKey(auth.telegramUserId, product, { email, salt: "retry" }) });
+        }
         // Повтор с тем же ключом вернёт УЖЕ созданный платёж — вставлять его в
         // payments второй раз нельзя (UNIQUE), это не ошибка.
         if (!getPaymentByYookassaId(db, payment.id)) {
@@ -1055,6 +1127,12 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
           await sendDigestNow(db, { botToken, adminTelegramId }, new Date(), { updateWatermark: false });
         } else if (reply?.kind === "backup") {
           await sendBackupNow(db, { botToken, adminTelegramId });
+        } else if (reply?.kind === "diag") {
+          // Отвечает ли ВкусВилл с НАШЕГО сервера — единственный надёжный способ
+          // понять, поможет ли прокси (см. vkusvillProxy.js) или сервер тоже
+          // заблокирован и нужен другой хостинг.
+          const probe = await probeVkusvill();
+          await sendTelegramMessage(botToken, reply.chatId, buildDiagText(probe, getWarmQueueSize()));
         } else if (reply?.kind === "list_feedback") {
           await sendTelegramMessage(botToken, reply.chatId, buildFeedbackListText(listRecentFeedback(db)));
         } else if (reply?.kind === "feedback") {
@@ -1066,6 +1144,14 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
           // от ack пользователю (см. buildFeedbackAdminNotifyText).
           if (adminTelegramId) {
             await sendTelegramMessage(botToken, adminTelegramId, buildFeedbackAdminNotifyText(reply.telegramUserId, reply.text));
+            // Скриншот — копией самого сообщения (фото с подписью) прямо следом.
+            if (reply.attachment) {
+              try {
+                await copyTelegramMessage(botToken, adminTelegramId, reply.attachment.chatId, reply.attachment.messageId);
+              } catch (err) {
+                console.error("[telegram/webhook] не удалось переслать скриншот админу:", err.message);
+              }
+            }
           }
         }
       } catch (err) {

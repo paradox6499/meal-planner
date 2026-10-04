@@ -29,8 +29,11 @@ const RECONCILE_MAX_AGE_MS = 48 * 60 * 60 * 1000;
  * потерянном ответе). Через минуту ключ другой — осознанная новая попытка
  * после отказа/отмены не упирается в старый платёж. 64 hex-символа — ровно
  * максимум, который принимает ЮKassa. */
-export function paymentIdempotenceKey(telegramUserId, product, nowMs = Date.now()) {
-  return createHash("sha256").update(`${telegramUserId}|${product}|${Math.floor(nowMs / 60_000)}`).digest("hex");
+export function paymentIdempotenceKey(telegramUserId, product, { email = "", salt = "", nowMs = Date.now() } = {}) {
+  // email — в хэше: ЮKassa отклоняет повтор ключа с другими параметрами, а
+  // человек мог поправить опечатку в email в ту же минуту. salt — для
+  // осознанного повтора, когда прежний платёж по ключу уже не pending.
+  return createHash("sha256").update(`${telegramUserId}|${product}|${email}|${salt}|${Math.floor(nowMs / 60_000)}`).digest("hex");
 }
 
 /**
@@ -64,7 +67,13 @@ export function applyPaymentStatus(db, status, { nowISO = new Date().toISOString
   // забираем его обратно. Частичный: только сообщаем админу, решать ему.
   if ((status.refundedAmountRub ?? 0) > 0) {
     const full = status.refundedAmountRub >= existing.amount_rub - AMOUNT_EPSILON;
-    if (!full) return { kind: "partial_refund", existing, detail: `возвращено ${status.refundedAmountRub} из ${existing.amount_rub} ₽` };
+    if (!full) {
+      // Частичный возврат по платежу, который у нас ещё pending (вебхук об успехе
+      // потерялся): оплаченное не выдаём, но и не оставляем в pending — иначе
+      // сверка алертила бы админа каждые 10 минут двое суток (аудит 04.10.2026, п. 4.2).
+      if (existing.status === "pending") updatePaymentStatus(db, { yookassaPaymentId: status.id, status: "review", confirmedAtISO: null });
+      return { kind: "partial_refund", existing, detail: `возвращено ${status.refundedAmountRub} из ${existing.amount_rub} ₽` };
+    }
     if (existing.status === "succeeded") {
       if (existing.product === EXTRA_PLAN_PRODUCT) consumeExtraPlanCredit(db, existing.telegram_user_id);
       else shortenUserPro(db, existing.telegram_user_id, { nowISO, days: PRO_PERIOD_DAYS });

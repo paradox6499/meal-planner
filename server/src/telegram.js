@@ -2,6 +2,7 @@
 // напоминаний: отправить сообщение пользователю. Токен бота передаётся
 // параметром, а не читается из env здесь — модуль не должен знать, откуда
 // берётся секрет, это дело вызывающего кода (index.js).
+import { fetchWithTimeout } from "./http.js";
 
 /**
  * @param {string} botToken
@@ -17,7 +18,7 @@ export async function sendTelegramMessage(botToken, chatId, text, opts = {}) {
   // в тексте может быть что угодно от пользователя — безопасный дефолт это
   // "без разметки", а не "разметка, пока не сломается". parseMode передаётся
   // явно только для текстов, которые заведомо не содержат чужого ввода.
-  const res = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+  const res = await fetchWithTimeout(`https://api.telegram.org/bot${botToken}/sendMessage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -27,7 +28,7 @@ export async function sendTelegramMessage(botToken, chatId, text, opts = {}) {
       ...(opts.replyMarkup ? { reply_markup: opts.replyMarkup } : {}),
       disable_web_page_preview: true,
     }),
-  });
+  }, undefined, "Telegram sendMessage");
   const body = await res.json().catch(() => null);
   if (!res.ok || !body?.ok) {
     // 403 здесь означает "пользователь заблокировал бота" — ожидаемый,
@@ -81,13 +82,31 @@ export async function sendTelegramDocument(botToken, chatId, buffer, filename, c
   if (caption) form.append("caption", caption);
   form.append("document", new Blob([buffer]), filename);
 
-  const res = await fetch(`https://api.telegram.org/bot${botToken}/sendDocument`, {
+  // Файл бэкапа — десятки мегабайт, 8 секунд ему мало.
+  const res = await fetchWithTimeout(`https://api.telegram.org/bot${botToken}/sendDocument`, {
     method: "POST",
     body: form,
-  });
+  }, 60_000, "Telegram sendDocument");
   const body = await res.json().catch(() => null);
   if (!res.ok || !body?.ok) {
     throw new Error(`Telegram sendDocument: ${body?.description || res.status}`);
+  }
+  return body.result;
+}
+
+/** Копирует сообщение (фото/скриншот с подписью) из чата пользователя в чат
+ * админа — без пометки "переслано" и без доступа к профилю отправителя. Нужно
+ * для скриншотов ошибок в поддержке: текст обращения сохраняется в БД, а сам
+ * снимок остаётся только в Telegram и просто копируется админу. */
+export async function copyTelegramMessage(botToken, toChatId, fromChatId, messageId) {
+  const res = await fetchWithTimeout(`https://api.telegram.org/bot${botToken}/copyMessage`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chat_id: toChatId, from_chat_id: fromChatId, message_id: messageId }),
+  }, undefined, "Telegram copyMessage");
+  const body = await res.json().catch(() => null);
+  if (!res.ok || !body?.ok) {
+    throw new Error(`Telegram copyMessage: ${body?.description || res.status}`);
   }
   return body.result;
 }

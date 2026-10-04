@@ -1,7 +1,7 @@
 // node:sqlite — встроен в Node (LTS 22.5+/24+), отдельная зависимость не
 // нужна ни на разработке, ни на хостинге.
 import { DatabaseSync } from "node:sqlite";
-import { randomBytes } from "node:crypto";
+import { createHmac, randomBytes } from "node:crypto";
 
 // Код приглашения в семью (см. CREATE TABLE families ниже) — 12 символов
 // base64url (A-Za-z0-9-_), это ровно тот алфавит, что Telegram разрешает в
@@ -150,6 +150,19 @@ export function openDb(path) {
     CREATE INDEX IF NOT EXISTS idx_payments_created ON payments (created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_payments_status ON payments (status, created_at);
 
+    -- "Надгробия" удалённых аккаунтов (см. deleteUserData): после "Удалить мои
+    -- данные" остаётся ТОЛЬКО необратимый хэш идентификатора (HMAC с серверным
+    -- секретом, не сам telegram_user_id) и дата последней бесплатной сборки.
+    -- Нужны для защиты от злоупотребления (перепроверка аудита 04.10.2026): без
+    -- них цикл "реферальная заявка -> сборка плана -> удалить данные -> снова
+    -- заявка" давал пригласившему +7 дней Pro на каждом круге, а бесплатный лимит
+    -- обнулялся вместе с событиями. Срок хранения — см. maintenance.js.
+    CREATE TABLE IF NOT EXISTS deleted_accounts (
+      id_hash TEXT PRIMARY KEY,
+      deleted_at TEXT NOT NULL,
+      last_free_plan_at TEXT
+    );
+
     -- Кто кого пригласил (см. referrals.js) — referred_telegram_id UNIQUE:
     -- у одного приглашённого может быть только ОДИН пригласивший, первая
     -- заявка на реферала побеждает, повторный claim того же приглашённого
@@ -284,6 +297,15 @@ export function openDb(path) {
   // корректно доразмечает все платежи, сделанные до этой колонки (тогда
   // существовал только один продукт).
   ensureColumn(db, "payments", "product", "TEXT NOT NULL DEFAULT 'pro'");
+  // Сколько приглашённых этим пользователем УЖЕ вознаграждено — неудаляемый
+  // счётчик для потолка MAX_REWARDED_REFERRALS: раньше потолок считался по
+  // строкам referrals, а они удаляются вместе с аккаунтом приглашённого, так что
+  // потолок можно было обнулять удалением (перепроверка аудита 04.10.2026).
+  ensureColumn(db, "users", "referral_rewards_total", "INTEGER NOT NULL DEFAULT 0");
+  db.exec(`UPDATE users SET referral_rewards_total = (
+             SELECT COUNT(*) FROM referrals r WHERE r.referrer_telegram_id = users.telegram_user_id AND r.rewarded_at IS NOT NULL
+           ) WHERE referral_rewards_total = 0
+             AND EXISTS (SELECT 1 FROM referrals r WHERE r.referrer_telegram_id = users.telegram_user_id AND r.rewarded_at IS NOT NULL)`);
 
   return db;
 }
@@ -666,15 +688,25 @@ export function getPendingReferral(db, referredTelegramId) {
 }
 
 export function markReferralRewarded(db, referredTelegramId, rewardedAtISO) {
+  const row = db.prepare("SELECT referrer_telegram_id FROM referrals WHERE referred_telegram_id = ?").get(referredTelegramId);
   db.prepare("UPDATE referrals SET rewarded_at = ? WHERE referred_telegram_id = ?").run(rewardedAtISO, referredTelegramId);
+  if (row) {
+    db.prepare(
+      `INSERT INTO users (telegram_user_id, referral_rewards_total) VALUES (?, 1)
+       ON CONFLICT(telegram_user_id) DO UPDATE SET referral_rewards_total = referral_rewards_total + 1`
+    ).run(row.referrer_telegram_id);
+  }
 }
 
 /** Сколько раз этот пригласивший УЖЕ получил награду — для потолка (см.
  * MAX_REFERRAL_REWARDS в referrals.js), чтобы не разбогатеть на днях Pro
  * бесконечно, создавая (или уговаривая создать) новые аккаунты. */
 export function countRewardedReferrals(db, referrerTelegramId) {
-  const row = db.prepare("SELECT COUNT(*) AS count FROM referrals WHERE referrer_telegram_id = ? AND rewarded_at IS NOT NULL").get(referrerTelegramId);
-  return row.count;
+  const rows = db.prepare("SELECT COUNT(*) AS count FROM referrals WHERE referrer_telegram_id = ? AND rewarded_at IS NOT NULL").get(referrerTelegramId).count;
+  // MAX: счётчик переживает удаление аккаунтов приглашённых (строки referrals
+  // тогда исчезают), потолок от этого не обнуляется.
+  const counter = db.prepare("SELECT referral_rewards_total AS total FROM users WHERE telegram_user_id = ?").get(referrerTelegramId)?.total ?? 0;
+  return Math.max(rows, counter);
 }
 
 // "Общий список на семью" (см. комментарий у CREATE TABLE families выше) —
@@ -918,13 +950,24 @@ export function getDbSizeBytes(db) {
  * прямо сказано). Они остаются привязанными к числовому telegram_user_id
  * без остальных данных профиля. Резервные копии БД (backup.js) этой
  * функцией не затрагиваются. Возвращает {таблица: сколько строк удалено}. */
-export function deleteUserData(db, telegramUserId) {
+export function deleteUserData(db, telegramUserId, { hashSecret = null, nowISO = new Date().toISOString() } = {}) {
   const deleted = {};
   const del = (label, sql, ...params) => {
     deleted[label] = Number(db.prepare(sql).run(...params).changes);
   };
   db.exec("BEGIN");
   try {
+    // "Надгробие" — до удаления событий (из них берётся дата последней
+    // бесплатной сборки). Без hashSecret (старые вызовы/тесты) не пишется.
+    if (hashSecret) {
+      const lastFree = db.prepare("SELECT MAX(created_at) AS at FROM events WHERE telegram_user_id = ? AND event_name = 'plan_generated'").get(telegramUserId)?.at ?? null;
+      db.prepare(
+        `INSERT INTO deleted_accounts (id_hash, deleted_at, last_free_plan_at) VALUES (?, ?, ?)
+         ON CONFLICT(id_hash) DO UPDATE SET deleted_at = excluded.deleted_at,
+           last_free_plan_at = COALESCE(MAX(deleted_accounts.last_free_plan_at, excluded.last_free_plan_at), excluded.last_free_plan_at, deleted_accounts.last_free_plan_at)`
+      ).run(hashAccountId(hashSecret, telegramUserId), nowISO, lastFree);
+      deleted.tombstone = true;
+    }
     const family = getFamilyForUser(db, telegramUserId);
     if (family && family.owner_telegram_id === telegramUserId) {
       dissolveFamily(db, family.id);
@@ -945,4 +988,34 @@ export function deleteUserData(db, telegramUserId) {
     throw err;
   }
   return deleted;
+}
+
+
+// ---------- Надгробия удалённых аккаунтов (см. CREATE TABLE deleted_accounts) ----------
+
+/** Необратимый идентификатор для надгробия: HMAC-SHA256 с серверным секретом.
+ * Сам telegram_user_id после удаления нигде не хранится. */
+export function hashAccountId(secret, telegramUserId) {
+  return createHmac("sha256", secret).update(`deleted-account:${telegramUserId}`).digest("hex");
+}
+
+export function getDeletedAccount(db, hashSecret, telegramUserId) {
+  return db.prepare("SELECT * FROM deleted_accounts WHERE id_hash = ?").get(hashAccountId(hashSecret, telegramUserId)) ?? null;
+}
+
+/** Времена БЕСПЛАТНЫХ сборок в окне по возрастанию — события пользователя плюс
+ * сборка из надгробия (если человек удалил аккаунт, не дождавшись сброса
+ * лимита, удаление не должно обнулять лимит). */
+export function freeGenerationTimesSince(db, telegramUserId, sinceISO, hashSecret = null) {
+  const times = listPlanGenerationTimesSince(db, telegramUserId, sinceISO);
+  if (hashSecret) {
+    const tomb = getDeletedAccount(db, hashSecret, telegramUserId);
+    if (tomb?.last_free_plan_at && tomb.last_free_plan_at >= sinceISO) times.unshift(tomb.last_free_plan_at);
+    times.sort();
+  }
+  return times;
+}
+
+export function purgeOldDeletedAccounts(db, beforeISO) {
+  return Number(db.prepare("DELETE FROM deleted_accounts WHERE deleted_at < ?").run(beforeISO).changes);
 }

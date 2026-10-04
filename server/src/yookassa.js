@@ -9,6 +9,8 @@
 // тут же) — тот же принцип, что и у sendTelegramMessage в telegram.js: этот
 // модуль не должен знать, откуда взялся секрет, это дело index.js.
 
+import { fetchWithTimeout } from "./http.js";
+
 const API_BASE = "https://api.yookassa.ru/v3";
 
 function authHeader(shopId, secretKey) {
@@ -37,7 +39,7 @@ function authHeader(shopId, secretKey) {
  */
 export async function createPayment({ shopId, secretKey }, { amountRub, description, returnUrl, telegramUserId, idempotenceKey, receiptEmail }) {
   const amount = { value: amountRub.toFixed(2), currency: "RUB" };
-  const res = await fetch(`${API_BASE}/payments`, {
+  const res = await fetchWithTimeout(`${API_BASE}/payments`, {
     method: "POST",
     headers: {
       Authorization: authHeader(shopId, secretKey),
@@ -64,7 +66,7 @@ export async function createPayment({ shopId, secretKey }, { amountRub, descript
         ],
       },
     }),
-  });
+  }, undefined, "ЮKassa createPayment");
   const body = await res.json().catch(() => null);
   if (!res.ok) {
     throw new Error(`ЮKassa createPayment: ${body?.description || body?.code || res.status}`);
@@ -80,10 +82,10 @@ export async function createPayment({ shopId, secretKey }, { amountRub, descript
  * такой ответ невозможен, это и есть единственная точка доверия. См.
  * app.js: POST /yookassa/webhook. */
 export async function fetchPaymentStatus({ shopId, secretKey }, paymentId) {
-  const res = await fetch(`${API_BASE}/payments/${encodeURIComponent(paymentId)}`, {
+  const res = await fetchWithTimeout(`${API_BASE}/payments/${encodeURIComponent(paymentId)}`, {
     method: "GET",
     headers: { Authorization: authHeader(shopId, secretKey) },
-  });
+  }, undefined, "ЮKassa fetchPaymentStatus");
   const body = await res.json().catch(() => null);
   if (!res.ok) {
     throw new Error(`ЮKassa fetchPaymentStatus: ${body?.description || body?.code || res.status}`);

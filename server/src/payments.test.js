@@ -16,13 +16,19 @@ const ykPayment = (over = {}) => ({
 
 describe("paymentIdempotenceKey", () => {
   it("тот же пользователь, товар и минута — один ключ (двойной тап не создаёт второй платёж)", () => {
-    expect(paymentIdempotenceKey(42, "pro", 1_200_000)).toBe(paymentIdempotenceKey(42, "pro", 1_200_000 + 30_000));
+    expect(paymentIdempotenceKey(42, "pro", { nowMs: 1_200_000 })).toBe(paymentIdempotenceKey(42, "pro", { nowMs: 1_200_000 + 30_000 }));
   });
   it("следующая минута, другой пользователь или другой товар — другой ключ", () => {
-    const base = paymentIdempotenceKey(42, "pro", 1_200_000);
-    expect(paymentIdempotenceKey(42, "pro", 1_200_000 + 120_000)).not.toBe(base);
-    expect(paymentIdempotenceKey(43, "pro", 1_200_000)).not.toBe(base);
-    expect(paymentIdempotenceKey(42, EXTRA_PLAN_PRODUCT, 1_200_000)).not.toBe(base);
+    const base = paymentIdempotenceKey(42, "pro", { nowMs: 1_200_000 });
+    expect(paymentIdempotenceKey(42, "pro", { nowMs: 1_200_000 + 120_000 })).not.toBe(base);
+    expect(paymentIdempotenceKey(43, "pro", { nowMs: 1_200_000 })).not.toBe(base);
+    expect(paymentIdempotenceKey(42, EXTRA_PLAN_PRODUCT, { nowMs: 1_200_000 })).not.toBe(base);
+  });
+  it("email и salt меняют ключ (поправил опечатку в email — не конфликтуем со старым ключом; повтор после отмены — новый ключ)", () => {
+    const base = paymentIdempotenceKey(42, "pro", { email: "a@b.ru", nowMs: 1_200_000 });
+    expect(paymentIdempotenceKey(42, "pro", { email: "c@d.ru", nowMs: 1_200_000 })).not.toBe(base);
+    expect(paymentIdempotenceKey(42, "pro", { email: "a@b.ru", salt: "retry", nowMs: 1_200_000 })).not.toBe(base);
+    expect(paymentIdempotenceKey(42, "pro", { email: "a@b.ru", nowMs: 1_200_000 })).toBe(base);
   });
   it("64 символа — максимум, который принимает ЮKassa", () => {
     expect(paymentIdempotenceKey(42, "pro")).toHaveLength(64);
@@ -141,6 +147,16 @@ describe("applyPaymentStatus", () => {
       expect(r.kind).toBe("partial_refund");
       expect(getPaymentByYookassaId(db, "pay-1").status).toBe("succeeded");
       expect(getUserPro(db, 42, NOW)).toBe(true);
+    });
+
+    // Перепроверка аудита 04.10.2026, п. 4.2: иначе сверка алертила бы каждые 10 минут двое суток.
+    it("частичный возврат по платежу, который у нас ещё pending, -> review (выходит из сверки), оплаченное не выдаётся", () => {
+      pending();
+      const r = applyPaymentStatus(db, paid({ refundedAmountRub: 100 }), { nowISO: NOW });
+      expect(r.kind).toBe("partial_refund");
+      expect(getPaymentByYookassaId(db, "pay-1").status).toBe("review");
+      expect(getUserPro(db, 42, NOW)).toBe(false);
+      expect(applyPaymentStatus(db, paid({ refundedAmountRub: 100 }), { nowISO: NOW }).kind).toBe("noop");
     });
 
     it("повторное уведомление о том же возврате не снимает срок второй раз", () => {

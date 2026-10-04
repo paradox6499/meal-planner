@@ -24,6 +24,6 @@ describe("runMaintenance", () => {
   });
 
   it("на пустой базе ничего не ломает", () => {
-    expect(runMaintenance(openDb(":memory:"), NOW)).toEqual({ eventsDeleted: 0, pricesDeleted: 0 });
+    expect(runMaintenance(openDb(":memory:"), NOW)).toEqual({ eventsDeleted: 0, pricesDeleted: 0, deletedAccountsPurged: 0 });
   });
 });

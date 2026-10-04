@@ -14,6 +14,17 @@
 // что на него ответить/сохранить. app.js уже выполняет решение — так
 // тестируется без сети и без мока БД.
 
+/** Ответ на /diag: результат пробного запроса ВкусВилл с сервера. */
+export function buildDiagText(probe, warmQueueSize = 0) {
+  const verdict = probe.ok
+    ? `✅ ВкусВилл с сервера отвечает (${probe.ms} мс): ${probe.detail}.`
+    : `❌ ВкусВилл с сервера НЕ отвечает (${probe.ms} мс): ${probe.detail}${probe.httpStatus ? ` [HTTP ${probe.httpStatus}]` : ""}.`;
+  const hint = probe.ok
+    ? "Прокси каталога должен работать."
+    : "Если это HTTP 401/403 — скорее всего, адрес сервера блокируется на стороне ВкусВилл (QRATOR); нужен хостинг в РФ.";
+  return `${verdict}\n${hint}\nЦен в очереди на подогрев: ${warmQueueSize}.`;
+}
+
 export function buildWelcomeText() {
   return (
     "Привет! 👋 Я «Съедим» — помогу собрать меню на неделю под ваш бюджет и список покупок с реальными ценами ВкусВилл.\n\n" +
@@ -45,7 +56,7 @@ export function buildFeedbackAdminNotifyText(telegramUserId, text) {
 // шлёт этот текст ДО закрытия — пользователь видит его уже открытым чатом
 // вместо пустого экрана.
 export function buildSupportPromptText() {
-  return "Напишите сейчас одним сообщением, что случилось или что хотели бы улучшить — оно сразу дойдёт до команды «Съедим». Вы помогаете делать сервис лучше 🙌";
+  return "Напишите сейчас одним сообщением, что случилось или что хотели бы улучшить — оно сразу дойдёт до команды «Съедим». Если это ошибка, приложите скриншот: просто отправьте картинку (можно с подписью). Вы помогаете делать сервис лучше 🙌";
 }
 
 /** items — [{telegramUserId, text, createdAt}], новые сверху (см.
@@ -64,14 +75,33 @@ export function buildFeedbackListText(items) {
 /**
  * @param {object} update — Update от Telegram (см. core.telegram.org/bots/api#update)
  * @param {{ adminTelegramId?: number|null }} [opts]
- * @returns {{ chatId: number, kind: "start" | "report" | "list_feedback" | "backup" } |
- *           { chatId: number, kind: "feedback", telegramUserId: number, text: string } | null}
+ * @returns {{ chatId: number, kind: "start" | "report" | "list_feedback" | "backup" | "diag" } |
+ *           { chatId: number, kind: "feedback", telegramUserId: number, text: string, attachment?: { chatId: number, messageId: number } } | null}
  */
 export function planReplyForUpdate(update, { adminTelegramId = null } = {}) {
-  const text = update?.message?.text;
-  const chatId = update?.message?.chat?.id;
-  const fromId = update?.message?.from?.id ?? chatId;
-  if (!chatId || typeof text !== "string" || !text.trim()) return null;
+  const message = update?.message;
+  const text = message?.text;
+  const chatId = message?.chat?.id;
+  const fromId = message?.from?.id ?? chatId;
+  if (!chatId) return null;
+
+  // Скриншот ошибки в поддержку (фото или картинка файлом, подпись — в caption).
+  // Раньше любое сообщение без текста молча игнорировалось — человек присылал
+  // скрин, а до разработчика не доходило ничего. Сам снимок остаётся в
+  // Telegram, в БД — только текст-пометка; app.js копирует сообщение админу.
+  const isPhoto = Array.isArray(message?.photo) && message.photo.length > 0;
+  const isImageFile = typeof message?.document?.mime_type === "string" && message.document.mime_type.startsWith("image/");
+  if ((typeof text !== "string" || !text.trim()) && (isPhoto || isImageFile)) {
+    if (adminTelegramId && chatId === adminTelegramId) return null;
+    const caption = typeof message.caption === "string" ? message.caption.trim() : "";
+    return {
+      chatId, kind: "feedback", telegramUserId: fromId,
+      text: caption ? `📎 скриншот: ${caption}` : "📎 скриншот без подписи",
+      attachment: { chatId, messageId: message.message_id },
+    };
+  }
+
+  if (typeof text !== "string" || !text.trim()) return null;
 
   // startapp-параметры Mini App приходят как "/start <payload>" — приветствие
   // уместно в любом случае, не только на голый "/start".
@@ -89,6 +119,9 @@ export function planReplyForUpdate(update, { adminTelegramId = null } = {}) {
   }
   if (text === "/backup") {
     return adminTelegramId && chatId === adminTelegramId ? { chatId, kind: "backup" } : null;
+  }
+  if (text === "/diag") {
+    return adminTelegramId && chatId === adminTelegramId ? { chatId, kind: "diag" } : null;
   }
 
   // Сам админ, тестируя бота командами не по назначению (например, опечатка

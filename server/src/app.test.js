@@ -728,7 +728,7 @@ describe("POST /api/family/*", () => {
 // Telegram (уведомление пригласившему), поэтому не в "HTTP-сервер" выше, тот
 // же приём, что и у /api/pay/create и /yookassa/webhook: стаб fetch
 // разделяет api.telegram.org (подменяется) и baseUrl (настоящий fetch).
-describe("POST /api/plan — начисление реферальной награды по факту сборки плана", () => {
+describe("Реферальная награда — по факту РЕАЛЬНОЙ сборки (POST /api/plan/generate)", () => {
   let db, server, baseUrl;
   const realFetch = globalThis.fetch;
 
@@ -743,32 +743,80 @@ describe("POST /api/plan — начисление реферальной наг�
     await new Promise((resolve) => server.close(resolve));
     vi.unstubAllGlobals();
   });
+  const post = (path, id, body = {}) => fetch(`${baseUrl}${path}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ initData: validInitData(id), ...body }) }).then(async (r) => ({ status: r.status, body: await r.json() }));
+  const claim = (referred, referrer) => post("/api/referral/claim", referred, { referrerTelegramId: referrer });
+  const generate = (id) => post("/api/plan/generate", id);
+  const sync = (id) => post("/api/plan", id, { timezoneOffsetMinutes: 180, mealSlots: [validSlot] });
+  const proUntil = (id) => db.prepare("SELECT pro_until FROM users WHERE telegram_user_id = ?").get(id)?.pro_until ?? null;
+  const soon = () => new Date(Date.now() + 3 * 24 * 3_600_000).toISOString();
 
   it("приглашённый собирает первый план -> и он, и пригласивший получают Pro", async () => {
-    await fetch(`${baseUrl}/api/referral/claim`, {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ initData: validInitData(2), referrerTelegramId: 1 }),
-    });
-
-    const res = await fetch(`${baseUrl}/api/plan`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ initData: validInitData(2), timezoneOffsetMinutes: 180, mealSlots: [validSlot] }),
-    });
-    expect(res.status).toBe(200);
-
-    const soon = new Date(Date.now() + 3 * 24 * 3_600_000).toISOString();
-    expect(getUserPro(db, 1, soon)).toBe(true); // пригласивший
-    expect(getUserPro(db, 2, soon)).toBe(true); // приглашённый
+    await claim(2, 1);
+    expect((await generate(2)).status).toBe(200);
+    expect(getUserPro(db, 1, soon())).toBe(true); // пригласивший
+    expect(getUserPro(db, 2, soon())).toBe(true); // приглашённый
   });
 
-  it("без ожидающего реферала — сборка плана работает как обычно, никому Pro не начисляется", async () => {
-    const res = await fetch(`${baseUrl}/api/plan`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ initData: validInitData(42), timezoneOffsetMinutes: 180, mealSlots: [validSlot] }),
-    });
-    expect(res.status).toBe(200);
+  it("простая синхронизация плана (/api/plan) награды НЕ начисляет — только реальная сборка", async () => {
+    await claim(2, 1);
+    await sync(2);
+    expect(getUserPro(db, 1, soon())).toBe(false);
+    expect(getUserPro(db, 2, soon())).toBe(false);
+  });
+
+  it("без ожидающего реферала — сборка работает как обычно, никому Pro не начисляется", async () => {
+    expect((await generate(42)).status).toBe(200);
     expect(getUserPro(db, 42, new Date().toISOString())).toBe(false);
+  });
+
+  // Перепроверка аудита 04.10.2026, раздел 3: "заявка -> сборка -> удалить данные
+  // -> снова заявка" давала пригласившему +7 дней Pro на каждом круге, а лимит
+  // приглашённого обнулялся вместе с событиями.
+  describe("удаление аккаунта не обнуляет рефералы и лимит", () => {
+    it("повторная заявка после удаления отклоняется, у пригласившего Pro не растёт", async () => {
+      await claim(2, 1);
+      await generate(2);
+      const afterFirst = proUntil(1);
+      expect(afterFirst).not.toBeNull();
+
+      for (let round = 0; round < 3; round++) {
+        await post("/api/account/delete", 2, { confirm: true });
+        const again = await claim(2, 1);
+        expect(again.body.claimed).toBe(false);
+        await sync(2);
+        await generate(2);
+      }
+      expect(proUntil(1)).toBe(afterFirst);
+    });
+
+    it("потолок наград пригласившего не обнуляется удалением аккаунтов приглашённых", async () => {
+      for (let i = 0; i < MAX_REWARDED_REFERRALS_FOR_TEST; i++) {
+        const invited = 100 + i;
+        await claim(invited, 1);
+        await generate(invited);
+        await post("/api/account/delete", invited, { confirm: true }); // строки referrals приглашённого удалены
+      }
+      const before = proUntil(1);
+      await claim(999, 1);
+      await generate(999);
+      expect(proUntil(1)).toBe(before); // потолок достигнут, несмотря на удаления
+    });
+
+    it("бесплатный лимит не сбрасывается удалением: сборка до удаления считается в окне", async () => {
+      expect((await generate(2)).status).toBe(200);
+      await post("/api/account/delete", 2, { confirm: true });
+      const status = (await post("/api/plan-status", 2)).body;
+      expect(status.canGenerate).toBe(false);
+      expect(status.usedThisWeek).toBe(1);
+      expect(status.nextResetHint).toBeTruthy();
+      expect((await generate(2)).status).toBe(403);
+    });
+
+    it("удалил аккаунт, не использовав лимит — лимит свободен как раньше", async () => {
+      await post("/api/plan-status", 2);
+      await post("/api/account/delete", 2, { confirm: true });
+      expect((await post("/api/plan-status", 2)).body.canGenerate).toBe(true);
+    });
   });
 });
 
@@ -1518,6 +1566,43 @@ describe("Платежи: возвраты, чужие события, свер�
     expect(yookassaCalls).toHaveLength(0);
   });
 
+  it("ключ вернул УЖЕ отменённый платёж (ссылка мёртвая) -> один повтор с другим ключом, в базе живой платёж", async () => {
+    let n = 0;
+    const responses = [
+      { id: "pay-dead", status: "canceled", confirmation: null },
+      { id: "pay-live", status: "pending", confirmation: { confirmation_url: "https://yookassa.ru/checkout/pay-live" } },
+    ];
+    vi.stubGlobal("fetch", vi.fn((url, opts) => {
+      if (String(url).includes("api.yookassa.ru")) { yookassaCalls.push({ url: String(url), opts }); return Promise.resolve({ ok: true, json: async () => responses[Math.min(n++, 1)] }); }
+      if (String(url).includes("api.telegram.org")) return Promise.resolve({ ok: true, json: async () => ({ ok: true, result: {} }) });
+      return realFetch(url, opts);
+    }));
+    const res = await fetch(`${baseUrl}/api/pay/create`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ initData: validInitData(42), email: "a@b.ru" }) });
+    expect((await res.json()).confirmationUrl).toContain("pay-live");
+    const keys = yookassaCalls.filter((c) => c.opts?.method === "POST").map((c) => c.opts.headers["Idempotence-Key"]);
+    expect(keys).toHaveLength(2);
+    expect(keys[0]).not.toBe(keys[1]);
+    expect(getPaymentByYookassaId(db, "pay-live")).not.toBeNull();
+  });
+
+  it("/api/plan-status не ждёт медленную ЮKassa дольше ~3,5 с: отвечает, а оплаченное выдаётся и уведомляется в фоне", async () => {
+    clearReconcileState();
+    createPendingPayment(db, { yookassaPaymentId: "pay-slow", telegramUserId: 42, amountRub: 299, createdAtISO: new Date().toISOString() });
+    vi.stubGlobal("fetch", vi.fn((url, opts) => {
+      if (String(url).includes("api.yookassa.ru")) return new Promise((resolve) => setTimeout(() => resolve({ ok: true, json: async () => payment({ id: "pay-slow" }) }), 5000));
+      if (String(url).includes("api.telegram.org")) { telegramCalls.push(JSON.parse(opts.body)); return Promise.resolve({ ok: true, json: async () => ({ ok: true, result: {} }) }); }
+      return realFetch(url, opts);
+    }));
+    const startedAt = Date.now();
+    const status = await planStatus(42);
+    const elapsed = Date.now() - startedAt;
+    expect(elapsed).toBeLessThan(4500);
+    expect(status.isPro).toBe(false); // ответ ушёл до окончания сверки
+    await new Promise((resolve) => setTimeout(resolve, 2000)); // фон доделывает
+    expect(getUserPro(db, 42, new Date(Date.now() + 1000).toISOString())).toBe(true);
+    expect(telegramCalls.some((c) => c.chat_id === 42 && c.text.includes("Оплата прошла"))).toBe(true);
+  }, 15000);
+
   it("двойной тап по «Оплатить»: тот же Idempotence-Key, одна запись в payments, оба запроса 200", async () => {
     yookassaPayment = { id: "pay-new", status: "pending", confirmation: { confirmation_url: "https://yookassa.ru/checkout/pay-new" } };
     const pay = () => fetch(`${baseUrl}/api/pay/create`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ initData: validInitData(42), email: "a@b.ru" }) });
@@ -1698,5 +1783,184 @@ describe("Семья и Pro владельца", () => {
     await familyWithMember();
     expect(getUserPro(db, 2, new Date().toISOString())).toBe(false);
     expect((await post("/api/family/pantry", 2, { name: "Сыр", present: true })).status).toBe(200);
+  });
+});
+
+// ---------- Прокси каталога ВкусВилл и диагностика (CORS-preflight 04.10.2026) ----------
+import { clearProxyState } from "./vkusvillProxy.js";
+import { MAX_REWARDED_REFERRALS } from "./referrals.js";
+const MAX_REWARDED_REFERRALS_FOR_TEST = MAX_REWARDED_REFERRALS;
+import { resetUpstreamGate } from "./vkusvillPrices.js";
+
+describe("POST /api/vkusvill/call — прокси каталога", () => {
+  let db, server, baseUrl, mcpCalls, mcpImpl;
+  const realFetch = globalThis.fetch;
+  const mcpOk = (data) => ({ ok: true, json: async () => ({ result: { content: [{ text: JSON.stringify({ ok: true, data }) }] } }) });
+
+  beforeEach(async () => {
+    clearProxyState();
+    resetUpstreamGate();
+    mcpCalls = [];
+    mcpImpl = async () => mcpOk({ items: [{ id: 1 }] });
+    db = openDb(":memory:");
+    server = createApp(db, { botToken: BOT_TOKEN });
+    await new Promise((resolve) => server.listen(0, resolve));
+    baseUrl = `http://127.0.0.1:${server.address().port}`;
+    vi.stubGlobal("fetch", vi.fn((url, opts) => {
+      if (String(url).includes("mcp.vkusvill.ru")) { mcpCalls.push(JSON.parse(opts.body)); return mcpImpl(); }
+      return realFetch(url, opts);
+    }));
+  });
+  afterEach(async () => {
+    await new Promise((resolve) => server.close(resolve));
+    vi.unstubAllGlobals();
+  });
+  const call = (body, id = 42) => fetch(`${baseUrl}/api/vkusvill/call`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ initData: validInitData(id), ...body }) });
+
+  it("без initData -> 401, во ВкусВилл не ходит", async () => {
+    const res = await fetch(`${baseUrl}/api/vkusvill/call`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tool: "vkusvill_recipes", args: {} }) });
+    expect(res.status).toBe(401);
+    expect(mcpCalls).toHaveLength(0);
+  });
+
+  it("неизвестный инструмент -> 400 (это не открытый прокси)", async () => {
+    expect((await call({ tool: "evil_tool", args: {} })).status).toBe(400);
+    expect(mcpCalls).toHaveLength(0);
+  });
+
+  it("успех: данные из ответа ВкусВилл, имя инструмента и аргументы передаются как есть", async () => {
+    const res = await call({ tool: "vkusvill_products_search", args: { q: "молоко", page: 1 } });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, data: { items: [{ id: 1 }] } });
+    expect(mcpCalls[0].params).toEqual({ name: "vkusvill_products_search", arguments: { q: "молоко", page: 1 } });
+  });
+
+  it("второй такой же запрос (даже от другого пользователя) — из общего кэша", async () => {
+    await call({ tool: "vkusvill_recipes", args: { page: 1 } }, 42);
+    await call({ tool: "vkusvill_recipes", args: { page: 1 } }, 43);
+    expect(mcpCalls).toHaveLength(1);
+  });
+
+  it("ВкусВилл ответил ошибкой -> 502 с кодом upstreamStatus (повторять фронтенду нет смысла)", async () => {
+    mcpImpl = async () => ({ ok: false, status: 403, json: async () => ({}) });
+    const res = await call({ tool: "vkusvill_recipes", args: { page: 9 } });
+    expect(res.status).toBe(502);
+    const body = await res.json();
+    expect(body).toMatchObject({ ok: false, upstreamStatus: 403 });
+  });
+
+  it("корзина: от 1 до 20 позиций, ссылка создаётся сервером", async () => {
+    expect((await call({ tool: "vkusvill_cart_link_create", args: { products: [] } })).status).toBe(400);
+    mcpImpl = async () => mcpOk({ links: ["https://vkusvill.ru/cart/x"] });
+    const res = await call({ tool: "vkusvill_cart_link_create", args: { products: [{ xml_id: 1, q: 2 }] } });
+    expect((await res.json()).data.links[0]).toContain("vkusvill.ru");
+  });
+});
+
+describe("/diag в боте (только админ)", () => {
+  let db, server, baseUrl, telegramCalls, mcpResponse;
+  const realFetch = globalThis.fetch;
+  const SECRET = "diag-secret";
+  const ADMIN = 777;
+
+  beforeEach(async () => {
+    resetUpstreamGate();
+    telegramCalls = [];
+    mcpResponse = { ok: true, json: async () => ({ result: { content: [{ text: JSON.stringify({ ok: true, data: { items: [{ id: 1 }] } }) }] } }) };
+    db = openDb(":memory:");
+    server = createApp(db, { botToken: BOT_TOKEN, adminTelegramId: ADMIN, webhookSecret: SECRET });
+    await new Promise((resolve) => server.listen(0, resolve));
+    baseUrl = `http://127.0.0.1:${server.address().port}`;
+    vi.stubGlobal("fetch", vi.fn((url, opts) => {
+      if (String(url).includes("mcp.vkusvill.ru")) return Promise.resolve(mcpResponse);
+      if (String(url).includes("api.telegram.org")) { telegramCalls.push(JSON.parse(opts.body)); return Promise.resolve({ ok: true, json: async () => ({ ok: true, result: {} }) }); }
+      return realFetch(url, opts);
+    }));
+  });
+  afterEach(async () => {
+    await new Promise((resolve) => server.close(resolve));
+    vi.unstubAllGlobals();
+  });
+  const send = (chatId, text) => fetch(`${baseUrl}/telegram/webhook`, {
+    method: "POST", headers: { "Content-Type": "application/json", "x-telegram-bot-api-secret-token": SECRET },
+    body: JSON.stringify({ message: { chat: { id: chatId }, from: { id: chatId }, text } }),
+  });
+
+  it("админ получает вердикт: ВкусВилл с сервера отвечает", async () => {
+    await send(ADMIN, "/diag");
+    expect(telegramCalls).toHaveLength(1);
+    expect(telegramCalls[0].chat_id).toBe(ADMIN);
+    expect(telegramCalls[0].text).toContain("отвечает");
+  });
+
+  it("если ВкусВилл блокирует сервер — вердикт с HTTP-кодом и подсказкой про хостинг в РФ", async () => {
+    mcpResponse = { ok: false, status: 403, json: async () => ({}) };
+    await send(ADMIN, "/diag");
+    expect(telegramCalls[0].text).toContain("НЕ отвечает");
+    expect(telegramCalls[0].text).toContain("403");
+    expect(telegramCalls[0].text).toContain("РФ");
+  });
+
+  it("обычный пользователь /diag не получает ничего и ничего не запускает", async () => {
+    await send(555, "/diag");
+    expect(telegramCalls.filter((c) => c.text?.includes("ВкусВилл"))).toHaveLength(0);
+  });
+});
+
+describe("Скриншот в поддержку через бота", () => {
+  let db, server, baseUrl, telegramCalls;
+  const realFetch = globalThis.fetch;
+  const SECRET = "photo-secret";
+  const ADMIN = 777;
+
+  beforeEach(async () => {
+    telegramCalls = [];
+    db = openDb(":memory:");
+    server = createApp(db, { botToken: BOT_TOKEN, adminTelegramId: ADMIN, webhookSecret: SECRET });
+    await new Promise((resolve) => server.listen(0, resolve));
+    baseUrl = `http://127.0.0.1:${server.address().port}`;
+    vi.stubGlobal("fetch", vi.fn((url, opts) => {
+      if (String(url).includes("api.telegram.org")) {
+        telegramCalls.push({ method: String(url).split("/").pop(), body: JSON.parse(opts.body) });
+        return Promise.resolve({ ok: true, json: async () => ({ ok: true, result: {} }) });
+      }
+      return realFetch(url, opts);
+    }));
+  });
+  afterEach(async () => {
+    await new Promise((resolve) => server.close(resolve));
+    vi.unstubAllGlobals();
+  });
+  const send = (message) => fetch(`${baseUrl}/telegram/webhook`, {
+    method: "POST", headers: { "Content-Type": "application/json", "x-telegram-bot-api-secret-token": SECRET },
+    body: JSON.stringify({ message }),
+  });
+
+  it("фото с подписью: обращение сохранено, пользователю ack, админу — текст и КОПИЯ самого сообщения", async () => {
+    const res = await send({ message_id: 55, chat: { id: 42 }, from: { id: 42 }, photo: [{ file_id: "x" }], caption: "ошибка при сборке плана" });
+    expect(res.status).toBe(200);
+    expect(listRecentFeedback(db)[0].text).toBe("📎 скриншот: ошибка при сборке плана");
+
+    const methods = telegramCalls.map((c) => `${c.method}:${c.body.chat_id}`);
+    expect(methods).toContain("sendMessage:42"); // ack пользователю
+    expect(methods).toContain(`sendMessage:${ADMIN}`); // текст админу
+    const copy = telegramCalls.find((c) => c.method === "copyMessage");
+    expect(copy.body).toEqual({ chat_id: ADMIN, from_chat_id: 42, message_id: 55 });
+  });
+
+  it("сбой копирования скриншота не ломает приём обращения", async () => {
+    vi.stubGlobal("fetch", vi.fn((url, opts) => {
+      if (String(url).endsWith("/copyMessage")) return Promise.resolve({ ok: false, status: 400, json: async () => ({ ok: false, description: "message to copy not found" }) });
+      if (String(url).includes("api.telegram.org")) return Promise.resolve({ ok: true, json: async () => ({ ok: true, result: {} }) });
+      return realFetch(url, opts);
+    }));
+    const res = await send({ message_id: 56, chat: { id: 42 }, from: { id: 42 }, photo: [{ file_id: "x" }] });
+    expect(res.status).toBe(200);
+    expect(listRecentFeedback(db)).toHaveLength(1);
+  });
+
+  it("обычный текст без вложения — копирования нет", async () => {
+    await send({ message_id: 57, chat: { id: 42 }, from: { id: 42 }, text: "не работает" });
+    expect(telegramCalls.some((c) => c.method === "copyMessage")).toBe(false);
   });
 });

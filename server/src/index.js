@@ -10,6 +10,9 @@ import { runBackup } from "./backup.js";
 import { runProRenewalTick } from "./proRenewal.js";
 import { runPaymentReconcileTick } from "./payments.js";
 import { runMaintenance } from "./maintenance.js";
+import { runCatalogMonitorTick } from "./catalogMonitor.js";
+import { guardTick } from "./http.js";
+import { runPriceWarmTick } from "./vkusvillPrices.js";
 
 const PORT = Number(process.env.PORT) || 3000;
 const DB_PATH = process.env.DB_PATH || "./data.db";
@@ -61,7 +64,7 @@ const db = openDb(DB_PATH);
 // переменной — адрес по умолчанию (GitHub Pages). Понадобится при переезде
 // фронтенда на другой хостинг/домен.
 const WEBAPP_URL = process.env.WEBAPP_URL || undefined;
-const server = createApp(db, { botToken: BOT_TOKEN, adminTelegramId: ADMIN_TELEGRAM_ID, webhookSecret: WEBHOOK_SECRET, yookassa: YOOKASSA, webAppUrl: WEBAPP_URL });
+const server = createApp(db, { botToken: BOT_TOKEN, adminTelegramId: ADMIN_TELEGRAM_ID, webhookSecret: WEBHOOK_SECRET, yookassa: YOOKASSA, webAppUrl: WEBAPP_URL, hashSecret: process.env.HASH_SECRET || undefined });
 
 server.listen(PORT, () => {
   console.log(`meal-planner-server слушает порт ${PORT}, БД: ${DB_PATH}`);
@@ -80,8 +83,9 @@ async function tick() {
     console.error("[scheduler] ошибка тика:", err);
   }
 }
-setInterval(tick, TICK_INTERVAL_MS);
-tick(); // не ждать первый интервал при холодном старте
+const guardedTick = guardTick("scheduler", tick);
+setInterval(guardedTick, TICK_INTERVAL_MS);
+guardedTick(); // не ждать первый интервал при холодном старте
 
 async function digestTick() {
   try {
@@ -92,8 +96,9 @@ async function digestTick() {
   }
 }
 if (ADMIN_TELEGRAM_ID) {
-  setInterval(digestTick, DIGEST_CHECK_INTERVAL_MS);
-  digestTick();
+  const guardedDigest = guardTick("digest", digestTick);
+  setInterval(guardedDigest, DIGEST_CHECK_INTERVAL_MS);
+  guardedDigest();
 } else {
   console.log("[digest] ADMIN_TELEGRAM_ID не задан — ежедневный отчёт отключён");
 }
@@ -107,8 +112,9 @@ async function backupTick() {
   }
 }
 if (ADMIN_TELEGRAM_ID) {
-  setInterval(backupTick, BACKUP_CHECK_INTERVAL_MS);
-  backupTick();
+  const guardedBackup = guardTick("backup", backupTick);
+  setInterval(guardedBackup, BACKUP_CHECK_INTERVAL_MS);
+  guardedBackup();
 } else {
   console.log("[backup] ADMIN_TELEGRAM_ID не задан — периодический бэкап отключён");
 }
@@ -129,8 +135,9 @@ async function proRenewalTick() {
     console.error("[proRenewal] ошибка тика:", err);
   }
 }
-setInterval(proRenewalTick, PRO_RENEWAL_CHECK_INTERVAL_MS);
-proRenewalTick();
+const guardedRenewal = guardTick("proRenewal", proRenewalTick);
+setInterval(guardedRenewal, PRO_RENEWAL_CHECK_INTERVAL_MS);
+guardedRenewal();
 
 // Живой вывод из ревью Pro-плюшек (чат): "лёгкое бесплатное напоминание
 // вернуться" — раньше сброс бесплатного лимита проходил тихо, никто не
@@ -149,8 +156,9 @@ async function freeNudgeTick() {
     console.error("[freeNudge] ошибка тика:", err);
   }
 }
-setInterval(freeNudgeTick, FREE_NUDGE_CHECK_INTERVAL_MS);
-freeNudgeTick();
+const guardedNudge = guardTick("freeNudge", freeNudgeTick);
+setInterval(guardedNudge, FREE_NUDGE_CHECK_INTERVAL_MS);
+guardedNudge();
 
 // Сверка платежей, застрявших в pending (вебхук ЮKassa не дошёл — неверный
 // URL в настройках, простой сервера дольше окна повторов), см. payments.js.
@@ -166,8 +174,9 @@ async function paymentReconcileTick() {
   }
 }
 if (YOOKASSA) {
-  setInterval(paymentReconcileTick, PAYMENT_RECONCILE_INTERVAL_MS);
-  paymentReconcileTick();
+  const guardedReconcile = guardTick("payments", paymentReconcileTick);
+  setInterval(guardedReconcile, PAYMENT_RECONCILE_INTERVAL_MS);
+  guardedReconcile();
 }
 
 // Уборка БД: старые события и устаревший кэш цен (см. maintenance.js).
@@ -182,3 +191,28 @@ function maintenanceTick() {
 }
 setInterval(maintenanceTick, MAINTENANCE_INTERVAL_MS);
 maintenanceTick();
+
+// Каталог ВкусВилл с нашего сервера: проба раз в 10 минут, алерт админу после двух
+// неудач подряд (см. catalogMonitor.js) — и подогрев цен из очереди раз в минуту
+// (см. runPriceWarmTick): названия, до которых не дошли из-за общего лимита ВкусВилла.
+const CATALOG_MONITOR_INTERVAL_MS = 10 * 60 * 1000;
+async function catalogMonitorTick() {
+  try {
+    await runCatalogMonitorTick({ botToken: BOT_TOKEN, adminTelegramId: ADMIN_TELEGRAM_ID });
+  } catch (err) {
+    console.error("[catalogMonitor] ошибка тика:", err);
+  }
+}
+const guardedCatalog = guardTick("catalogMonitor", catalogMonitorTick);
+setInterval(guardedCatalog, CATALOG_MONITOR_INTERVAL_MS);
+guardedCatalog();
+
+async function priceWarmTick() {
+  try {
+    const { warmed } = await runPriceWarmTick(db);
+    if (warmed > 0) console.log(`[priceWarm] подогрето цен: ${warmed}`);
+  } catch (err) {
+    console.error("[priceWarm] ошибка тика:", err);
+  }
+}
+setInterval(guardTick("priceWarm", priceWarmTick), 60 * 1000);

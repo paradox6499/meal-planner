@@ -20,8 +20,17 @@ if (!idArg || !Number.isInteger(telegramUserId)) {
   process.exit(1);
 }
 
+// Тот же секрет, что у сервера (HASH_SECRET, иначе токен бота): по нему пишется
+// "надгробие" удалённого аккаунта — необратимый хэш, из-за которого удаление не
+// обнуляет бесплатный лимит и не даёт заново получить реферальную награду.
+const hashSecret = process.env.HASH_SECRET || process.env.TELEGRAM_BOT_TOKEN;
+if (!hashSecret) {
+  console.error("Нужна переменная HASH_SECRET (или TELEGRAM_BOT_TOKEN) — как у сервера; на Render в Shell они уже заданы.");
+  process.exit(1);
+}
+
 const db = openDb(DB_PATH);
-const deleted = deleteUserData(db, telegramUserId);
+const deleted = deleteUserData(db, telegramUserId, { hashSecret });
 console.log(`Готово: данные пользователя ${telegramUserId} удалены (БД: ${DB_PATH})`);
 console.log(JSON.stringify(deleted, null, 2));
 console.log("Платежи сохранены (бухучёт). Не забудьте про копии в бэкапах, если они есть.");
