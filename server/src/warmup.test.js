@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { runWarmupTick, seedRecipeTargets, ingredientNamesFromRecipesPage, RECIPES_REFRESH_AFTER_MS, RECIPES_PER_TICK } from "./warmup.js";
 import { clearProxyState, peekProxyCache, refreshProxyEntry, callVkusvillCached, proxyCacheKey, RECIPES_CACHE_TTL_MS, PROXY_CACHE_TTL_MS } from "./vkusvillProxy.js";
 import { resetUpstreamGate, clearWarmQueue, getWarmQueueSize, getUpstreamLoad, UPSTREAM_MAX_PER_MINUTE, resolveIngredientPricesWithCache, WARM_REFRESH_AFTER_MS, namesNeedingRefresh } from "./vkusvillPrices.js";
-import { openDb, recordWarmTarget, listWarmTargets, purgeOldWarmTargets, upsertIngredientPrices, getIngredientPricesByName } from "./db.js";
+import { openDb, recordPlanGeneration, recordWarmTarget, listWarmTargets, purgeOldWarmTargets, upsertIngredientPrices, getIngredientPricesByName } from "./db.js";
 import { runMaintenance } from "./maintenance.js";
 
 const mcpOk = (data) => ({ ok: true, json: async () => ({ jsonrpc: "2.0", id: 1, result: { content: [{ text: JSON.stringify({ ok: true, data }) }] } }) });
@@ -92,6 +92,16 @@ describe("спрос на страницы (warm_targets)", () => {
     recordWarmTarget(db, "new", "{}", "2026-10-19T00:00:00.000Z");
     runMaintenance(db, now);
     expect(listWarmTargets(db, { sinceISO: "2020-01-01T00:00:00.000Z", limit: 10 }).map((t) => t.key)).toEqual(["new"]);
+  });
+});
+
+describe("журнал сборок и уборка", () => {
+  it("уборка чистит журнал старше 400 дней, свежие строки остаются", () => {
+    const now = new Date("2026-10-20T00:00:00.000Z");
+    recordPlanGeneration(db, { telegramUserId: 1, source: "credit", createdAtISO: "2025-01-01T00:00:00.000Z" });
+    recordPlanGeneration(db, { telegramUserId: 1, source: "free", createdAtISO: "2026-10-19T00:00:00.000Z" });
+    runMaintenance(db, now);
+    expect(db.prepare("SELECT source FROM plan_generations").all().map((r) => r.source)).toEqual(["free"]);
   });
 });
 

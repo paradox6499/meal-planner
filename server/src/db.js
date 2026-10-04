@@ -326,6 +326,33 @@ function migrateLegacyColumns(db) {
              AND EXISTS (SELECT 1 FROM referrals r WHERE r.referrer_telegram_id = users.telegram_user_id AND r.rewarded_at IS NOT NULL)`);
 }
 
+// Миграция 3: журнал сборок планов — источник правды для бесплатного лимита и
+// учёта кредитов (раньше это считалось по событиям аналитики, см. plan_generations
+// ниже). Существующие сборки переносятся из events с теми же датами, поэтому ничей
+// лимит при переходе не меняется.
+function migratePlanGenerations(db) {
+  db.exec(`
+    -- Одна строка — одна реальная сборка плана. source — ЧЕМ она оплачена:
+    -- 'free' (бесплатный недельный слот), 'credit' (купленный кредит «ещё один
+    -- план»), 'pro' (действующая подписка). Лимит читает ТОЛЬКО эту таблицу:
+    -- events — аналитика, её чистят по сроку, режут дневным потолком и удаляют
+    -- вместе с аккаунтом, а право на бесплатный план от этого зависеть не должно.
+    CREATE TABLE IF NOT EXISTS plan_generations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      telegram_user_id INTEGER NOT NULL,
+      source TEXT NOT NULL CHECK (source IN ('free', 'credit', 'pro')),
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_plan_generations_user ON plan_generations (telegram_user_id, source, created_at);
+    INSERT INTO plan_generations (telegram_user_id, source, created_at)
+      SELECT telegram_user_id,
+             CASE event_name WHEN 'plan_generated' THEN 'free' WHEN 'plan_generated_credit' THEN 'credit' ELSE 'pro' END,
+             created_at
+      FROM events
+      WHERE event_name IN ('plan_generated', 'plan_generated_credit', 'plan_generated_pro') AND telegram_user_id IS NOT NULL;
+  `);
+}
+
 // ---------- Версионирование схемы ----------
 //
 // Версия схемы живёт в самой БД (PRAGMA user_version), а не в догадках «есть ли
@@ -345,6 +372,7 @@ function migrateLegacyColumns(db) {
 export const MIGRATIONS = [
   { version: 1, name: "baseline", up: migrateBaseline },
   { version: 2, name: "legacy-columns", up: migrateLegacyColumns },
+  { version: 3, name: "plan-generations", up: migratePlanGenerations },
   // Добавляйте новые миграции здесь.
 ];
 export const SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;
@@ -713,12 +741,12 @@ export function getUsersDueForFreeNudge(db, { nowISO, freeWindowMs, graceMs }) {
   const eligibleSince = new Date(new Date(nowISO).getTime() - freeWindowMs - graceMs).toISOString();
   const rows = db
     .prepare(
-      `SELECT e.telegram_user_id AS telegram_user_id, MAX(e.created_at) AS last_plan_at,
+      `SELECT g.telegram_user_id AS telegram_user_id, MAX(g.created_at) AS last_plan_at,
               u.is_pro AS is_pro, u.pro_until AS pro_until, u.free_nudge_sent_at AS free_nudge_sent_at
-       FROM events e
-       LEFT JOIN users u ON u.telegram_user_id = e.telegram_user_id
-       WHERE e.event_name = 'plan_generated'
-       GROUP BY e.telegram_user_id
+       FROM plan_generations g
+       LEFT JOIN users u ON u.telegram_user_id = g.telegram_user_id
+       WHERE g.source = 'free'
+       GROUP BY g.telegram_user_id
        HAVING last_plan_at <= ? AND last_plan_at > ?`
     )
     .all(eligibleUntil, eligibleSince);
@@ -868,17 +896,21 @@ export function setFamilyPantryItem(db, familyId, name, present) {
   }
 }
 
-/** Считает БЕСПЛАТНЫЕ сборки в окне — события plan_generated. Пишет их
- * только сервер, в POST /api/plan/generate (клиентское /events с этим именем
- * игнорируется), по одному на реальную сборку. Сборки за счёт купленного
- * кредита и аналитика НЕ сюда: они идут как plan_generated_credit, поэтому
- * usedThisWeek не раздувается кредитами. Сборка целиком на клиенте, так что
+/** Записывает одну реальную сборку плана в журнал (plan_generations). Пишет
+ * только сервер, в POST /api/plan/generate. source: 'free' | 'credit' | 'pro'. */
+export function recordPlanGeneration(db, { telegramUserId, source, createdAtISO }) {
+  db.prepare("INSERT INTO plan_generations (telegram_user_id, source, created_at) VALUES (?, ?, ?)").run(telegramUserId, source, createdAtISO);
+}
+
+/** Считает БЕСПЛАТНЫЕ сборки в окне — строки журнала plan_generations с
+ * source='free'. Сборки за счёт купленного кредита и Pro идут с другим source,
+ * поэтому usedThisWeek не раздувается кредитами. Сборка целиком на клиенте, так что
  * лимит — не абсолютная защита (можно написать свой клиент, который не
  * вызывает /api/plan/generate); цена обхода — свои планы бесплатно, не деньги
  * и не данные, поэтому осознанно не переносим генерацию на сервер. */
 export function countPlanGenerationsSince(db, telegramUserId, sinceISO) {
   const row = db
-    .prepare(`SELECT COUNT(*) AS count FROM events WHERE telegram_user_id = ? AND event_name = 'plan_generated' AND created_at >= ?`)
+    .prepare(`SELECT COUNT(*) AS count FROM plan_generations WHERE telegram_user_id = ? AND source = 'free' AND created_at >= ?`)
     .get(telegramUserId, sinceISO);
   return row.count;
 }
@@ -888,7 +920,7 @@ export function countPlanGenerationsSince(db, telegramUserId, sinceISO) {
  * раньше "сейчас + 7 дней", хотя окно скользящее от самой сборки). */
 export function listPlanGenerationTimesSince(db, telegramUserId, sinceISO) {
   return db
-    .prepare(`SELECT created_at FROM events WHERE telegram_user_id = ? AND event_name = 'plan_generated' AND created_at >= ? ORDER BY created_at ASC`)
+    .prepare(`SELECT created_at FROM plan_generations WHERE telegram_user_id = ? AND source = 'free' AND created_at >= ? ORDER BY created_at ASC`)
     .all(telegramUserId, sinceISO)
     .map((r) => r.created_at);
 }
@@ -1036,6 +1068,12 @@ export function purgeOldWarmTargets(db, beforeISO) {
   return Number(db.prepare("DELETE FROM warm_targets WHERE last_seen_at < ?").run(beforeISO).changes);
 }
 
+/** Журнал сборок: бесплатному лимиту нужны последние 7 дней, остальное (кредиты,
+ * Pro) — только для разбора споров, поэтому срок большой, но не вечный. */
+export function purgeOldPlanGenerations(db, beforeISO) {
+  return Number(db.prepare("DELETE FROM plan_generations WHERE created_at < ?").run(beforeISO).changes);
+}
+
 /** Размер файла БД — для дайджеста админу (диск на Render небольшой). */
 export function getDbSizeBytes(db) {
   const pageCount = db.prepare("PRAGMA page_count").get().page_count;
@@ -1065,7 +1103,7 @@ export function deleteUserData(db, telegramUserId, { hashSecret = null, nowISO =
     // "Надгробие" — до удаления событий (из них берётся дата последней
     // бесплатной сборки). Без hashSecret (старые вызовы/тесты) не пишется.
     if (hashSecret) {
-      const lastFree = db.prepare("SELECT MAX(created_at) AS at FROM events WHERE telegram_user_id = ? AND event_name = 'plan_generated'").get(telegramUserId)?.at ?? null;
+      const lastFree = db.prepare("SELECT MAX(created_at) AS at FROM plan_generations WHERE telegram_user_id = ? AND source = 'free'").get(telegramUserId)?.at ?? null;
       db.prepare(
         `INSERT INTO deleted_accounts (id_hash, deleted_at, last_free_plan_at) VALUES (?, ?, ?)
          ON CONFLICT(id_hash) DO UPDATE SET deleted_at = excluded.deleted_at,
@@ -1083,6 +1121,7 @@ export function deleteUserData(db, telegramUserId, { hashSecret = null, nowISO =
     }
     del("meal_slots", "DELETE FROM meal_slots WHERE telegram_user_id = ?", telegramUserId);
     del("events", "DELETE FROM events WHERE telegram_user_id = ?", telegramUserId);
+    del("plan_generations", "DELETE FROM plan_generations WHERE telegram_user_id = ?", telegramUserId);
     del("plan_history", "DELETE FROM plan_history WHERE telegram_user_id = ?", telegramUserId);
     del("feedback", "DELETE FROM feedback WHERE telegram_user_id = ?", telegramUserId);
     del("referrals", "DELETE FROM referrals WHERE referrer_telegram_id = ? OR referred_telegram_id = ?", telegramUserId, telegramUserId);

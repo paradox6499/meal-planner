@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { createHmac } from "node:crypto";
 import { request as httpRequest } from "node:http";
-import { openDb, findCandidateSlots, summarizeEventsSince, setUserPro, insertEvent, listPlanHistory, listRecentFeedback, createPendingPayment, getPaymentByYookassaId, getUserPro, getExtraPlanCredits, addExtraPlanCredit, extendUserPro, getProUntil } from "./db.js";
+import { openDb, findCandidateSlots, summarizeEventsSince, setUserPro, insertEvent, recordPlanGeneration, listPlanHistory, listRecentFeedback, createPendingPayment, getPaymentByYookassaId, getUserPro, getExtraPlanCredits, addExtraPlanCredit, extendUserPro, getProUntil } from "./db.js";
 import { createApp, parsePlanRequest, parseEventRequest, parseSavePlanRequest, parseMealTimesRequest, parsePricesRequest, computePlanStatus, FREE_PLANS_PER_WEEK, EXTRA_PLAN_PRODUCT, EXTRA_PLAN_PRICE_RUB, PRO_PRICE_RUB, RATE_LIMIT_MAX_REQUESTS, PRICES_RATE_LIMIT_MAX_REQUESTS, PAY_RATE_LIMIT_MAX_REQUESTS, EVENTS_PER_USER_PER_DAY } from "./app.js";
 import { clearRateLimitState } from "./rateLimit.js";
 import { clearReconcileState } from "./payments.js";
@@ -376,6 +376,37 @@ describe("HTTP-сервер", () => {
     expect(getExtraPlanCredits(db, 42)).toBe(1);
   });
 
+  // Журнал plan_generations — источник правды для лимита: аналитику (events) чистят по
+  // сроку, режут потолком и удаляют с аккаунтом, а право на бесплатный план от этого не зависит.
+  it("лимит не зависит от аналитики: очистка/потеря events не открывает новый бесплатный план", async () => {
+    await generateRequest(); // бесплатная
+    db.exec("DELETE FROM events"); // например, уборка по сроку или удаление событий
+    const res = await generateRequest();
+    expect(res.status).toBe(403);
+    const rows = db.prepare("SELECT source FROM plan_generations WHERE telegram_user_id = 42").all();
+    expect(rows.map((r) => r.source)).toEqual(["free"]);
+  });
+
+  it("каждая сборка пишется в журнал со своим источником (free, credit, pro) и в аналитику", async () => {
+    addExtraPlanCredit(db, 42, 1);
+    await generateRequest(); // free
+    await generateRequest(); // credit
+    setUserPro(db, 42, true);
+    await generateRequest(); // pro
+    const sources = db.prepare("SELECT source FROM plan_generations WHERE telegram_user_id = 42 ORDER BY id").all().map((r) => r.source);
+    expect(sources).toEqual(["free", "credit", "pro"]);
+    const names = db.prepare("SELECT event_name FROM events WHERE telegram_user_id = 42 ORDER BY id").all().map((r) => r.event_name);
+    expect(names).toEqual(["plan_generated", "plan_generated_credit", "plan_generated_pro"]);
+  });
+
+  it("клиентские события plan_generated_credit/pro через /events на лимит не влияют", async () => {
+    for (const eventName of ["plan_generated_credit", "plan_generated_pro", "plan_generated"]) {
+      await fetch(`${baseUrl}/events`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ initData: validInitData(42), eventName }) });
+    }
+    expect((await generateRequest()).status).toBe(200); // слот по-прежнему свободен
+    expect(db.prepare("SELECT COUNT(*) c FROM plan_generations WHERE telegram_user_id = 42").get().c).toBe(1);
+  });
+
   it("POST /api/plan/generate: лимит и кредиты исчерпаны -> 403", async () => {
     await generateRequest(); // бесплатная
     const second = await generateRequest(); // без кредитов
@@ -423,7 +454,7 @@ describe("HTTP-сервер", () => {
   });
 
   it("POST /api/plan-status: free-пользователь, уже исчерпавший лимит — canGenerate:false", async () => {
-    insertEvent(db, { telegramUserId: 42, eventName: "plan_generated", props: null, createdAtISO: new Date().toISOString() });
+    recordPlanGeneration(db, { telegramUserId: 42, source: "free", createdAtISO: new Date().toISOString() });
     const res = await fetch(`${baseUrl}/api/plan-status`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -436,7 +467,7 @@ describe("HTTP-сервер", () => {
 
   it("POST /api/plan-status: Pro-пользователь может генерировать, даже исчерпав лимит", async () => {
     setUserPro(db, 42, true);
-    insertEvent(db, { telegramUserId: 42, eventName: "plan_generated", props: null, createdAtISO: new Date().toISOString() });
+    recordPlanGeneration(db, { telegramUserId: 42, source: "free", createdAtISO: new Date().toISOString() });
     const res = await fetch(`${baseUrl}/api/plan-status`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },

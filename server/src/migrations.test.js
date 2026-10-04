@@ -3,7 +3,7 @@ import { DatabaseSync } from "node:sqlite";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { openDb, runMigrations, getSchemaVersion, MIGRATIONS, SCHEMA_VERSION } from "./db.js";
+import { openDb, runMigrations, getSchemaVersion, MIGRATIONS, SCHEMA_VERSION, countPlanGenerationsSince } from "./db.js";
 
 let dir;
 afterEach(() => { if (dir) rmSync(dir, { recursive: true, force: true }); dir = null; });
@@ -68,6 +68,35 @@ describe("версионирование схемы", () => {
     // и новые таблицы создались
     const tables = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((r) => r.name);
     expect(tables).toEqual(expect.arrayContaining(["deleted_accounts", "warm_targets", "events", "plan_history"]));
+    db.close();
+  });
+
+  it("миграция 3 переносит сборки из событий в журнал с теми же датами и источниками — лимит не меняется", () => {
+    const path = tmpPath();
+    // база версии 2: уже есть events, журнала ещё нет
+    const old = new DatabaseSync(path);
+    runMigrations(old, MIGRATIONS.slice(0, 2));
+    old.exec(`
+      INSERT INTO events (telegram_user_id, event_name, props_json, created_at) VALUES
+        (7, 'plan_generated', NULL, '2026-10-01T10:00:00.000Z'),
+        (7, 'plan_generated_credit', NULL, '2026-10-02T10:00:00.000Z'),
+        (7, 'plan_generated_pro', NULL, '2026-10-03T10:00:00.000Z'),
+        (7, 'app_opened', NULL, '2026-10-03T11:00:00.000Z'),
+        (NULL, 'plan_generated', NULL, '2026-10-03T12:00:00.000Z');
+    `);
+    expect(getSchemaVersion(old)).toBe(2);
+    old.close();
+
+    const db = openDb(path);
+    expect(getSchemaVersion(db)).toBe(SCHEMA_VERSION);
+    const rows = db.prepare("SELECT telegram_user_id, source, created_at FROM plan_generations ORDER BY created_at").all();
+    expect(rows.map((r) => [r.telegram_user_id, r.source, r.created_at])).toEqual([
+      [7, "free", "2026-10-01T10:00:00.000Z"],
+      [7, "credit", "2026-10-02T10:00:00.000Z"],
+      [7, "pro", "2026-10-03T10:00:00.000Z"],
+    ]);
+    // бесплатный лимит считается по журналу так же, как раньше по событиям
+    expect(countPlanGenerationsSince(db, 7, "2026-09-30T00:00:00.000Z")).toBe(1);
     db.close();
   });
 

@@ -11,7 +11,7 @@ import {
   createPendingPayment, getPaymentByYookassaId,
   countRewardedReferrals,
   getExtraPlanCredits, consumeExtraPlanCredit, getProUntil, getProEndedAt,
-  recordWarmTarget, countEventsSince, deleteUserData, getFamilyForUser, getFamilyByInviteCode, freeGenerationTimesSince,
+  recordWarmTarget, recordPlanGeneration, countEventsSince, deleteUserData, getFamilyForUser, getFamilyByInviteCode, freeGenerationTimesSince,
 } from "./db.js";
 import { planReplyForUpdate, buildDiagText, buildWelcomeText, buildFeedbackAckText, buildFeedbackListText, buildFeedbackAdminNotifyText, buildSupportPromptText } from "./webhook.js";
 import { sendTelegramMessage, copyTelegramMessage } from "./telegram.js";
@@ -264,9 +264,9 @@ async function readAuthenticatedBody(req, botToken) {
  * now параметром).
  *
  * usedThisWeek — сколько раз БЕСПЛАТНЫЙ лимит уже был использован за окно
- * (countPlanGenerationsSince считает только event_name='plan_generated' —
- * сборки, оплаченные кредитом, пишутся отдельным именем
- * 'plan_generated_credit' и сюда не попадают, см. POST /api/plan/generate).
+ * (countPlanGenerationsSince считает только строки журнала plan_generations
+ * с source='free' — сборки за кредит и Pro пишутся с другим source и сюда не
+ * попадают, см. POST /api/plan/generate).
  * extraPlanCredits — остаток КУПЛЕННЫХ кредитов "ещё один план на этой
  * неделе" прямо сейчас (getExtraPlanCredits), а не что-то, что нужно
  * складывать с usedThisWeek: раньше (до фикса из тех. аудита) формула была
@@ -509,7 +509,8 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
       if (isPro) {
         // Отдельное имя (раньше plan_generated): сборки периода Pro иначе после
         // его окончания до 7 дней блокировали бесплатный план (аудит 04.10.2026, п. 4.5).
-        insertEvent(db, { telegramUserId: auth.telegramUserId, eventName: "plan_generated_pro", props: null, createdAtISO: nowISO });
+        recordPlanGeneration(db, { telegramUserId: auth.telegramUserId, source: "pro", createdAtISO: nowISO }); // источник правды для лимита
+        insertEvent(db, { telegramUserId: auth.telegramUserId, eventName: "plan_generated_pro", props: null, createdAtISO: nowISO }); // и аналитика (дайджест)
         return respondAndReward("pro");
       }
 
@@ -518,13 +519,15 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
       // удаление данных не должно обнулять бесплатный лимит.
       const freeUsedThisWeek = freeGenerationTimesSince(db, auth.telegramUserId, sinceISO, accountHashSecret).length;
       if (freeUsedThisWeek < FREE_PLANS_PER_WEEK) {
-        insertEvent(db, { telegramUserId: auth.telegramUserId, eventName: "plan_generated", props: null, createdAtISO: nowISO });
+        recordPlanGeneration(db, { telegramUserId: auth.telegramUserId, source: "free", createdAtISO: nowISO }); // источник правды для лимита
+        insertEvent(db, { telegramUserId: auth.telegramUserId, eventName: "plan_generated", props: null, createdAtISO: nowISO }); // и аналитика (дайджест)
         return respondAndReward("free");
       }
 
       const extraPlanCredits = getExtraPlanCredits(db, auth.telegramUserId);
       if (extraPlanCredits > 0) {
-        insertEvent(db, { telegramUserId: auth.telegramUserId, eventName: "plan_generated_credit", props: null, createdAtISO: nowISO });
+        recordPlanGeneration(db, { telegramUserId: auth.telegramUserId, source: "credit", createdAtISO: nowISO }); // источник правды для лимита
+        insertEvent(db, { telegramUserId: auth.telegramUserId, eventName: "plan_generated_credit", props: null, createdAtISO: nowISO }); // и аналитика (дайджест)
         consumeExtraPlanCredit(db, auth.telegramUserId);
         return respondAndReward("credit");
       }

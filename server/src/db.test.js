@@ -12,7 +12,7 @@ import {
   extendUserPro, createPendingPayment, updatePaymentStatus, summarizePaymentsSince,
   getUsersWithProExpiringSoon,
   addExtraPlanCredit, getExtraPlanCredits, consumeExtraPlanCredit,
-  getUsersDueForFreeNudge, markFreeNudgeSent,
+  getUsersDueForFreeNudge, markFreeNudgeSent, recordPlanGeneration,
 } from "./db.js";
 
 // Живой вывод из ревью Pro-плюшек (чат): "Напоминания от бота" рекламируются
@@ -295,10 +295,10 @@ describe("countPlanGenerationsSince", () => {
   });
 
   it("считает только 'plan_generated' конкретного пользователя после sinceISO", () => {
-    insertEvent(db, { telegramUserId: 1, eventName: "plan_generated", props: null, createdAtISO: "2026-09-10T09:00:00Z" });
-    insertEvent(db, { telegramUserId: 1, eventName: "plan_generated", props: null, createdAtISO: "2026-09-09T09:00:00Z" }); // до sinceISO
+    recordPlanGeneration(db, { telegramUserId: 1, source: "free", createdAtISO: "2026-09-10T09:00:00Z" });
+    recordPlanGeneration(db, { telegramUserId: 1, source: "free", createdAtISO: "2026-09-09T09:00:00Z" }); // до sinceISO
     insertEvent(db, { telegramUserId: 1, eventName: "share_clicked", props: null, createdAtISO: "2026-09-10T09:05:00Z" }); // не тот event
-    insertEvent(db, { telegramUserId: 2, eventName: "plan_generated", props: null, createdAtISO: "2026-09-10T09:00:00Z" }); // другой юзер
+    recordPlanGeneration(db, { telegramUserId: 2, source: "free", createdAtISO: "2026-09-10T09:00:00Z" }); // другой юзер
     expect(countPlanGenerationsSince(db, 1, "2026-09-10T00:00:00Z")).toBe(1);
   });
 });
@@ -480,8 +480,8 @@ describe("getUsersDueForFreeNudge / markFreeNudgeSent", () => {
   });
 
   function planGeneratedAt(telegramUserId, daysAgo) {
-    insertEvent(db, {
-      telegramUserId, eventName: "plan_generated", props: null,
+    recordPlanGeneration(db, {
+      telegramUserId, source: "free",
       createdAtISO: new Date(new Date(NOW_ISO).getTime() - daysAgo * 24 * 3_600_000).toISOString(),
     });
   }

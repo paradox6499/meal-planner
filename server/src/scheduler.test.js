@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { openDb, saveUserPlan, findCandidateSlots, setUserPro, insertEvent, extendUserPro, getUsersDueForFreeNudge } from "./db.js";
+import { openDb, saveUserPlan, findCandidateSlots, setUserPro, insertEvent, recordPlanGeneration, extendUserPro, getUsersDueForFreeNudge } from "./db.js";
 import { runReminderTick, runFreeNudgeTick } from "./scheduler.js";
 
 vi.mock("./telegram.js", () => ({
@@ -100,7 +100,7 @@ describe("runFreeNudgeTick", () => {
   });
 
   it("отправляет напоминание тому, у кого лимит только что сбросился, и помечает отправленным", async () => {
-    insertEvent(db, { telegramUserId: 1, eventName: "plan_generated", props: null, createdAtISO: "2026-09-03T09:00:00.000Z" }); // ровно 7 дней назад
+    recordPlanGeneration(db, { telegramUserId: 1, source: "free", createdAtISO: "2026-09-03T09:00:00.000Z" }); // ровно 7 дней назад
     sendTelegramMessage.mockResolvedValue({ message_id: 1 });
 
     const now = new Date("2026-09-10T09:00:00.000Z");
@@ -116,14 +116,14 @@ describe("runFreeNudgeTick", () => {
   });
 
   it("не отправляет, если лимит ещё не сбросился (план был недавно)", async () => {
-    insertEvent(db, { telegramUserId: 1, eventName: "plan_generated", props: null, createdAtISO: "2026-09-09T09:00:00.000Z" }); // 1 день назад
+    recordPlanGeneration(db, { telegramUserId: 1, source: "free", createdAtISO: "2026-09-09T09:00:00.000Z" }); // 1 день назад
     const results = await runFreeNudgeTick(db, "BOT:TOKEN", new Date("2026-09-10T09:00:00.000Z"));
     expect(results).toEqual([]);
     expect(sendTelegramMessage).not.toHaveBeenCalled();
   });
 
   it("не отправляет Pro-пользователю, даже если формально попадает в окно", async () => {
-    insertEvent(db, { telegramUserId: 1, eventName: "plan_generated", props: null, createdAtISO: "2026-09-03T09:00:00.000Z" });
+    recordPlanGeneration(db, { telegramUserId: 1, source: "free", createdAtISO: "2026-09-03T09:00:00.000Z" });
     setUserPro(db, 1, true);
     const results = await runFreeNudgeTick(db, "BOT:TOKEN", new Date("2026-09-10T09:00:00.000Z"));
     expect(results).toEqual([]);
@@ -131,8 +131,8 @@ describe("runFreeNudgeTick", () => {
   });
 
   it("ошибка отправки одному пользователю не мешает остальным и не помечает отправленным", async () => {
-    insertEvent(db, { telegramUserId: 1, eventName: "plan_generated", props: null, createdAtISO: "2026-09-03T09:00:00.000Z" });
-    insertEvent(db, { telegramUserId: 2, eventName: "plan_generated", props: null, createdAtISO: "2026-09-03T09:00:00.000Z" });
+    recordPlanGeneration(db, { telegramUserId: 1, source: "free", createdAtISO: "2026-09-03T09:00:00.000Z" });
+    recordPlanGeneration(db, { telegramUserId: 2, source: "free", createdAtISO: "2026-09-03T09:00:00.000Z" });
     sendTelegramMessage.mockImplementation(async (token, chatId) => {
       if (chatId === 1) throw new Error("Forbidden: bot was blocked by the user");
       return { message_id: 1 };
