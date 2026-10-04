@@ -51,6 +51,9 @@ const EVENT_LABELS = {
   plan_slot_removed: "удалили план (Pro)",
   recipe_video_search_clicked: "открыли поиск видео-рецепта",
   profile_auto_saved: "профиль сохранился сам",
+  catalog_fallback: "сборок БЕЗ каталога ВкусВилл",
+  account_delete_clicked: "нажали «Удалить мои данные»",
+  plan_generated_pro: "планов собрано (Pro)",
 };
 
 // paymentsSummary — { count, totalRub } (см. db.js:summarizePaymentsSince).

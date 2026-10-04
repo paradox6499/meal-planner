@@ -7,8 +7,14 @@ import { toVkusvillQuantity, searchProducts, createCartLink, clearMcpCache, reso
 // прямой resolvePrices(), то есть поведение всех остальных тестов файла не
 // меняется ни на йоту. Явный мок нужен именно затем, чтобы отдельно
 // проверить путь "бэкенд ответил" без поднятия настоящего сервера/Telegram.
-vi.mock("./backend.js", () => ({ resolvePricesViaBackend: vi.fn() }));
-import { resolvePricesViaBackend } from "./backend.js";
+vi.mock("./backend.js", () => ({
+  resolvePricesViaBackend: vi.fn(),
+  // Прокси каталога (через наш сервер) по умолчанию "недоступен" — прежние тесты
+  // про прямой путь не меняются; отдельный describe ниже включает его явно.
+  isCatalogProxyAvailable: vi.fn(() => false),
+  callCatalogViaBackend: vi.fn(),
+}));
+import { resolvePricesViaBackend, isCatalogProxyAvailable, callCatalogViaBackend } from "./backend.js";
 
 // Используется и при сборке реальной корзины, и при пересчёте "Итого за
 // продукты" на замену товара (ResultView в App.jsx) — если эта функция
@@ -455,5 +461,66 @@ describe("buildCartFromShoppingList — общий серверный кэш ц�
     ]);
     expect(matchedCount).toBe(1);
     expect(resolvePricesViaBackend).not.toHaveBeenCalled();
+  });
+});
+
+
+// Внутри приложения вызовы идут через наш сервер (CORS-preflight 04.10.2026).
+describe("callToolOnce: прокси каталога через бэкенд", () => {
+  beforeEach(() => {
+    clearMcpCache();
+    vi.stubGlobal("fetch", vi.fn());
+    isCatalogProxyAvailable.mockReturnValue(true);
+    callCatalogViaBackend.mockReset();
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    isCatalogProxyAvailable.mockReturnValue(false);
+  });
+
+  it("при доступном прокси ходит ТОЛЬКО через него, прямого запроса к mcp.vkusvill.ru нет", async () => {
+    callCatalogViaBackend.mockResolvedValue({ items: [{ xml_id: 1 }] });
+    const data = await searchProducts({ q: "молоко" });
+    expect(data.items).toHaveLength(1);
+    expect(callCatalogViaBackend).toHaveBeenCalledWith("vkusvill_products_search", expect.objectContaining({ q: "молоко" }), expect.any(Number));
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("результат прокси кэшируется на клиенте (read-only), создающий вызов — нет", async () => {
+    callCatalogViaBackend.mockResolvedValue({ items: [] });
+    await searchProducts({ q: "молоко" });
+    await searchProducts({ q: "молоко" });
+    expect(callCatalogViaBackend).toHaveBeenCalledTimes(1);
+    callCatalogViaBackend.mockResolvedValue({ link: "x" });
+    await createCartLink([{ xml_id: 1, q: 1 }]);
+    await createCartLink([{ xml_id: 1, q: 1 }]);
+    expect(callCatalogViaBackend).toHaveBeenCalledTimes(3);
+  });
+
+  it("прокси недоступен (старый сервер/сеть) -> запасной прямой запрос", async () => {
+    callCatalogViaBackend.mockRejectedValue(Object.assign(new Error("прокси недоступен"), { proxyUnavailable: true }));
+    fetch.mockResolvedValue(mockMcpResponse({ items: [{ xml_id: 7 }] }));
+    const data = await searchProducts({ q: "хлеб" });
+    expect(data.items[0].xml_id).toBe(7);
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("прокси ответил ошибкой каталога (ВкусВилл не ответил) -> ошибка пробрасывается, прямой запрос НЕ делается", async () => {
+    callCatalogViaBackend.mockRejectedValue(Object.assign(new Error("VkusVill MCP: HTTP 403"), { httpStatus: 403 }));
+    await expect(searchProducts({ q: "сыр" })).rejects.toThrow(/403/);
+    expect(fetch).not.toHaveBeenCalled();
+    expect(callCatalogViaBackend).toHaveBeenCalledTimes(1); // 403 не ретраится
+  });
+
+  it("429 от прокси (лимит) ретраится с паузой и в итоге проходит", async () => {
+    vi.useFakeTimers();
+    callCatalogViaBackend
+      .mockRejectedValueOnce(Object.assign(new Error("лимит"), { httpStatus: 429 }))
+      .mockResolvedValueOnce({ items: [{ xml_id: 3 }] });
+    const pending = searchProducts({ q: "яйца" });
+    await vi.advanceTimersByTimeAsync(5000);
+    expect((await pending).items[0].xml_id).toBe(3);
+    expect(callCatalogViaBackend).toHaveBeenCalledTimes(2);
+    vi.useRealTimers();
   });
 });

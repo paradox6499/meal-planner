@@ -434,16 +434,23 @@ export async function reportPlanGenerated() {
 export async function claimReferral(referrerTelegramId) {
   const backendUrl = getBackendUrl();
   const initData = currentInitData();
-  if (!backendUrl || !initData) return;
+  if (!backendUrl || !initData) return null;
 
   try {
-    await fetchWithTimeout(`${backendUrl}/api/referral/claim`, {
+    const res = await fetchWithTimeout(`${backendUrl}/api/referral/claim`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ initData, referrerTelegramId }),
     });
+    const data = await res.json().catch(() => null);
+    // Возвращаем исход, чтобы экран мог объяснить, почему бонуса нет (раньше
+    // отказ — например "вы уже пользовались приложением" — не видел никто, и
+    // проверка реферальной ссылки на своём втором аккаунте выглядела как
+    // "ничего не работает").
+    return data?.ok ? { claimed: !!data.claimed, reason: data.reason ?? null } : null;
   } catch (err) {
     console.warn("Не удалось зарегистрировать реферала:", err.message);
+    return null;
   }
 }
 
@@ -600,4 +607,51 @@ export async function deleteAccount() {
   } catch (err) {
     return { ok: false, error: err.message };
   }
+}
+
+/** Можно ли вообще ходить в каталог ВкусВилл через наш сервер. */
+export function isCatalogProxyAvailable() {
+  return !!getBackendUrl() && !!currentInitData();
+}
+
+/** Вызов инструмента MCP ВкусВилл ЧЕРЕЗ наш сервер (POST /api/vkusvill/call).
+ * Зачем: браузер и WebView Telegram не могут ходить в mcp.vkusvill.ru
+ * напрямую — CORS-preflight (OPTIONS) там отвечает 401 без CORS-заголовков
+ * (с 04.10.2026; подробности — server/src/vkusvillProxy.js), и каждый план
+ * собирался из базового набора рецептов без цен.
+ *
+ * Бросает ошибку с proxyUnavailable:true, если САМ прокси недоступен (сервера
+ * нет, старая версия без эндпоинта, нет авторизации) — тогда вызывающий код
+ * может попробовать прямой запрос (работает вне браузера/в разработке). Если
+ * прокси ответил, а ВкусВилл — нет, ошибка обычная, с httpStatus: 429 (наш или
+ * общий лимит — стоит повторить с паузой) либо код ответа ВкусВилла (повторять
+ * бессмысленно, сервер уже сделал свои повторы). */
+export async function callCatalogViaBackend(tool, args, timeoutMs = 25_000) {
+  const backendUrl = getBackendUrl();
+  const initData = currentInitData();
+  let res;
+  try {
+    res = await fetchWithTimeout(`${backendUrl}/api/vkusvill/call`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ initData, tool, args }),
+      timeoutMs,
+    });
+  } catch (err) {
+    const e = new Error(`прокси каталога недоступен (${err.message})`);
+    e.proxyUnavailable = true;
+    throw e;
+  }
+  const data = await res.json().catch(() => null);
+  if (res.ok && data?.ok) return data.data;
+
+  if (!data || res.status === 401 || res.status === 404 || res.status === 503) {
+    const e = new Error(`прокси каталога недоступен (HTTP ${res.status})`);
+    e.proxyUnavailable = true;
+    throw e;
+  }
+  const e = new Error(`VkusVill MCP: ${data.error || `HTTP ${res.status}`}`);
+  e.httpStatus = res.status === 429 ? 429 : (data.upstreamStatus ?? res.status);
+  e.viaProxy = true;
+  throw e;
 }

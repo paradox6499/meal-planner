@@ -1,9 +1,16 @@
 // Клиент официального MCP-сервера ВкусВилл — https://mcp.vkusvill.ru/mcp
 //
+// ВАЖНО (04.10.2026): ПРЯМЫЕ вызовы из браузера больше не работают. Запрос с
+// Content-Type: application/json запускает CORS-preflight (OPTIONS), а
+// mcp.vkusvill.ru (QRATOR) отвечает на него 401 без Access-Control-Allow-* —
+// до самого POST браузер не доходит (проверено curl'ом для любого Origin;
+// 28.09 тот же код работал). Поэтому внутри приложения вызовы идут через НАШ
+// сервер (POST /api/vkusvill/call, см. callCatalogViaBackend в backend.js), а
+// прямой запрос ниже — запасной путь для разработки/окружений без бэкенда.
+//
 // Проверено вживую (curl, не догадка): handshake (initialize/session) не
 // обязателен, сервер отвечает на одиночные tools/call без состояния между
-// запросами. CORS открыт (Access-Control-Allow-Origin: *), поэтому дёргаем
-// прямо из браузера — отдельный бэкенд под это пока не нужен.
+// запросами. Сам POST по-прежнему отвечает 200 с CORS-заголовками.
 //
 // Форма ответа сервера — JSON-RPC, внутри которого ЕЩЁ ОДИН JSON строкой
 // (result.content[0].text) — это не опечатка, так реально отдаёт сервер,
@@ -20,7 +27,7 @@
 // безопасен (в отличие от server/src/vkusvillPrices.js, который сознательно
 // НЕ импортирует этот файл — см. его шапку): backend.js ничего не
 // импортирует сам, цикла импортов не образуется.
-import { resolvePricesViaBackend } from "./backend.js";
+import { resolvePricesViaBackend, isCatalogProxyAvailable, callCatalogViaBackend } from "./backend.js";
 
 const MCP_URL = "https://mcp.vkusvill.ru/mcp";
 const DEFAULT_TIMEOUT_MS = 8000;
@@ -92,6 +99,22 @@ async function callToolOnce(name, args, { timeoutMs = DEFAULT_TIMEOUT_MS } = {})
     const hit = cache.get(cacheKey);
     if (hit && hit.expiresAt > Date.now()) return hit.data;
     if (hit) cache.delete(cacheKey); // протухла — не оставляем мусор в карте
+  }
+
+  // Через наш сервер, если он есть и мы внутри Telegram. Прокси недоступен
+  // (proxyUnavailable) — пробуем прямой запрос ниже; любая другая ошибка —
+  // настоящий ответ про каталог, пробрасываем как есть.
+  if (isCatalogProxyAvailable()) {
+    try {
+      const data = await callCatalogViaBackend(name, args, Math.max(timeoutMs, 25_000));
+      if (cacheKey) {
+        if (cache.size >= CACHE_MAX_ENTRIES) cache.delete(cache.keys().next().value);
+        cache.set(cacheKey, { data, expiresAt: Date.now() + CACHE_TTL_MS });
+      }
+      return data;
+    } catch (err) {
+      if (!err.proxyUnavailable) throw err;
+    }
   }
 
   const controller = new AbortController();

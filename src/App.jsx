@@ -1,4 +1,5 @@
 import { useState, useMemo, useEffect } from "react";
+import { createPortal } from "react-dom";
 import { Check, ChevronLeft, ChevronRight, Store, Users, Wallet, Salad, Flame, RotateCcw, UtensilsCrossed, Clock, Repeat, Ban, TriangleAlert, X, Loader2, Share2, Settings, Sun, Moon, MonitorSmartphone, Sparkles, PackageSearch, Home, MessageCircle, Clapperboard, History, Plus } from "lucide-react";
 import { ALLERGENS } from "./data/recipes.js";
 import { buildCartFromShoppingList, toVkusvillQuantity, clearMcpCache } from "./lib/vkusvillMcp.js";
@@ -207,6 +208,12 @@ export default function MealPlanner() {
   const [budget, setBudget] = useState(initialActiveSlot?.budget ?? 4000);
   const [diet, setDiet] = useState(savedProfile?.diet ?? DEFAULT_DIET);
   const [allergies, setAllergies] = useState(savedProfile?.allergies ?? []);
+  // Аллергии — единственный вопрос, где ответ по умолчанию небезопасен (перепроверка
+  // UX-аудита 04.10.2026: «Нет, ем всё подряд» было выбрано заранее, человек с
+  // аллергией, нажимавший «Далее», получал план без её учёта, и этот ответ сам
+  // запоминался в профиль навсегда). Поэтому "ответил или нет" — отдельный флаг:
+  // у новичка шаг не пройти, пока он явно не выберет "Аллергий нет" или аллерген.
+  const [allergiesAnswered, setAllergiesAnswered] = useState(!!savedProfile);
   const [cuisines, setCuisines] = useState(savedProfile?.cuisines ?? []);
   const [devices, setDevices] = useState(savedProfile?.devices ?? ALL_DEVICE_IDS);
   const [maxCookTime, setMaxCookTime] = useState(savedProfile?.maxCookTime ?? null);
@@ -398,8 +405,18 @@ export default function MealPlanner() {
   useEffect(() => {
     const startParam = window.Telegram?.WebApp?.initDataUnsafe?.start_param;
     const match = /^ref_(\d+)$/.exec(startParam || "");
-    if (match) claimReferral(Number(match[1]));
+    if (match) {
+      claimReferral(Number(match[1])).then((result) => {
+        // Отказ "вы уже пользовались приложением" раньше не видел никто: проверка
+        // ссылки на втором аккаунте, который уже собирал план, выглядела как
+        // "реферальная программа не работает" (жалоба 04.10.2026). Это правило
+        // (бонус только новым пользователям — иначе его можно накручивать самому
+        // себе), его надо просто объяснить.
+        if (result && result.claimed === false && /уже существует/.test(result.reason || "")) setReferralNote(true);
+      });
+    }
   }, []);
+  const [referralNote, setReferralNote] = useState(false);
 
   // Известный баг части Android-WebView (в т.ч. внутри Telegram Mini App) —
   // после программного обновления DOM (без тач-события от пользователя)
@@ -457,7 +474,7 @@ export default function MealPlanner() {
     meals: meals.length > 0,
     budget: budget >= 500,
     diet: !!diet,
-    allergies: true, // необязательны — их отсутствие тоже осознанный ответ
+    allergies: allergiesAnswered || allergies.length > 0, // нужен ЯВНЫЙ ответ (см. allergiesAnswered)
   };
 
   // Раньше пересчитывалось на каждое изменение фильтра (useMemo) — теперь
@@ -470,7 +487,54 @@ export default function MealPlanner() {
   // если реальные рецепты не подтянулись (см. комментарий у buildPlanView).
   const [priceByName, setPriceByName] = useState(initialActiveSlot?.priceByName ?? null);
   const [retryingPrices, setRetryingPrices] = useState(false);
+  // План собран "вырожденным" (каталог ВкусВилл не ответил — базовые рецепты
+  // и/или нет цен) и НЕ засчитан в бесплатный лимит (04.10.2026: раньше такая
+  // сборка сжигала бесплатный план, а у человека на руках был план без цен).
+  // Засчитывается только когда получим полноценный (см. handleRetryPrices /
+  // повторную сборку). catalogReason — почему каталог не ответил (для экрана и
+  // скриншота в поддержку).
+  const [generationPending, setGenerationPending] = useState(false);
+  const [catalogReason, setCatalogReason] = useState(null);
   const [priceRetryFailed, setPriceRetryFailed] = useState(false);
+
+  // Снимок СОБРАННОГО плана в историю на сервере (Аккаунт -> «История планов»).
+  // Только для полноценных планов: вырожденный (без каталога/цен) в историю не
+  // кладём — иначе там оседал "план на 0 ₽ из 4 000 ₽", а серия "недель в
+  // бюджете" и "сэкономлено" считали бы его удачей (скриншот пользователя
+  // 04.10.2026). view — planView ровно этого плана (см. runFinish).
+  const saveCompletedPlanToHistory = (view) => {
+      savePlanToHistory({
+        storeId: store,
+        storeName: STORES.find((s) => s.id === store)?.name || store,
+        budget,
+        family,
+        totalCost: view.total,
+        plan: {
+          total: view.total,
+          itemized: view.itemized,
+          shoppingItemsCount: view.grouped.reduce((sum, g) => sum + g.items.length, 0),
+          days: view.days.map((d) => ({
+            day: d.day,
+            // Раньше в истории сохранялось только название блюда — открыть
+            // рецепт из прошлого плана было нечем (запрос после созвона с
+            // другом: "история планов не даёт рецепты, только список блюд").
+            // Кладём сюда компактную "смотровую" версию рецепта (без служебных
+            // полей вроде cuisine/diets/devices, нужных только при подборе) —
+            // укладывается в MAX_PLAN_JSON_LENGTH на сервере с большим запасом
+            // (тот лимит и заводился "с запасом на неделю рецептов", см. app.js).
+            dayMeals: d.dayMeals.map((dm) => ({
+              mealLabel: dm.mealLabel, name: dm.recipe.name, emoji: dm.recipe.emoji, time: dm.recipe.time, cost: dm.cost,
+              photoUrl: dm.recipe.photoUrl || null,
+              ingr: dm.recipe.ingr,
+              steps: dm.recipe.steps,
+              nutritionPer100g: dm.recipe.nutritionPer100g || null,
+              family: dm.family,
+              isRealPrice: dm.isRealPrice,
+            })),
+          })),
+        },
+      });
+  };
 
   // "Повторить получение цен" — ВкусВилл иногда лимитирует burst запросов
   // (см. vkusvillMcp.js), и план собирается с mostlyUnpriced=true. Раньше
@@ -494,6 +558,19 @@ export default function MealPlanner() {
     try {
       const fresh = await attachRealCosts(pools);
       setPriceByName(fresh);
+      // Вырожденный план (не засчитан в лимит) стал полноценным: рецепты из
+      // каталога ВкусВилл и цены получены — теперь это обычный собранный план,
+      // засчитываем его РОВНО ОДИН РАЗ и кладём в историю.
+      if (generationPending && fresh.size > 0) {
+        const view = buildPlanView(planState, pools, family, fresh, familyByMeal);
+        const recipesFromCatalog = Object.values(pools).every((list) => list.every((r) => String(r.id).startsWith("vv-")));
+        if (recipesFromCatalog && !view.mostlyUnpriced) {
+          setGenerationPending(false);
+          setCatalogReason(null);
+          reportPlanGenerated();
+          saveCompletedPlanToHistory(view);
+        }
+      }
       // Та же грубая эвристика, что и mostlyUnpriced в planLogic.js — если
       // цену не нашли почти ни для чего и на этот раз, честно показываем,
       // что попытка не удалась, а не молча оставляем ту же надпись, будто
@@ -603,6 +680,7 @@ export default function MealPlanner() {
 
     let resolvedPools;
     let resolvedPriceByName = null;
+    let catalogError = null; // почему каталог ВкусВилл не ответил (если не ответил)
     if (store === "vv") {
       // Реальные рецепты ВкусВилл — с реальными фото, шагами и (по
       // возможности) реальной ценой. Если MCP недоступен/упал — тихо
@@ -616,6 +694,7 @@ export default function MealPlanner() {
         if (!gotAnything) throw new Error("VkusVill не вернул рецептов под эти фильтры");
       } catch (err) {
         console.warn("VkusVill MCP недоступен, откат на статические рецепты:", err.message);
+        catalogError = String(err?.message || err).slice(0, 160);
         resolvedPools = buildPools(diet, cuisines, devices, allergies, maxCookTime);
       }
     } else {
@@ -623,6 +702,13 @@ export default function MealPlanner() {
     }
 
     const newPlanState = buildInitialPlan(resolvedPools, selectedMeals, budget, family, familyByMeal);
+    const freshPlanView = buildPlanView(newPlanState, resolvedPools, family, resolvedPriceByName, familyByMeal);
+    // Вырожденная сборка: каталог ВкусВилл не ответил (базовые рецепты) или
+    // цены не получены почти ни на что. Такую сборку НЕ засчитываем в
+    // бесплатный лимит и НЕ кладём в историю — иначе человек получал план без
+    // цен и терял бесплатный план (баг, подтверждённый на реальном телефоне
+    // 04.10.2026). Только для ВкусВилл: у остальных сетей цен нет по определению.
+    const degraded = store === "vv" && (!!catalogError || freshPlanView.mostlyUnpriced);
     setPools(resolvedPools);
     setPriceByName(resolvedPriceByName);
     setPlanState(newPlanState);
@@ -640,7 +726,19 @@ export default function MealPlanner() {
     // лимита был завязан на тот эффект и списывал лимит/кредит от одного
     // открытия приложения (найдено техническим и UX-аудитом 29.09.2026).
     // reportPlanGenerated вызывается РОВНО ОДИН РАЗ за эту сборку.
-    reportPlanGenerated();
+    if (degraded) {
+      const reason = catalogError || "цены на продукты не получены";
+      setGenerationPending(true);
+      setCatalogReason(reason);
+      // Причина — в аналитику (сводка админу), чтобы такие случаи не оставались
+      // невидимыми: раньше сбой каталога замечали только по жалобам.
+      trackEvent("catalog_fallback", { reason: reason.slice(0, 160), store });
+    } else {
+      setGenerationPending(false);
+      setCatalogReason(null);
+      reportPlanGenerated();
+      saveCompletedPlanToHistory(freshPlanView);
+    }
 
     // UX-аудит 29.09.2026: профиль сохранялся ТОЛЬКО кнопкой "Сохранить как
     // профиль" в самом низу Аккаунта — почти никто её не находил, и каждый
@@ -654,43 +752,6 @@ export default function MealPlanner() {
       trackEvent("profile_auto_saved");
     }
 
-    // Считаем planView сами, здесь же — planView-в-состоянии соберётся
-    // только на следующий рендер (useMemo), а в историю нужно положить
-    // РОВНО тот план, что только что собрали, один раз, а не всё, во что он
-    // потом превратится после замен товаров (см. лимит выше — тот сценарий
-    // сознательно повторяет отправку при каждой замене, этот — нет).
-    const freshPlanView = buildPlanView(newPlanState, resolvedPools, family, resolvedPriceByName, familyByMeal);
-    savePlanToHistory({
-      storeId: store,
-      storeName: STORES.find((s) => s.id === store)?.name || store,
-      budget,
-      family,
-      totalCost: freshPlanView.total,
-      plan: {
-        total: freshPlanView.total,
-        itemized: freshPlanView.itemized,
-        shoppingItemsCount: freshPlanView.grouped.reduce((sum, g) => sum + g.items.length, 0),
-        days: freshPlanView.days.map((d) => ({
-          day: d.day,
-          // Раньше в истории сохранялось только название блюда — открыть
-          // рецепт из прошлого плана было нечем (запрос после созвона с
-          // другом: "история планов не даёт рецепты, только список блюд").
-          // Кладём сюда компактную "смотровую" версию рецепта (без служебных
-          // полей вроде cuisine/diets/devices, нужных только при подборе) —
-          // укладывается в MAX_PLAN_JSON_LENGTH на сервере с большим запасом
-          // (тот лимит и заводился "с запасом на неделю рецептов", см. app.js).
-          dayMeals: d.dayMeals.map((dm) => ({
-            mealLabel: dm.mealLabel, name: dm.recipe.name, emoji: dm.recipe.emoji, time: dm.recipe.time, cost: dm.cost,
-            photoUrl: dm.recipe.photoUrl || null,
-            ingr: dm.recipe.ingr,
-            steps: dm.recipe.steps,
-            nutritionPer100g: dm.recipe.nutritionPer100g || null,
-            family: dm.family,
-            isRealPrice: dm.isRealPrice,
-          })),
-        })),
-      },
-    });
   };
 
   const swapMeal = (dayIndex, slotIndex) => {
@@ -726,7 +787,7 @@ export default function MealPlanner() {
     setOpenRecipe(null); setAssembling(false); setPools(null); setPriceByName(null); setPlanCreatedAt(null);
     if (!hasProfile) {
       setFamily(2); setFamilyByMeal({}); setMeals(["lunch", "dinner"]); setDiet(DEFAULT_DIET);
-      setAllergies([]); setCuisines([]); setDevices(ALL_DEVICE_IDS); setMaxCookTime(null);
+      setAllergies([]); setAllergiesAnswered(false); setCuisines([]); setDevices(ALL_DEVICE_IDS); setMaxCookTime(null);
     }
   };
 
@@ -1036,6 +1097,18 @@ export default function MealPlanner() {
           </div>
         </div>
 
+        {referralNote && !showAccount && (
+          <div style={{ ...styles.warningBox, marginTop: 0 }}>
+            <TriangleAlert size={15} style={{ flexShrink: 0, marginTop: 1 }} />
+            <span style={{ flex: 1 }}>
+              Бонус за приглашение действует только для тех, кто открывает «Съедим» впервые, — вы уже пользовались приложением.
+            </span>
+            <button onClick={() => setReferralNote(false)} title="Закрыть" aria-label="Закрыть" style={{ ...styles.subRevertBtn, flexShrink: 0 }}>
+              <X size={13} />
+            </button>
+          </div>
+        )}
+
         {showAccount && (
           <AccountView
             displayName={displayName} setDisplayName={setDisplayName}
@@ -1233,13 +1306,24 @@ export default function MealPlanner() {
                 <div style={styles.grid2}>
                   <button
                     className="chip"
-                    onClick={() => { hapticSelect(); setAllergies([]); }}
-                    style={styles.storeChip(allergies.length === 0)}
+                    onClick={() => { hapticSelect(); setAllergies([]); setAllergiesAnswered(true); }}
+                    style={styles.storeChip(allergiesAnswered && allergies.length === 0)}
                   >
-                    <div style={{ fontWeight: 600 }}>Нет, ем всё подряд</div>
+                    <div style={{ fontWeight: 600 }}>Аллергий нет</div>
                   </button>
                   {ALLERGENS.map((a) => (
-                    <button key={a.id} className="chip" onClick={() => toggleSimple(allergies, setAllergies, a.id)} style={styles.storeChip(allergies.includes(a.id))}>
+                    <button
+                      key={a.id}
+                      className="chip"
+                      onClick={() => {
+                        hapticSelect();
+                        const next = allergies.includes(a.id) ? allergies.filter((x) => x !== a.id) : [...allergies, a.id];
+                        setAllergies(next);
+                        // снял все галочки — снова не ответил (не молчаливое "нет")
+                        setAllergiesAnswered(next.length > 0);
+                      }}
+                      style={styles.storeChip(allergies.includes(a.id))}
+                    >
                       <div style={{ fontWeight: 600 }}>{a.label}</div>
                     </button>
                   ))}
@@ -1284,7 +1368,7 @@ export default function MealPlanner() {
           </div>
         )}
 
-        {!showAccount && !limitBlocked && done && planView && (
+        {!showAccount && !limitBlocked && !assembling && done && planView && (
           <PlanSlotsBar
             slots={planSlots.slots}
             activeId={planSlotId}
@@ -1295,9 +1379,12 @@ export default function MealPlanner() {
           />
         )}
 
-        {!showAccount && !limitBlocked && done && planView && (
+        {!showAccount && !limitBlocked && !assembling && done && planView && (
           <ResultView
             plan={planView}
+            onRebuild={handleFinish}
+            generationPending={generationPending}
+            catalogReason={catalogReason}
             planStartISO={planCreatedAt}
             storeId={store}
             storeName={STORES.find((s) => s.id === store)?.name}
@@ -1628,7 +1715,10 @@ function AccountView({
           >
             <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
               <MessageCircle size={16} color={ACCENT} />
-              <div style={{ fontWeight: 600 }}>Написать в поддержку</div>
+              <div>
+                <div style={{ fontWeight: 600 }}>Написать в поддержку</div>
+                <div style={styles.chipHint}>Можно приложить скриншот ошибки</div>
+              </div>
             </div>
           </button>
         </div>
@@ -2158,6 +2248,7 @@ function ReferralSection({ referralStatus }) {
         </div>
         <p style={styles.acctSectionHint}>
           Друг соберёт свой первый план — и вы оба получите {REFERRAL_REWARD_DAYS_LABEL} дней Pro бесплатно.
+          Работает для тех, кто открывает «Съедим» впервые: если друг уже пользовался приложением, бонус не начислится.
         </p>
         {referralStatus?.rewardedCount > 0 && (
           <p style={{ ...styles.acctSectionHint, fontWeight: 600 }}>
@@ -2573,7 +2664,7 @@ function PlanSlotsBar({ slots, activeId, onSwitch, onRemove, onAdd, canAdd }) {
   );
 }
 
-function ResultView({ plan, planStartISO, storeId, storeName, budget, family, mealsCount, diet, allergies, onSwap, onOpenRecipe, onRetryPrices, retryingPrices, priceRetryFailed, familyPantryNames, onToggleFamilyPantry }) {
+function ResultView({ plan, planStartISO, onRebuild, generationPending, catalogReason, storeId, storeName, budget, family, mealsCount, diet, allergies, onSwap, onOpenRecipe, onRetryPrices, retryingPrices, priceRetryFailed, familyPantryNames, onToggleFamilyPantry }) {
   const [orderState, setOrderState] = useState({ status: "idle" }); // idle | loading | error
   // Отделы списка покупок сворачиваемые — по умолчанию все раскрыты (старое
   // поведение не меняется для короткого списка), но для семьи с 3+ приёмами
@@ -2790,27 +2881,33 @@ function ResultView({ plan, planStartISO, storeId, storeName, budget, family, me
         </div>
       )}
 
+      {/* ОДНА плашка про сбой каталога (перепроверка UX-аудита 04.10.2026: две жёлтые
+          плашки подряд, вторая на техническом языке и с кнопкой, лечащей не то).
+          Что делать: "Собрать заново" — рецепты из каталога; "Повторить получение
+          цен" — только если рецепты уже настоящие, а цен нет. */}
       {fallbackRecipes && (
         <div style={styles.warningBox}>
           <TriangleAlert size={15} style={{ flexShrink: 0, marginTop: 1 }} />
           <div style={{ minWidth: 0 }}>
             <span>
-              {!plan.itemized
-                ? "Каталог ВкусВилл сейчас недоступен — показали базовый набор рецептов с примерными ценами. Заказ во ВкусВилл откроется, когда получим настоящие цены."
-                : plan.mostlyUnpriced
-                  ? "Каталог ВкусВилл не ответил при сборке — показан базовый набор рецептов."
-                  : "Каталог ВкусВилл не ответил при сборке — показан базовый набор рецептов. Цены на продукты уже настоящие."}
+              {plan.itemized && !plan.mostlyUnpriced
+                ? "Каталог ВкусВилл не отвечал при сборке — показан базовый набор рецептов. Цены на продукты уже настоящие."
+                : "ВкусВилл сейчас не отвечает — показали базовые рецепты с примерной ценой. Заказ во ВкусВилл откроется, когда каталог заработает."}
             </span>
-            {!plan.itemized && onRetryPrices && (
-              <button
-                onClick={onRetryPrices}
-                disabled={retryingPrices}
-                style={{ ...styles.retryPricesBtn, opacity: retryingPrices ? 0.6 : 1 }}
-              >
-                {retryingPrices ? <><Loader2 size={13} className="spin" /> Пробуем ещё раз…</> : "Повторить получение цен"}
+            {generationPending && (
+              <p style={{ fontSize: 11.5, margin: "6px 0 0 0", opacity: 0.9 }}>Бесплатный план при этом не тратится.</p>
+            )}
+            {catalogReason && (
+              <p style={{ fontSize: 10.5, margin: "6px 0 0 0", opacity: 0.7, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", wordBreak: "break-word" }}>
+                Причина: {catalogReason}
+              </p>
+            )}
+            {onRebuild && (
+              <button onClick={onRebuild} style={styles.retryPricesBtn}>
+                Собрать заново с каталогом ВкусВилл
               </button>
             )}
-            {!plan.itemized && priceRetryFailed && !retryingPrices && (
+            {priceRetryFailed && !retryingPrices && (
               <p style={{ fontSize: 11.5, marginTop: 6, opacity: 0.85 }}>
                 Не получилось — каталог всё ещё недоступен. Попробуйте ещё раз через минуту-другую.
               </p>
@@ -2819,14 +2916,22 @@ function ResultView({ plan, planStartISO, storeId, storeName, budget, family, me
         </div>
       )}
 
-      {plan.mostlyUnpriced && (
+      {plan.mostlyUnpriced && !fallbackRecipes && (
         <div style={styles.warningBox}>
           <TriangleAlert size={15} style={{ flexShrink: 0, marginTop: 1 }} />
           <div style={{ minWidth: 0 }}>
             <span>
-              Не удалось получить цены почти ни на один товар — похоже, у ВкусВилл сейчас перегружен сервис или
-              временно превышен лимит запросов на нашей стороне. Сумма ниже недостоверна.
+              Не удалось получить цены на товары — ВкусВилл сейчас не отвечает. Сумма ниже — оценка по рецептам,
+              заказ откроется, когда цены появятся.
             </span>
+            {generationPending && (
+              <p style={{ fontSize: 11.5, margin: "6px 0 0 0", opacity: 0.9 }}>Бесплатный план при этом не тратится.</p>
+            )}
+            {catalogReason && (
+              <p style={{ fontSize: 10.5, margin: "6px 0 0 0", opacity: 0.7, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", wordBreak: "break-word" }}>
+                Причина: {catalogReason}
+              </p>
+            )}
             {/* Раньше единственный совет был "соберите план заново" — то есть
                 заново пройти весь визард ради того, чтобы попробовать
                 получить те же цены ещё раз. Рецепты уже выбраны, дублировать
@@ -3184,7 +3289,14 @@ function shareViaTelegram(text, url) {
 
 function RecipeModal({ dm, family, onClose }) {
   const { recipe, cost, isRealPrice } = dm;
-  return (
+  // Через портал в document.body (скриншот пользователя 04.10.2026: «открываю
+  // план из истории — чёрное окно, дальше ничего»). Карточка приложения имеет
+  // will-change: transform, а у такого предка position: fixed считается ОТ НЕГО,
+  // а не от экрана: оверлей растягивался на всю высоту длинного Аккаунта, окно
+  // рецепта оказывалось где-то посередине за пределами видимой части, на экране
+  // оставалась только тёмная вуаль. Из ResultView модалка открывалась снаружи
+  // карточки и работала — сломаны были история планов и экран "последний план".
+  return createPortal((
     <div style={styles.modalOverlay} className="modal-overlay-in" onClick={onClose}>
       <div style={styles.modalCard} className="modal-card-in" onClick={(e) => e.stopPropagation()}>
         <button onClick={onClose} title="Закрыть" aria-label="Закрыть" style={styles.modalClose}>
@@ -3258,7 +3370,7 @@ function RecipeModal({ dm, family, onClose }) {
         </a>
       </div>
     </div>
-  );
+  ), document.body);
 }
 
 // ---------- styles ----------

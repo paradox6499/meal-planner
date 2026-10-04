@@ -593,3 +593,16 @@ describe("computeRecentSavings", () => {
     expect(computeRecentSavings(history)).toBe(400); // только первые 4
   });
 });
+
+// Скриншот пользователя 04.10.2026: в истории «2 октября · ВкусВилл 0 ₽ из 4 000 ₽» —
+// план, собранный при сбое каталога (цен нет). Он не должен считаться ни
+// «уложились в бюджет», ни «сэкономили 4 000 ₽».
+describe("серия и экономия: план с суммой 0 ₽ — это «цен нет», а не успех", () => {
+  it("0 ₽ обрывает серию, как null", () => {
+    expect(computeBudgetStreak([{ budget: 4000, totalCost: 0 }, { budget: 4000, totalCost: 3000 }])).toBe(0);
+    expect(computeBudgetStreak([{ budget: 4000, totalCost: 3000 }, { budget: 4000, totalCost: 0 }])).toBe(1);
+  });
+  it("0 ₽ не прибавляет «сэкономлено»", () => {
+    expect(computeRecentSavings([{ budget: 4000, totalCost: 0 }, { budget: 4000, totalCost: 3000 }])).toBe(1000);
+  });
+});

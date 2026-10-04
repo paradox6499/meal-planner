@@ -4,7 +4,7 @@ vi.mock("./vkusvillMcp.js", async (importOriginal) => {
   const actual = await importOriginal();
   return { ...actual, searchRecipes: vi.fn(), resolvePrices: vi.fn(), searchProducts: vi.fn(), getProductAnalogs: vi.fn() };
 });
-vi.mock("./backend.js", () => ({ resolvePricesViaBackend: vi.fn() }));
+vi.mock("./backend.js", () => ({ resolvePricesViaBackend: vi.fn(), isCatalogProxyAvailable: vi.fn(() => false), callCatalogViaBackend: vi.fn() }));
 import { searchRecipes, resolvePrices, searchProducts, getProductAnalogs } from "./vkusvillMcp.js";
 import { resolvePricesViaBackend } from "./backend.js";
 import {
@@ -570,5 +570,36 @@ describe("getSubstituteOptions — приоритет совпадений по 
     const options = await getSubstituteOptions({ name: "Неизвестный товар", allergies: [], diet: "any" });
     expect(options).toEqual([]);
     expect(getProductAnalogs).not.toHaveBeenCalled();
+  });
+});
+
+// 04.10.2026: каталог из браузера не отвечал (CORS-preflight 401), а ошибки глотались —
+// причина терялась за общим "не вернул рецептов под эти фильтры".
+describe("fetchVkusvillPools — отказ каталога не маскируется под «ничего не нашлось»", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resolvePricesViaBackend.mockResolvedValue(null);
+    resolvePrices.mockResolvedValue([]);
+  });
+  const args = { diet: "any", cuisines: [], devices: [], allergies: [], maxCookTime: null };
+
+  it("все категории упали с ошибкой -> бросает НАСТОЯЩУЮ причину (её увидят аналитика и экран)", async () => {
+    searchRecipes.mockRejectedValue(Object.assign(new Error("VkusVill MCP: сеть недоступна (Failed to fetch)"), { retryable: true }));
+    await expect(fetchVkusvillPools({ ...args, categories: ["main", "breakfast"] })).rejects.toThrow(/сеть недоступна/);
+  });
+
+  it("часть категорий ответила — план возможен, пул упавшей категории пуст, исключения нет", async () => {
+    searchRecipes.mockImplementation(async ({ id_category_filter }) => {
+      if (id_category_filter === 0) throw new Error("boom");
+      return { items: [], meta: { has_more: false } };
+    });
+    const { pools } = await fetchVkusvillPools({ ...args, categories: ["main", "snack"] });
+    expect(Object.keys(pools).sort()).toEqual(["main", "snack"]);
+  });
+
+  it("каталог ответил, но пусто под фильтры — это НЕ ошибка (пулы пустые, исключения нет)", async () => {
+    searchRecipes.mockResolvedValue({ items: [], meta: { has_more: false } });
+    const { pools } = await fetchVkusvillPools({ ...args, categories: ["main"] });
+    expect(pools.main).toEqual([]);
   });
 });

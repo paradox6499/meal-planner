@@ -344,7 +344,10 @@ export function interleaveGroups(groups) {
 export function computeBudgetStreak(planHistory) {
   let streak = 0;
   for (const p of planHistory) {
-    if (p.totalCost == null || p.totalCost > p.budget) break;
+    // totalCost <= 0 — не "уложились", а "цен не получили" (план, собранный при
+    // сбое каталога ВкусВилл, сохранялся как 0 ₽ из 4 000 ₽ — скриншот пользователя
+    // 04.10.2026). Для серии это неизвестная сумма, как null.
+    if (p.totalCost == null || p.totalCost <= 0 || p.totalCost > p.budget) break;
     streak++;
   }
   return streak;
@@ -358,6 +361,6 @@ export function computeBudgetStreak(planHistory) {
 export function computeRecentSavings(planHistory, count = 4) {
   return planHistory
     .slice(0, count)
-    .filter((p) => p.totalCost != null)
+    .filter((p) => p.totalCost != null && p.totalCost > 0)
     .reduce((sum, p) => sum + (p.budget - p.totalCost), 0);
 }

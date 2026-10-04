@@ -466,7 +466,7 @@ describe("claimReferral", () => {
     vi.stubEnv("VITE_BACKEND_URL", "https://api.example.com");
     stubTelegram("x");
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("boom")));
-    await expect(claimReferral(1)).resolves.toBeUndefined();
+    await expect(claimReferral(1)).resolves.toBeNull();
   });
 });
 
@@ -685,5 +685,91 @@ describe("deleteAccount", () => {
     vi.stubGlobal("fetch", fetchMock);
     expect((await deleteAccount()).ok).toBe(false);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+
+describe("claimReferral: исход виден экрану", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+  });
+  it("отказ сервера (уже пользовался приложением) возвращается как {claimed:false, reason}", async () => {
+    vi.stubEnv("VITE_BACKEND_URL", "https://api.example.com");
+    stubTelegram("x");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({ ok: true, claimed: false, reason: "пользователь уже существует — реферал засчитывается только новым" }) }));
+    expect(await claimReferral(1)).toEqual({ claimed: false, reason: "пользователь уже существует — реферал засчитывается только новым" });
+  });
+  it("успех -> {claimed:true, reason:null}", async () => {
+    vi.stubEnv("VITE_BACKEND_URL", "https://api.example.com");
+    stubTelegram("x");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({ ok: true, claimed: true }) }));
+    expect(await claimReferral(1)).toEqual({ claimed: true, reason: null });
+  });
+});
+
+// Прокси каталога ВкусВилл (CORS-preflight 04.10.2026): фронтенд ходит в
+// mcp.vkusvill.ru ЧЕРЕЗ наш сервер.
+import { callCatalogViaBackend, isCatalogProxyAvailable } from "./backend.js";
+
+describe("callCatalogViaBackend", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+  });
+  const setup = (response) => {
+    vi.stubEnv("VITE_BACKEND_URL", "https://api.example.com");
+    stubTelegram("blob");
+    const fetchMock = typeof response === "function" ? vi.fn(response) : vi.fn().mockResolvedValue(response);
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  };
+
+  it("isCatalogProxyAvailable: нужен и адрес сервера, и initData", () => {
+    vi.stubEnv("VITE_BACKEND_URL", "https://api.example.com");
+    stubTelegram("blob");
+    expect(isCatalogProxyAvailable()).toBe(true);
+    stubTelegram(undefined);
+    expect(isCatalogProxyAvailable()).toBe(false);
+    vi.stubEnv("VITE_BACKEND_URL", "");
+    stubTelegram("blob");
+    expect(isCatalogProxyAvailable()).toBe(false);
+  });
+
+  it("успех: шлёт tool+args+initData на /api/vkusvill/call и возвращает data", async () => {
+    const fetchMock = setup({ ok: true, status: 200, json: async () => ({ ok: true, data: { items: [1] } }) });
+    expect(await callCatalogViaBackend("vkusvill_recipes", { page: 1 })).toEqual({ items: [1] });
+    const [url, opts] = fetchMock.mock.calls[0];
+    expect(url).toBe("https://api.example.com/api/vkusvill/call");
+    expect(JSON.parse(opts.body)).toEqual({ initData: "blob", tool: "vkusvill_recipes", args: { page: 1 } });
+  });
+
+  it("429 (лимит) -> ошибка с httpStatus 429, чтобы вызывающий код повторил с паузой", async () => {
+    setup({ ok: false, status: 429, json: async () => ({ ok: false, error: "слишком много запросов" }) });
+    const err = await callCatalogViaBackend("vkusvill_recipes", {}).catch((e) => e);
+    expect(err.httpStatus).toBe(429);
+    expect(err.proxyUnavailable).toBeUndefined();
+  });
+
+  it("502 (ВкусВилл не ответил) -> код ВкусВилла в httpStatus, это НЕ «прокси недоступен»", async () => {
+    setup({ ok: false, status: 502, json: async () => ({ ok: false, error: "VkusVill MCP: HTTP 403", upstreamStatus: 403 }) });
+    const err = await callCatalogViaBackend("vkusvill_recipes", {}).catch((e) => e);
+    expect(err.httpStatus).toBe(403);
+    expect(err.proxyUnavailable).toBeUndefined();
+    expect(err.message).toContain("403");
+  });
+
+  it("сеть до сервера, 401, 404 (старый сервер), 503 или не-JSON — прокси недоступен (можно пробовать прямой запрос)", async () => {
+    for (const response of [
+      { ok: false, status: 401, json: async () => ({ ok: false }) },
+      { ok: false, status: 404, json: async () => ({ ok: false }) },
+      { ok: false, status: 503, json: async () => ({ ok: false }) },
+      { ok: false, status: 500, json: async () => { throw new Error("not json"); } },
+    ]) {
+      setup(response);
+      expect((await callCatalogViaBackend("vkusvill_recipes", {}).catch((e) => e)).proxyUnavailable).toBe(true);
+    }
+    setup(() => Promise.reject(new Error("Failed to fetch")));
+    expect((await callCatalogViaBackend("vkusvill_recipes", {}).catch((e) => e)).proxyUnavailable).toBe(true);
   });
 });

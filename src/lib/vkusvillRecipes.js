@@ -422,6 +422,9 @@ const RECIPE_SEARCH_PAGES = [1, 2];
 export async function searchRawRecipes({ q, categoryId, cookingMethod, excludeAllergens, maxCookTime }) {
   const bucketIds = maxCookTime ? COOKING_TIME_BUCKET_IDS[maxCookTime] : null;
   const fetchBucket = async (timeId) => {
+    // Часть страниц могла не ответить — берём остальные, но если НЕ ответила ни
+    // одна, это отказ каталога, а не "пусто": пробрасываем настоящую причину.
+    const failures = [];
     const pages = await Promise.all(
       RECIPE_SEARCH_PAGES.map((page) =>
         searchRecipes({
@@ -430,9 +433,10 @@ export async function searchRawRecipes({ q, categoryId, cookingMethod, excludeAl
           id_cooking_time_filter: timeId, id_exclude_allergens_filter: excludeAllergens,
         })
           .then((d) => d.items || [])
-          .catch(() => [])
+          .catch((err) => { failures.push(err); return []; })
       )
     );
+    if (failures.length === RECIPE_SEARCH_PAGES.length) throw failures[0];
     // На случай, если у ВкусВилл страницы 1 и 2 когда-нибудь пересекутся
     // (короткий хвостовой список, дубли на границе страницы) — дедуп по id
     // тут же, а не только на уровне бакетов ниже.
@@ -441,7 +445,9 @@ export async function searchRawRecipes({ q, categoryId, cookingMethod, excludeAl
   };
 
   if (!bucketIds) return fetchBucket(0);
-  const results = await Promise.all(bucketIds.map(fetchBucket));
+  const settled = await Promise.allSettled(bucketIds.map(fetchBucket));
+  if (settled.every((r) => r.status === "rejected")) throw settled[0].reason;
+  const results = settled.map((r) => (r.status === "fulfilled" ? r.value : []));
   const seen = new Set();
   return results.flat().filter((r) => (seen.has(r.id) ? false : (seen.add(r.id), true)));
 }
@@ -480,6 +486,7 @@ export async function fetchVkusvillPools({ diet, cuisines, devices, allergies, c
       .filter((r) => r.ingr.length > 0 && !recipeViolatesDiet(r, diet) && !recipeViolatesAllergies(r, effectiveAllergies));
 
   const pools = {};
+  const categoryErrors = [];
   await Promise.all(
     categories.map(async (category) => {
       const categoryId = CATEGORY_BY_MEAL[category] || 0;
@@ -493,11 +500,18 @@ export async function fetchVkusvillPools({ diet, cuisines, devices, allergies, c
           normalized = normalizeAndFilter(rawUnrestricted, category);
         }
         pools[category] = normalized;
-      } catch {
+      } catch (err) {
+        categoryErrors.push(err);
         pools[category] = [];
       }
     })
   );
+  // Каталог не ответил ни по одной категории — это "ВкусВилл недоступен", а не
+  // "под фильтры ничего не нашлось". Раньше ошибки глотались, вызывающий код
+  // видел пустые пулы и писал общее "не вернул рецептов под эти фильтры" — причину
+  // (например HTTP 401/таймаут) не знал никто, ни пользователь, ни мы. Теперь
+  // пробрасываем настоящую: она попадёт в аналитику и в текст на экране.
+  if (categoryErrors.length > 0 && categoryErrors.length === categories.length) throw categoryErrors[0];
 
   const priceByName = await attachRealCosts(pools);
   // buildInitialPlan (App.jsx) жадно ищет самый дорогой рецепт, который ещё
