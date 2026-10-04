@@ -15,6 +15,9 @@ import { guardTick } from "./http.js";
 import { runWarmupTick } from "./warmup.js";
 
 const PORT = Number(process.env.PORT) || 3000;
+// HOST — на VPS за обратным прокси (Caddy) слушаем только 127.0.0.1, чтобы порт не был виден из
+// интернета; на Render не задаётся (нужен 0.0.0.0, т.е. умолчание Node).
+const HOST = process.env.HOST || undefined;
 const DB_PATH = process.env.DB_PATH || "./data.db";
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TICK_INTERVAL_MS = Number(process.env.REMINDER_TICK_MS) || 5 * 60 * 1000; // раз в 5 минут — тот же порядок величины, что и в architecture.md
@@ -66,7 +69,7 @@ const db = openDb(DB_PATH);
 const WEBAPP_URL = process.env.WEBAPP_URL || undefined;
 const server = createApp(db, { botToken: BOT_TOKEN, adminTelegramId: ADMIN_TELEGRAM_ID, webhookSecret: WEBHOOK_SECRET, yookassa: YOOKASSA, webAppUrl: WEBAPP_URL, hashSecret: process.env.HASH_SECRET || undefined });
 
-server.listen(PORT, () => {
+server.listen(PORT, HOST, () => {
   console.log(`meal-planner-server слушает порт ${PORT}, БД: ${DB_PATH}`);
 });
 
