@@ -150,6 +150,17 @@ export function openDb(path) {
     CREATE INDEX IF NOT EXISTS idx_payments_created ON payments (created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_payments_status ON payments (status, created_at);
 
+    -- Какие страницы каталога рецептов ВкусВилл реально просят пользователи
+    -- (аргументы вызова vkusvill_recipes, без привязки к человеку) — по ним
+    -- фоновый подогрев (warmup.js) держит свежий кэш самых частых сочетаний
+    -- фильтров, а по составу этих рецептов — цены на ингредиенты.
+    CREATE TABLE IF NOT EXISTS warm_targets (
+      key TEXT PRIMARY KEY,
+      args_json TEXT NOT NULL,
+      hits INTEGER NOT NULL DEFAULT 1,
+      last_seen_at TEXT NOT NULL
+    );
+
     -- "Надгробия" удалённых аккаунтов (см. deleteUserData): после "Удалить мои
     -- данные" остаётся ТОЛЬКО необратимый хэш идентификатора (HMAC с серверным
     -- секретом, не сам telegram_user_id) и дата последней бесплатной сборки.
@@ -504,6 +515,13 @@ export function getUserPro(db, telegramUserId, nowISO) {
 export function getProUntil(db, telegramUserId, nowISO) {
   const row = db.prepare("SELECT pro_until FROM users WHERE telegram_user_id = ?").get(telegramUserId);
   return row?.pro_until && row.pro_until > nowISO ? row.pro_until : null;
+}
+
+/** Когда закончился оплаченный Pro (если уже закончился) — чтобы приложение
+ * называло кнопку «Продлить», а не «Открыть», тому, кто уже был на Pro. */
+export function getProEndedAt(db, telegramUserId, nowISO) {
+  const row = db.prepare("SELECT pro_until FROM users WHERE telegram_user_id = ?").get(telegramUserId);
+  return row?.pro_until && row.pro_until <= nowISO ? row.pro_until : null;
 }
 
 /** Продлевает/выставляет срок действия Pro по факту оплаты — НЕ трогает
@@ -929,6 +947,28 @@ export function purgeOldEvents(db, beforeISO) {
  * месяц, — мусор (в том числе выдуманные названия). */
 export function purgeOldIngredientPrices(db, beforeISO) {
   return Number(db.prepare("DELETE FROM ingredient_prices WHERE updated_at < ?").run(beforeISO).changes);
+}
+
+/** Фиксирует, что страницу каталога рецептов с такими аргументами запросили
+ * (спрос, не привязанный к пользователю): счётчик растёт, дата обновляется. */
+export function recordWarmTarget(db, key, argsJson, nowISO) {
+  db.prepare(
+    `INSERT INTO warm_targets (key, args_json, hits, last_seen_at) VALUES (?, ?, 1, ?)
+     ON CONFLICT(key) DO UPDATE SET hits = hits + 1, last_seen_at = excluded.last_seen_at`
+  ).run(key, argsJson, nowISO);
+}
+
+/** Самые востребованные страницы, виденные не раньше sinceISO. */
+export function listWarmTargets(db, { sinceISO, limit }) {
+  return db
+    .prepare("SELECT key, args_json, hits FROM warm_targets WHERE last_seen_at >= ? ORDER BY hits DESC, last_seen_at DESC LIMIT ?")
+    .all(sinceISO, limit)
+    .map((r) => ({ key: r.key, args: JSON.parse(r.args_json), hits: r.hits }));
+}
+
+/** Забытые сочетания фильтров (давно никто не просил) подогревать незачем. */
+export function purgeOldWarmTargets(db, beforeISO) {
+  return Number(db.prepare("DELETE FROM warm_targets WHERE last_seen_at < ?").run(beforeISO).changes);
 }
 
 /** Размер файла БД — для дайджеста админу (диск на Render небольшой). */

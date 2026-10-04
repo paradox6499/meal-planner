@@ -12,7 +12,7 @@ import { runPaymentReconcileTick } from "./payments.js";
 import { runMaintenance } from "./maintenance.js";
 import { runCatalogMonitorTick } from "./catalogMonitor.js";
 import { guardTick } from "./http.js";
-import { runPriceWarmTick } from "./vkusvillPrices.js";
+import { runWarmupTick } from "./warmup.js";
 
 const PORT = Number(process.env.PORT) || 3000;
 const DB_PATH = process.env.DB_PATH || "./data.db";
@@ -194,7 +194,8 @@ maintenanceTick();
 
 // Каталог ВкусВилл с нашего сервера: проба раз в 10 минут, алерт админу после двух
 // неудач подряд (см. catalogMonitor.js) — и подогрев цен из очереди раз в минуту
-// (см. runPriceWarmTick): названия, до которых не дошли из-за общего лимита ВкусВилла.
+// (см. warmup.js): страницы рецептов частых фильтров и цены их ингредиентов
+// обновляются заранее, плюс названия, до которых не дошли из-за общего лимита.
 const CATALOG_MONITOR_INTERVAL_MS = 10 * 60 * 1000;
 async function catalogMonitorTick() {
   try {
@@ -209,10 +210,12 @@ guardedCatalog();
 
 async function priceWarmTick() {
   try {
-    const { warmed } = await runPriceWarmTick(db);
-    if (warmed > 0) console.log(`[priceWarm] подогрето цен: ${warmed}`);
+    const r = await runWarmupTick(db);
+    if (!r.skipped && (r.refreshedPages > 0 || r.warmedPrices > 0)) {
+      console.log(`[warmup] страниц рецептов: ${r.refreshedPages}, цен подогрето: ${r.warmedPrices}, в очереди: ${r.queuedNames}`);
+    }
   } catch (err) {
-    console.error("[priceWarm] ошибка тика:", err);
+    console.error("[warmup] ошибка тика:", err);
   }
 }
 setInterval(guardTick("priceWarm", priceWarmTick), 60 * 1000);

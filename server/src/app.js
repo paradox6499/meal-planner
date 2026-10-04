@@ -10,8 +10,8 @@ import {
   saveFeedback, listRecentFeedback, updateMealTimesForUser,
   createPendingPayment, getPaymentByYookassaId,
   countRewardedReferrals,
-  getExtraPlanCredits, consumeExtraPlanCredit, getProUntil,
-  countEventsSince, deleteUserData, getFamilyForUser, getFamilyByInviteCode, freeGenerationTimesSince,
+  getExtraPlanCredits, consumeExtraPlanCredit, getProUntil, getProEndedAt,
+  recordWarmTarget, countEventsSince, deleteUserData, getFamilyForUser, getFamilyByInviteCode, freeGenerationTimesSince,
 } from "./db.js";
 import { planReplyForUpdate, buildDiagText, buildWelcomeText, buildFeedbackAckText, buildFeedbackListText, buildFeedbackAdminNotifyText, buildSupportPromptText } from "./webhook.js";
 import { sendTelegramMessage, copyTelegramMessage } from "./telegram.js";
@@ -22,7 +22,7 @@ import {
 import { sendDigestNow } from "./digest.js";
 import { sendBackupNow } from "./backup.js";
 import { resolveIngredientPricesWithCache, probeVkusvill, getWarmQueueSize } from "./vkusvillPrices.js";
-import { parseVkusvillCallRequest, callVkusvillCached } from "./vkusvillProxy.js";
+import { parseVkusvillCallRequest, callVkusvillCached, proxyCacheKey } from "./vkusvillProxy.js";
 import { createPayment, fetchPaymentStatus } from "./yookassa.js";
 import { claimReferral, maybeRewardReferral, REFERRAL_REWARD_DAYS } from "./referrals.js";
 import { createFamily, joinFamily, leaveFamily, getFamilyStatus, toggleFamilyPantryItem } from "./family.js";
@@ -62,6 +62,10 @@ export const EVENTS_PER_USER_PER_DAY = 300;
 // UPSTREAM_MAX_PER_MINUTE): что не успели, подогревается фоном (queueNamesForWarming).
 export const PRICES_LIVE_FETCHES_PER_REQUEST = 200;
 export const PRICES_LIVE_FETCHES_PER_HOUR = 600;
+// Ответить на /api/prices не позже, чем через столько (клиент ждёт 30 с): на
+// холодном кэше сотня названий в наш лимит не укладывается, и лучше вернуть то,
+// что успели, — остальное доработает в фоне и ляжет в кэш для следующих сборок.
+export const PRICES_RESPONSE_DEADLINE_MS = 18_000;
 // Прокси каталога (POST /api/vkusvill/call): запросов в минуту на пользователя
 // (попадания в общий кэш дешёвые) и живых — не попавших в кэш — в час.
 export const VKUSVILL_PROXY_RATE_LIMIT_MAX_REQUESTS = 120;
@@ -629,6 +633,7 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
           ok: true,
           ...computePlanStatus(isPro, freeTimes.length, new Date(), extraPlanCredits, freeTimes),
           proUntil: getProUntil(db, auth.telegramUserId, new Date().toISOString()),
+          proEndedAt: getProEndedAt(db, auth.telegramUserId, new Date().toISOString()),
         });
       } catch (err) {
         console.error("[api/plan-status] ошибка:", err);
@@ -900,6 +905,15 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
       const parsed = parseVkusvillCallRequest(auth.body);
       if (!parsed.ok) return sendJson(res, 400, { ok: false, error: parsed.error });
 
+      if (parsed.tool === "vkusvill_recipes") {
+        // Спрос на страницу каталога (без привязки к человеку) — по нему
+        // фоновый подогрев (warmup.js) решает, что держать свежим.
+        try {
+          recordWarmTarget(db, proxyCacheKey(parsed.tool, parsed.args), JSON.stringify(parsed.args), new Date().toISOString());
+        } catch (err) {
+          console.warn("[vkusvill/call] не записали спрос:", err.message);
+        }
+      }
       try {
         const data = await callVkusvillCached(parsed.tool, parsed.args, {
           takeLiveBudget: (n) => takeBudget(`vv-live:${auth.telegramUserId}`, n, { capacity: VKUSVILL_PROXY_LIVE_PER_HOUR, windowMs: 3_600_000 }),
@@ -936,6 +950,7 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
       try {
         const resolved = await resolveIngredientPricesWithCache(db, parsed.value.names, {
           maxLiveFetches: PRICES_LIVE_FETCHES_PER_REQUEST,
+          deadlineMs: PRICES_RESPONSE_DEADLINE_MS,
           takeLiveBudget: (n) => takeBudget(`prices-live:${auth.telegramUserId}`, n, { capacity: PRICES_LIVE_FETCHES_PER_HOUR, windowMs: 3_600_000 }),
         });
         sendJson(res, 200, { ok: true, prices: [...resolved.entries()].map(([name, v]) => ({ name, ...v })) });

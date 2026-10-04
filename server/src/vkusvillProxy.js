@@ -38,6 +38,11 @@ const CACHEABLE_TOOLS = new Set([
 ]);
 
 export const PROXY_CACHE_TTL_MS = 30 * 60 * 1000;
+// Страницы рецептов меняются редко (это не цены), а тянутся дорого — держим
+// дольше; фоновый подогрев (warmup.js) обновляет их заранее, до конца срока.
+export const RECIPES_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+const ttlFor = (tool) => (tool === "vkusvill_recipes" ? RECIPES_CACHE_TTL_MS : PROXY_CACHE_TTL_MS);
+export const proxyCacheKey = (tool, args) => `${tool}:${JSON.stringify(args)}`;
 // Страницы рецептов бывают тяжёлыми (состав, шаги) — потолок на число записей, а
 // не на байты; самую старую вытесняем, LRU ради этого не городим.
 export const PROXY_CACHE_MAX_ENTRIES = 400;
@@ -71,7 +76,7 @@ export function parseVkusvillCallRequest(body) {
  */
 export async function callVkusvillCached(tool, args, { takeLiveBudget = null, now = Date.now() } = {}) {
   const cacheable = CACHEABLE_TOOLS.has(tool);
-  const key = `${tool}:${JSON.stringify(args)}`;
+  const key = proxyCacheKey(tool, args);
 
   if (cacheable) {
     const hit = cache.get(key);
@@ -94,10 +99,31 @@ export async function callVkusvillCached(tool, args, { takeLiveBudget = null, no
     const data = await promise;
     if (cacheable) {
       if (cache.size >= PROXY_CACHE_MAX_ENTRIES) cache.delete(cache.keys().next().value);
-      cache.set(key, { data, expiresAt: now + PROXY_CACHE_TTL_MS });
+      cache.set(key, { data, expiresAt: now + ttlFor(tool), storedAt: now });
     }
     return data;
   } finally {
     if (cacheable) inflight.delete(key);
   }
+}
+
+/** Что лежит в кэше по этому вызову (без обращения к ВкусВиллу): данные и их
+ * возраст в мс, либо null. Для фонового подогрева. */
+export function peekProxyCache(tool, args, now = Date.now()) {
+  const hit = cache.get(proxyCacheKey(tool, args));
+  if (!hit || hit.expiresAt <= now) return null;
+  return { data: hit.data, ageMs: now - (hit.storedAt ?? now) };
+}
+
+/** Заранее обновляет запись кэша живым запросом (подогрев). Пока идёт запрос,
+ * пользователи продолжают получать старую запись — подмена только по успеху.
+ * При ошибке старая запись остаётся как была, ошибка пробрасывается. */
+export async function refreshProxyEntry(tool, args, now = Date.now()) {
+  if (!CACHEABLE_TOOLS.has(tool)) throw new Error("инструмент не кэшируется");
+  const data = await callVkusvillTool(tool, args);
+  const key = proxyCacheKey(tool, args);
+  cache.delete(key); // заново в конец очереди вытеснения: подогретое — самое нужное
+  if (cache.size >= PROXY_CACHE_MAX_ENTRIES) cache.delete(cache.keys().next().value);
+  cache.set(key, { data, expiresAt: now + ttlFor(tool), storedAt: now });
+  return data;
 }

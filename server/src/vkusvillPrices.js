@@ -44,6 +44,11 @@ const upstreamTimes = [];
 export function resetUpstreamGate() {
   upstreamTimes.length = 0;
 }
+/** Сколько запросов к ВкусВиллу ушло за последнюю минуту — фоновый подогрев
+ * смотрит на это и уступает дорогу пользователям. */
+export function getUpstreamLoad(now = Date.now()) {
+  return upstreamTimes.filter((t) => now - t < 60_000).length;
+}
 async function acquireUpstreamSlot(maxWaitMs = 8000) {
   const startedAt = Date.now();
   for (;;) {
@@ -201,9 +206,24 @@ async function fetchLive(name) {
   };
 }
 
-function isFresh(cached, nowMs) {
+// Подогрев обновляет цену заранее, не дожидаясь конца срока (MATCHED_TTL_MS):
+// пользователь почти всегда застаёт запись, которой не больше этих часов.
+export const WARM_REFRESH_AFTER_MS = 8 * 60 * 60 * 1000;
+
+function isFresh(cached, nowMs, maxAgeMs = Infinity) {
   const ageMs = nowMs - new Date(cached.updatedAt).getTime();
-  return ageMs < (cached.matched ? MATCHED_TTL_MS : NOT_FOUND_TTL_MS);
+  return ageMs < Math.min(maxAgeMs, cached.matched ? MATCHED_TTL_MS : NOT_FOUND_TTL_MS);
+}
+
+/** Из списка названий — те, для которых в кэше нет записи или она старше
+ * WARM_REFRESH_AFTER_MS (то есть пора обновлять заранее). */
+export function namesNeedingRefresh(db, names, nowMs = Date.now()) {
+  const unique = [...new Set(names)];
+  const cached = getIngredientPricesByName(db, unique);
+  return unique.filter((n) => {
+    const hit = cached.get(n);
+    return !hit || !isFresh(hit, nowMs, WARM_REFRESH_AFTER_MS);
+  });
 }
 
 /** names: string[] (могут повторяться) -> Map<name, {matched, price,
@@ -242,11 +262,16 @@ export async function runPriceWarmTick(db, { batch = 20 } = {}) {
   const names = [...warmQueue].slice(0, batch);
   names.forEach((n) => warmQueue.delete(n));
   if (names.length === 0) return { warmed: 0 };
-  await resolveIngredientPricesWithCache(db, names, { maxLiveFetches: batch, warm: true });
+  await resolveIngredientPricesWithCache(db, names, { maxLiveFetches: batch, warm: true, maxAgeMs: WARM_REFRESH_AFTER_MS });
   return { warmed: names.length };
 }
 
-export async function resolveIngredientPricesWithCache(db, names, { maxLiveFetches = Infinity, takeLiveBudget = null, warm = false } = {}) {
+// deadlineMs — ответить пользователю не позже, чем через столько: на холодном
+// кэше сотня названий не укладывается в наши 50 запросов в минуту, и ждать
+// минутами (клиент всё равно бросит запрос) незачем. Что не успели — остаётся
+// в работе: уже летящие запросы допишут свой результат в кэш сами, остальные
+// уходят в очередь подогрева.
+export async function resolveIngredientPricesWithCache(db, names, { maxLiveFetches = Infinity, takeLiveBudget = null, warm = false, maxAgeMs = Infinity, deadlineMs = null } = {}) {
   const uniqueNames = [...new Set(names.filter((n) => typeof n === "string" && n.trim().length > 0))];
   const result = new Map();
   if (uniqueNames.length === 0) return result;
@@ -256,7 +281,7 @@ export async function resolveIngredientPricesWithCache(db, names, { maxLiveFetch
   const toFetch = [];
   for (const name of uniqueNames) {
     const hit = cached.get(name);
-    if (hit && isFresh(hit, nowMs)) {
+    if (hit && isFresh(hit, nowMs, maxAgeMs)) {
       result.set(name, { matched: hit.matched, price: hit.price, productUnit: hit.productUnit, xmlId: hit.xmlId, packageAmount: hit.packageAmount, packageUnit: hit.packageUnit });
     } else {
       toFetch.push(name);
@@ -286,32 +311,43 @@ export async function resolveIngredientPricesWithCache(db, names, { maxLiveFetch
   }
   if (toFetch.length === 0) return result;
 
-  const settled = await mapWithConcurrency(toFetch, CONCURRENCY, fetchLive);
-  const toUpsert = [];
-  const nowISO = new Date(nowMs).toISOString();
-  settled.forEach((r, i) => {
-    const name = toFetch[i];
-    if (r.status !== "fulfilled") {
-      // Живой запрос не удался даже после ретраев — отдаём "не нашли" этому
-      // конкретному ответу, но НЕ кэшируем (см. комментарий выше функции).
-      // Если в кэше уже была строка (просто устаревшая) — лучше отдать её,
-      // чем ничего: устаревшая цена почти наверняка честнее, чем "нет цены
-      // вообще" при временном сбое ВкусВилл.
-      const stale = cached.get(name);
-      if (!warm) queueNamesForWarming([name]);
-      result.set(
-        name,
-        stale
-          ? { matched: stale.matched, price: stale.price, productUnit: stale.productUnit, xmlId: stale.xmlId, packageAmount: stale.packageAmount, packageUnit: stale.packageUnit }
-          : { matched: false, price: null, productUnit: null, xmlId: null, packageAmount: null, packageUnit: null }
-      );
-      return;
+  const deadlineAt = deadlineMs != null ? Date.now() + deadlineMs : null;
+  const outcomes = new Map(); // name -> {value} | {error} | отсутствует (не дошли до запроса)
+  const work = mapWithConcurrency(toFetch, CONCURRENCY, async (name) => {
+    if (deadlineAt != null && Date.now() > deadlineAt) return; // не начинаем новый запрос после срока
+    try {
+      const value = await fetchLive(name);
+      // Пишем сразу, а не пачкой в конце: если мы уже ответили по сроку, запрос
+      // всё равно доработает и его результат достанется следующим пользователям.
+      upsertIngredientPrices(db, [{ name, ...value }], new Date().toISOString());
+      outcomes.set(name, { value });
+    } catch (err) {
+      outcomes.set(name, { error: err });
     }
-    const { matched, price, productUnit, xmlId, packageAmount, packageUnit } = r.value;
-    result.set(name, { matched, price, productUnit, xmlId, packageAmount, packageUnit });
-    toUpsert.push({ name, matched, price, productUnit, xmlId, packageAmount, packageUnit });
   });
+  // Страховка от зависшего запроса: ждём не дольше срока + запас на уже начатые.
+  if (deadlineAt != null) await Promise.race([work, sleep(deadlineMs + 4000)]);
+  else await work;
 
-  if (toUpsert.length > 0) upsertIngredientPrices(db, toUpsert, nowISO);
+  for (const name of toFetch) {
+    const out = outcomes.get(name);
+    if (out?.value) {
+      const { matched, price, productUnit, xmlId, packageAmount, packageUnit } = out.value;
+      result.set(name, { matched, price, productUnit, xmlId, packageAmount, packageUnit });
+      continue;
+    }
+    // Запрос не удался (после ретраев), не дошёл до выполнения или не уложился в
+    // срок. Не кэшируем как "не найдено" — временный сбой не должен залипать.
+    // Если в кэше есть устаревшая запись — отдаём её: она почти наверняка
+    // честнее, чем "нет цены вообще".
+    const stale = cached.get(name);
+    if (!warm) queueNamesForWarming([name]);
+    result.set(
+      name,
+      stale
+        ? { matched: stale.matched, price: stale.price, productUnit: stale.productUnit, xmlId: stale.xmlId, packageAmount: stale.packageAmount, packageUnit: stale.packageUnit }
+        : { matched: false, price: null, productUnit: null, xmlId: null, packageAmount: null, packageUnit: null }
+    );
+  }
   return result;
 }

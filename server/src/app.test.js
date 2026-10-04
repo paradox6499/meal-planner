@@ -459,6 +459,21 @@ describe("HTTP-сервер", () => {
     expect(paid.proUntil).toBeTruthy();
   });
 
+  it("POST /api/plan-status: у бывшего Pro есть proEndedAt (для кнопки «Продлить»), у действующего и у новичка — null", async () => {
+    const status = async (id) => (await fetch(`${baseUrl}/api/plan-status`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ initData: validInitData(id) }),
+    })).json();
+    expect((await status(50)).proEndedAt).toBeNull();
+    extendUserPro(db, 51, { fromISO: new Date().toISOString(), addDays: 30 });
+    expect((await status(51)).proEndedAt).toBeNull();
+    const longAgo = new Date(Date.now() - 40 * 24 * 3600 * 1000).toISOString();
+    extendUserPro(db, 52, { fromISO: longAgo, addDays: 30 }); // закончился 10 дней назад
+    const ended = await status(52);
+    expect(ended.isPro).toBe(false);
+    expect(ended.proUntil).toBeNull();
+    expect(ended.proEndedAt).toBeTruthy();
+  });
+
   it("POST /api/plan-status без initData -> 401", async () => {
     const res = await fetch(`${baseUrl}/api/plan-status`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
     expect(res.status).toBe(401);
@@ -1413,6 +1428,11 @@ describe("Rate limiting", () => {
   });
 
   it(`/api/prices: отдельный более строгий лимит (${PRICES_RATE_LIMIT_MAX_REQUESTS}/мин) поверх общего`, async () => {
+    // Без подмены тест ходил в настоящий ВкусВилл и зависел от его настроения
+    // (быстрый отказ -> каждый из запросов снова живой -> секунды и таймаут).
+    vi.stubGlobal("fetch", vi.fn((url, opts) => (String(url).includes("mcp.vkusvill.ru")
+      ? Promise.resolve({ ok: true, json: async () => ({ jsonrpc: "2.0", id: 1, result: { content: [{ text: JSON.stringify({ ok: true, data: { items: [{ xml_id: "1", name: "Лук", price: { current: 50 }, unit: "кг" }] } }) }] } }) })
+      : realFetch(url, opts))));
     for (let i = 0; i < PRICES_RATE_LIMIT_MAX_REQUESTS; i++) {
       const res = await fetch(`${baseUrl}/api/prices`, {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ initData: validInitData(4), names: ["Лук"] }),
@@ -1451,6 +1471,9 @@ describe("Rate limiting", () => {
   });
 
   it("429 отдаёт понятное сообщение об ошибке, не голый статус", async () => {
+    vi.stubGlobal("fetch", vi.fn((url, opts) => (String(url).includes("mcp.vkusvill.ru")
+      ? Promise.resolve({ ok: true, json: async () => ({ jsonrpc: "2.0", id: 1, result: { content: [{ text: JSON.stringify({ ok: true, data: { items: [{ xml_id: "1", name: "Лук", price: { current: 50 }, unit: "кг" }] } }) }] } }) })
+      : realFetch(url, opts))));
     for (let i = 0; i < PRICES_RATE_LIMIT_MAX_REQUESTS; i++) {
       await fetch(`${baseUrl}/api/prices`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ initData: validInitData(6), names: ["Лук"] }) });
     }

@@ -273,8 +273,17 @@ export default function MealPlanner() {
   useEffect(() => {
     const startParam = window.Telegram?.WebApp?.initDataUnsafe?.start_param;
     const match = /^fam_([A-Za-z0-9_-]+)$/.exec(startParam || "");
-    if (match) joinFamily(match[1]).then((r) => { if (r?.ok) setFamilyStatus(r.status); });
+    if (match) {
+      joinFamily(match[1]).then((r) => {
+        if (!r?.ok) return;
+        setFamilyStatus(r.status);
+        // Раньше вступление было молчаливым: первый экран — обычный визард, о
+        // семье ни слова (перепроверка UX-аудита 04.10.2026).
+        setFamilyJoinedNote(true);
+      });
+    }
   }, []);
+  const [familyJoinedNote, setFamilyJoinedNote] = useState(false);
 
   const handleCreateFamily = async () => {
     hapticImpact("light");
@@ -417,6 +426,8 @@ export default function MealPlanner() {
     }
   }, []);
   const [referralNote, setReferralNote] = useState(false);
+  // Строка «Запомнили: …» под первым планом — один раз, пока человек её не закроет.
+  const [profileNote, setProfileNote] = useState(null);
 
   // Известный баг части Android-WebView (в т.ч. внутри Telegram Mini App) —
   // после программного обновления DOM (без тач-события от пользователя)
@@ -588,6 +599,30 @@ export default function MealPlanner() {
   // не трогая остальную неделю и не требуя пересборки с нуля
   const planView = useMemo(() => buildPlanView(planState, pools, family, priceByName, familyByMeal), [planState, pools, family, priceByName, familyByMeal]);
 
+  // Холодный кэш цен на сервере: первая сборка не успевает получить все цены за
+  // отведённое время (у ВкусВилла лимит запросов, см. server/src/warmup.js), а
+  // сервер при этом продолжает их добирать в фоне (за один круг успевает порядка
+  // 15-20 названий, всего их 80-160). Рецепты уже из каталога — а значит, надо
+  // просто чуть подождать: повторяем получение цен сами, не заставляя человека
+  // нажимать кнопку. Не больше AUTO_PRICE_RETRIES раз за план (около двух минут).
+  const AUTO_PRICE_RETRIES = 10;
+  const AUTO_PRICE_RETRY_DELAY_MS = 12_000;
+  const [autoPriceRetriesUsed, setAutoPriceRetriesUsed] = useState(0);
+  const recipesFromCatalogNow = !!pools && Object.values(pools).every((list) => list.every((r) => String(r.id).startsWith("vv-")));
+  const autoPriceRetryPending = done && !!planView?.mostlyUnpriced && recipesFromCatalogNow && autoPriceRetriesUsed < AUTO_PRICE_RETRIES;
+  useEffect(() => { setAutoPriceRetriesUsed(0); }, [planSlotId]);
+  useEffect(() => {
+    if (!autoPriceRetryPending || retryingPrices) return undefined;
+    const timer = setTimeout(() => {
+      if (document.hidden) return; // в фоне не гоняем, вернётся — следующий круг
+      setAutoPriceRetriesUsed((n) => n + 1);
+      handleRetryPrices();
+    }, AUTO_PRICE_RETRY_DELAY_MS);
+    return () => clearTimeout(timer);
+    // handleRetryPrices замыкает pools/planState — берём свежую версию на каждый круг
+  }, [autoPriceRetryPending, retryingPrices, autoPriceRetriesUsed]); // eslint-disable-line react-hooks/exhaustive-deps
+
+
   // "Несколько планов одновременно" — Pro-бонус (см. planSlots выше): можно
   // добавить ещё один слот, пока их меньше MAX_PRO_SLOTS. planStatus===null
   // (бэкенд ещё не ответил/недоступен) — canAddPlanSlot честно false, как и
@@ -749,6 +784,9 @@ export default function MealPlanner() {
     if (!hasProfile && diet && meals.length > 0) {
       saveProfile({ family, familyByMeal, meals, diet, allergies, cuisines, devices, displayName, mealTimes, maxCookTime });
       setHasProfile(true);
+      setProfileNote(
+        `${family} ${family === 1 ? "человек" : family < 5 ? "человека" : "человек"} · ${meals.length} ${meals.length === 1 ? "приём" : "приёма"} пищи в день · ${allergies.length > 0 ? `аллергии: ${allergies.length}` : "аллергий нет"}`
+      );
       trackEvent("profile_auto_saved");
     }
 
@@ -1098,15 +1136,16 @@ export default function MealPlanner() {
         </div>
 
         {referralNote && !showAccount && (
-          <div style={{ ...styles.warningBox, marginTop: 0 }}>
-            <TriangleAlert size={15} style={{ flexShrink: 0, marginTop: 1 }} />
-            <span style={{ flex: 1 }}>
-              Бонус за приглашение действует только для тех, кто открывает «Съедим» впервые, — вы уже пользовались приложением.
-            </span>
-            <button onClick={() => setReferralNote(false)} title="Закрыть" aria-label="Закрыть" style={{ ...styles.subRevertBtn, flexShrink: 0 }}>
-              <X size={13} />
-            </button>
-          </div>
+          <DismissibleNote onClose={() => setReferralNote(false)}>
+            Бонус за приглашение действует только для тех, кто открывает «Съедим» впервые, — вы уже пользовались приложением.
+          </DismissibleNote>
+        )}
+
+        {familyJoinedNote && !showAccount && (
+          <DismissibleNote onClose={() => setFamilyJoinedNote(false)}>
+            Вы вступили в семью: отметки «уже есть дома» в списке покупок теперь общие. Состав семьи — в{" "}
+            <button onClick={() => { setFamilyJoinedNote(false); setShowAccount(true); }} style={styles.inlineLinkBtn}>Аккаунте</button>.
+          </DismissibleNote>
         )}
 
         {showAccount && (
@@ -1379,6 +1418,13 @@ export default function MealPlanner() {
           />
         )}
 
+        {profileNote && !showAccount && !limitBlocked && !assembling && done && planView && (
+          <DismissibleNote onClose={() => setProfileNote(null)}>
+            Запомнили: {profileNote}. В следующий раз спросим только магазин и бюджет. Изменить — в{" "}
+            <button onClick={() => setShowAccount(true)} style={styles.inlineLinkBtn}>Аккаунте</button>.
+          </DismissibleNote>
+        )}
+
         {!showAccount && !limitBlocked && !assembling && done && planView && (
           <ResultView
             plan={planView}
@@ -1398,6 +1444,8 @@ export default function MealPlanner() {
             onRetryPrices={handleRetryPrices}
             retryingPrices={retryingPrices}
             priceRetryFailed={priceRetryFailed}
+            autoPriceRetryPending={autoPriceRetryPending}
+            familyPaused={!!familyStatus?.inFamily && familyStatus.active === false}
             familyPantryNames={familyStatus?.inFamily && familyStatus.active !== false ? familyStatus.pantryNames : null}
             onToggleFamilyPantry={familyStatus?.inFamily && familyStatus.active !== false ? handleToggleFamilyPantry : null}
           />
@@ -1460,6 +1508,18 @@ function SkeletonView() {
 // полным ResultView.
 const PRO_PRICE_RUB = 299;
 
+function DismissibleNote({ children, onClose }) {
+  return (
+    <div style={{ ...styles.warningBox, marginTop: 0 }}>
+      <TriangleAlert size={15} style={{ flexShrink: 0, marginTop: 1 }} />
+      <span style={{ flex: 1 }}>{children}</span>
+      <button onClick={onClose} title="Закрыть" aria-label="Закрыть" style={{ ...styles.subRevertBtn, flexShrink: 0 }}>
+        <X size={13} />
+      </button>
+    </div>
+  );
+}
+
 function formatResetDate(iso) {
   if (!iso) return null;
   const d = new Date(iso);
@@ -1482,7 +1542,7 @@ function LastPlanGateView({ latest, nextResetHint, onOpenPro, onOpenExtraPlan })
         <div style={styles.stack}>
           {latest.plan?.days?.map((d) => (
             <div key={d.day} style={styles.historyDay}>
-              <span style={styles.historyDayLabel}>День {d.day}</span>
+              <span style={styles.historyDayLabel}>{describePlanDay(latest.createdAt, d.day)?.label ?? `День ${d.day}`}</span>
               <span>
                 {d.dayMeals.map((dm, i) => (
                   <span key={i}>
@@ -2021,6 +2081,10 @@ function AccountSubscriptionCard({ onOpenPro, planStatus }) {
   // её на самом деле не знаем прямо сейчас.
   const isPro = planStatus?.isPro ?? false;
   const proUntilLabel = formatResetDate(planStatus?.proUntil);
+  // Pro уже был и закончился — для него это «продлить», а не «открыть» (в
+  // семейном блоке той же страницы уже написано «Продлить Pro»).
+  const proEndedLabel = !isPro ? formatResetDate(planStatus?.proEndedAt) : null;
+  const nextFreeLabel = !isPro && planStatus && planStatus.canGenerate === false ? formatResetDate(planStatus.nextResetHint) : null;
   return (
     <div style={styles.acctSection}>
       <div style={styles.subCard}>
@@ -2035,7 +2099,8 @@ function AccountSubscriptionCard({ onOpenPro, planStatus }) {
           </p>
         ) : (
           <p style={styles.acctSectionHint}>
-            На бесплатном тарифе — 1 план в неделю{planStatus ? ` (использовано: ${planStatus.usedThisWeek}/${planStatus.freeLimitPerWeek})` : ""}.
+            {proEndedLabel ? `Pro закончился ${proEndedLabel}. ` : ""}На бесплатном тарифе — 1 план в неделю
+            {nextFreeLabel ? `; следующий бесплатный — ${nextFreeLabel}` : planStatus ? "; сейчас он доступен" : ""}.
             Pro снимает это ограничение и добавляет напоминания, несколько планов и общий список на семью.
           </p>
         )}
@@ -2044,7 +2109,7 @@ function AccountSubscriptionCard({ onOpenPro, planStatus }) {
             срока (ручной тумблер админа) продлевать нечем. */}
         {(!isPro || planStatus?.proUntil) && (
           <button onClick={() => { hapticImpact("light"); onOpenPro(); }} style={{ ...styles.orderBtn, marginTop: 4 }}>
-            {isPro ? "Продлить Pro" : "Открыть Pro"}
+            {isPro || proEndedLabel ? "Продлить Pro" : "Открыть Pro"}
           </button>
         )}
       </div>
@@ -2131,11 +2196,19 @@ function FamilySection({ familyStatus, isPro, actionState, onCreate, onLeave, on
             <p style={styles.acctWarnHint}>
               {familyStatus.isOwner
                 ? "Семья на паузе: у вас закончился Pro, общий список не работает. Продлите Pro — и всё вернётся с того же места."
-                : "Общий список на паузе: у владельца семьи закончился Pro. Когда он продлит подписку, список снова заработает."}
+                : "Общий список на паузе: у владельца семьи закончился Pro. Когда владелец продлит Pro, список снова заработает."}
             </p>
-            {familyStatus.isOwner && (
+            {familyStatus.isOwner ? (
               <button onClick={() => { hapticImpact("light"); onOpenPro?.(); }} style={{ ...styles.orderBtn, marginTop: 4 }}>
                 Продлить Pro
+              </button>
+            ) : (
+              // Участнику самому нечем помочь, но может напомнить владельцу.
+              <button
+                onClick={() => { hapticImpact("light"); trackEvent("family_remind_owner"); shareViaTelegram("Наш общий список в «Съедим» на паузе — у тебя закончился Pro. Продли, пожалуйста, и список снова заработает.", BOT_SHARE_URL); }}
+                style={{ ...styles.orderBtn, marginTop: 4, display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}
+              >
+                <Share2 size={15} /> Напомнить владельцу
               </button>
             )}
           </>
@@ -2359,7 +2432,7 @@ function PlanHistorySection({ planHistory }) {
                   <div style={styles.historyDetail}>
                     {p.plan?.days?.map((d) => (
                       <div key={d.day} style={styles.historyDay}>
-                        <span style={styles.historyDayLabel}>День {d.day}</span>
+                        <span style={styles.historyDayLabel}>{describePlanDay(p.createdAt, d.day)?.label ?? `День ${d.day}`}</span>
                         <span>
                           {d.dayMeals.map((dm, i) => (
                             <span key={i}>
@@ -2640,7 +2713,10 @@ function PlanSlotsBar({ slots, activeId, onSwitch, onRemove, onAdd, canAdd }) {
     <div style={styles.planSlotsBar}>
       {slots.map((s) => (
         <button key={s.id} className="chip" onClick={() => onSwitch(s.id)} style={styles.planSlotChip(s.id === activeId)}>
-          <span>{STORES.find((st) => st.id === s.store)?.name || "План"}</span>
+          <span>
+            {STORES.find((st) => st.id === s.store)?.name || "План"}
+            {s.budget > 0 ? ` · ${Number(s.budget).toLocaleString("ru-RU")} ₽` : ""}
+          </span>
           {slots.length > 1 && (
             <span
               role="button"
@@ -2664,7 +2740,7 @@ function PlanSlotsBar({ slots, activeId, onSwitch, onRemove, onAdd, canAdd }) {
   );
 }
 
-function ResultView({ plan, planStartISO, onRebuild, generationPending, catalogReason, storeId, storeName, budget, family, mealsCount, diet, allergies, onSwap, onOpenRecipe, onRetryPrices, retryingPrices, priceRetryFailed, familyPantryNames, onToggleFamilyPantry }) {
+function ResultView({ plan, planStartISO, onRebuild, generationPending, catalogReason, storeId, storeName, budget, family, mealsCount, diet, allergies, onSwap, onOpenRecipe, onRetryPrices, retryingPrices, priceRetryFailed, autoPriceRetryPending, familyPaused, familyPantryNames, onToggleFamilyPantry }) {
   const [orderState, setOrderState] = useState({ status: "idle" }); // idle | loading | error
   // Отделы списка покупок сворачиваемые — по умолчанию все раскрыты (старое
   // поведение не меняется для короткого списка), но для семьи с 3+ приёмами
@@ -2921,13 +2997,14 @@ function ResultView({ plan, planStartISO, onRebuild, generationPending, catalogR
           <TriangleAlert size={15} style={{ flexShrink: 0, marginTop: 1 }} />
           <div style={{ minWidth: 0 }}>
             <span>
-              Не удалось получить цены на товары — ВкусВилл сейчас не отвечает. Сумма ниже — оценка по рецептам,
-              заказ откроется, когда цены появятся.
+              {autoPriceRetryPending
+                ? "Цены на товары ещё загружаются — подтянем их сами, это может занять до пары минут. Сумма ниже пока — оценка по рецептам."
+                : "Не удалось получить цены на товары — ВкусВилл сейчас не отвечает. Сумма ниже — оценка по рецептам, заказ откроется, когда цены появятся."}
             </span>
             {generationPending && (
               <p style={{ fontSize: 11.5, margin: "6px 0 0 0", opacity: 0.9 }}>Бесплатный план при этом не тратится.</p>
             )}
-            {catalogReason && (
+            {catalogReason && !autoPriceRetryPending && (
               <p style={{ fontSize: 10.5, margin: "6px 0 0 0", opacity: 0.7, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", wordBreak: "break-word" }}>
                 Причина: {catalogReason}
               </p>
@@ -3073,6 +3150,11 @@ function ResultView({ plan, planStartISO, onRebuild, generationPending, catalogR
       <p style={{ fontSize: 12, color: "var(--text-tertiary)", margin: "-4px 0 6px 0" }}>
         Что-то уже есть дома с прошлой недели — нажмите <Home size={11} style={{ verticalAlign: -1 }} /> рядом с товаром, вычтем из списка и запомним на следующий раз
       </p>
+      {familyPaused && (
+        <p style={{ fontSize: 12, color: "var(--text-tertiary)", margin: "0 0 6px 0" }}>
+          Общий список на паузе — отметки «уже есть дома» видны только вам.
+        </p>
+      )}
       {canOrderForReal && (
         <p style={{ fontSize: 12, color: "var(--text-tertiary)", margin: "0 0 10px 0" }}>
           Если товара не окажется в наличии на сайте ВкусВилл — нажмите <PackageSearch size={11} style={{ verticalAlign: -1 }} /> рядом с ним, подберём замену
