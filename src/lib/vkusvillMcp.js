@@ -408,6 +408,14 @@ const CART_LINK_LIMIT = 20;
 // откат на прямой resolvePrices(), только если бэкенда нет/не отвечает
 // (не в Telegram, бэкенд не задеплоен, сеть недоступна), ровно как было
 // раньше в этом случае.
+// xml_id для корзины — строго целое число (иначе «Invalid type. Expected integer»). Из кэша
+// сервера или из ответа поиска он мог прийти строкой/вещественным («605.0»); нет числа — null.
+export function toIntegerXmlId(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.round(n) : null;
+}
+
 async function resolveCartItems(items) {
   // Замена товара (getSubstituteOptions в vkusvillRecipes.js) уже несёт
   // свой xmlId — resolvePrices для таких позиций никого не спрашивает,
@@ -455,8 +463,11 @@ async function resolveCartItems(items) {
  * реальный MCP-вызов и сетевые запросы на vkusvill.ru, не предположение).*/
 export async function buildCartFromShoppingList(items) {
   const resolved = await resolveCartItems(items);
-  const matched = resolved.filter((r) => r.matched);
-  const unmatched = resolved.filter((r) => !r.matched).map((r) => r.name);
+  // Товар без пригодного для корзины числового xml_id считаем не найденным: одна такая позиция
+  // раньше роняла ВЕСЬ заказ ошибкой каталога.
+  const usable = (r) => r.matched && toIntegerXmlId(r.xml_id) != null;
+  const matched = resolved.filter(usable).map((r) => ({ ...r, xml_id: toIntegerXmlId(r.xml_id) }));
+  const unmatched = resolved.filter((r) => !usable(r)).map((r) => r.name);
 
   if (matched.length === 0) {
     throw new Error("Не нашли ни одного товара ВкусВилл по списку покупок");

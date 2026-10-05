@@ -419,6 +419,29 @@ describe("buildCartFromShoppingList — общий серверный кэш ц�
     expect(JSON.parse(opts.body).params.arguments.products).toEqual([{ xml_id: 777, q: 1 }]);
   });
 
+  it("xml_id из кэша сервера пришёл строкой «605.0» -> в корзину уходит целое 605 (каталог требует integer)", async () => {
+    resolvePricesViaBackend.mockResolvedValue([
+      { name: "Майонез", matched: true, price: 120, productUnit: "шт", xmlId: "605.0", packageAmount: null, packageUnit: null },
+    ]);
+    await buildCartFromShoppingList([{ name: "Майонез", amount: 200, unit: "г" }]);
+    const [, opts] = fetch.mock.calls.find(([, o]) => JSON.parse(o.body).params.name === "vkusvill_cart_link_create");
+    expect(JSON.parse(opts.body).params.arguments.products).toEqual([{ xml_id: 605, q: 1 }]);
+  });
+
+  it("товар без пригодного xml_id считается не найденным и не роняет весь заказ", async () => {
+    resolvePricesViaBackend.mockResolvedValue([
+      { name: "Майонез", matched: true, price: 120, productUnit: "шт", xmlId: 777, packageAmount: null, packageUnit: null },
+      { name: "Странный", matched: true, price: 50, productUnit: "шт", xmlId: null, packageAmount: null, packageUnit: null },
+    ]);
+    const { matchedCount, unmatched } = await buildCartFromShoppingList([
+      { name: "Майонез", amount: 200, unit: "г" }, { name: "Странный", amount: 1, unit: "шт" },
+    ]);
+    expect(matchedCount).toBe(1);
+    expect(unmatched).toEqual(["Странный"]);
+    const [, opts] = fetch.mock.calls.find(([, o]) => JSON.parse(o.body).params.name === "vkusvill_cart_link_create");
+    expect(JSON.parse(opts.body).params.arguments.products).toEqual([{ xml_id: 777, q: 1 }]);
+  });
+
   it("бэкенд недоступен (вернул null) -> откат на прежний прямой поиск по ВкусВилл", async () => {
     resolvePricesViaBackend.mockResolvedValue(null);
     // beforeEach застабил fetch так, что живой поиск бросает — здесь как раз

@@ -13,6 +13,7 @@ import {
   getUsersWithProExpiringSoon,
   addExtraPlanCredit, getExtraPlanCredits, consumeExtraPlanCredit,
   getUsersDueForFreeNudge, markFreeNudgeSent, recordPlanGeneration,
+  upsertIngredientPrices, getIngredientPricesByName,
 } from "./db.js";
 
 // Живой вывод из ревью Pro-плюшек (чат): "Напоминания от бота" рекламируются
@@ -652,5 +653,17 @@ describe("deleteUserData", () => {
 
   it("пользователь без данных — не ошибка", () => {
     expect(() => deleteUserData(openDb(":memory:"), 12345)).not.toThrow();
+  });
+});
+
+describe("xml_id в кэше цен — всегда целое число", () => {
+  it("записанный 605 читается числом 605, а не строкой «605.0»; старая строка «605.0» читается как 605", () => {
+    const db = openDb(":memory:");
+    upsertIngredientPrices(db, [{ name: "лук", matched: true, price: 5, productUnit: "кг", xmlId: 605 }], "2026-10-05T00:00:00.000Z");
+    expect(getIngredientPricesByName(db, ["лук"]).get("лук").xmlId).toBe(605);
+    db.exec("UPDATE ingredient_prices SET xml_id = '605.0' WHERE name = 'лук'"); // как в уже накопленном кэше
+    expect(getIngredientPricesByName(db, ["лук"]).get("лук").xmlId).toBe(605);
+    upsertIngredientPrices(db, [{ name: "нет", matched: false, price: null, productUnit: null, xmlId: null }], "2026-10-05T00:00:00.000Z");
+    expect(getIngredientPricesByName(db, ["нет"]).get("нет").xmlId).toBeNull();
   });
 });

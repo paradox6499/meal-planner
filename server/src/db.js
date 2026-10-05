@@ -414,6 +414,15 @@ export function openDb(path) {
   return db;
 }
 
+/** xml_id товара ВкусВилл — целое число. В колонку TEXT оно попадало как «605.0» (JS-число
+ * записывалось вещественным), и в корзину уходила строка, которую каталог отклонял
+ * («Expected integer»). Приводим к целому и при записи, и при чтении (старые строки). */
+function normalizeXmlId(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.round(n) : null;
+}
+
 /** Сырые строки кэша по именам, БЕЗ фильтра свежести — что считать
  * "устаревшим" решает вызывающий код (vkusvillPrices.js: разный TTL для
  * matched и не-matched записей), это не забота слоя хранения. */
@@ -426,7 +435,7 @@ export function getIngredientPricesByName(db, names) {
   return new Map(
     rows.map((r) => [
       r.name,
-      { matched: !!r.matched, price: r.price, productUnit: r.product_unit, xmlId: r.xml_id, packageAmount: r.package_amount, packageUnit: r.package_unit, updatedAt: r.updated_at },
+      { matched: !!r.matched, price: r.price, productUnit: r.product_unit, xmlId: normalizeXmlId(r.xml_id), packageAmount: r.package_amount, packageUnit: r.package_unit, updatedAt: r.updated_at },
     ])
   );
 }
@@ -447,7 +456,7 @@ export function upsertIngredientPrices(db, entries, updatedAtISO) {
   db.exec("BEGIN");
   try {
     for (const e of entries) {
-      stmt.run(e.name, e.matched ? 1 : 0, e.price ?? null, e.productUnit ?? null, e.xmlId ?? null, e.packageAmount ?? null, e.packageUnit ?? null, updatedAtISO);
+      stmt.run(e.name, e.matched ? 1 : 0, e.price ?? null, e.productUnit ?? null, normalizeXmlId(e.xmlId), e.packageAmount ?? null, e.packageUnit ?? null, updatedAtISO);
     }
     db.exec("COMMIT");
   } catch (err) {
