@@ -26,9 +26,10 @@ afterEach(() => {
 });
 
 describe("seedRecipeTargets", () => {
-  it("страницы 1 и 2 трёх категорий, аргументы в том порядке, как их шлёт фронтенд", () => {
+  it("обход каталога: основное 12 страниц, завтрак 4, перекус 3; аргументы в том порядке, как их шлёт фронтенд", () => {
     const seeds = seedRecipeTargets();
-    expect(seeds).toHaveLength(6);
+    expect(seeds).toHaveLength(12 + 4 + 3);
+    expect(seeds.filter((s) => s.args.id_category_filter === 332).map((s) => s.args.page)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
     expect(Object.keys(seeds[0].args)).toEqual([
       "q", "page", "sort", "id_feature_filter", "id_cooking_time_filter", "id_cooking_method_filter",
       "id_complexity_filter", "id_category_filter", "id_exclude_allergens_filter",
@@ -107,7 +108,7 @@ describe("журнал сборок и уборка", () => {
 });
 
 describe("runWarmupTick", () => {
-  it("на пустой базе тянет базовые страницы (не больше RECIPES_PER_TICK за тик) и ставит цены ингредиентов в работу", async () => {
+  it("на пустой базе тянет страницы обхода (не больше RECIPES_PER_TICK за тик) и ставит цены ингредиентов в работу", async () => {
     fetch.mockImplementation(async (url, opts) => {
       const body = JSON.parse(opts.body);
       const q = body.params?.arguments?.q;
@@ -129,10 +130,11 @@ describe("runWarmupTick", () => {
       return body.params?.name === "vkusvill_recipes" ? mcpOk(recipesPage([])) : mcpOk({ items: [] });
     });
     const t0 = Date.now();
-    // за три тика (по RECIPES_PER_TICK страниц) обновятся все 6 базовых страниц
-    for (let i = 0; i < 6 / RECIPES_PER_TICK; i++) { await runWarmupTick(db, { now: t0 }); resetUpstreamGate(); }
+    // за N тиков (по RECIPES_PER_TICK страниц) обновятся все страницы обхода
+    const ticks = Math.ceil(seedRecipeTargets().length / RECIPES_PER_TICK);
+    for (let i = 0; i < ticks; i++) { await runWarmupTick(db, { now: t0 }); resetUpstreamGate(); }
     const third = await runWarmupTick(db, { now: t0 });
-    expect(third.refreshedPages).toBe(0); // все шесть уже свежие
+    expect(third.refreshedPages).toBe(0); // все уже свежие
     resetUpstreamGate();
     const later = await runWarmupTick(db, { now: t0 + RECIPES_REFRESH_AFTER_MS + 1000 });
     expect(later.refreshedPages).toBe(RECIPES_PER_TICK);

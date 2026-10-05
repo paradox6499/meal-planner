@@ -33,6 +33,13 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 export const MATCHED_TTL_MS = 12 * 60 * 60 * 1000; // 12 часов
 export const NOT_FOUND_TTL_MS = 2 * 60 * 60 * 1000; // 2 часа
 
+// Устаревшую (но ещё не «древнюю») цену отдаём СРАЗУ, а обновляем в фоне — вместо ожидания живого
+// запроса на каждом протухшем названии. Цена ингредиента за сутки-двое почти не меняется, а
+// секунда-две ожидания на каждое из сотни названий превращались в минуты у человека, открывшего
+// приложение. Дальше этих пределов запись считается негодной и спрашивается живьём, как раньше.
+export const STALE_SERVE_MATCHED_MS = 3 * 24 * 60 * 60 * 1000; // 3 суток
+export const STALE_SERVE_NOT_FOUND_MS = 24 * 60 * 60 * 1000; // сутки
+
 // Общий потолок запросов к ВкусВиллу С НАШЕГО сервера. У них лимит 60 в минуту
 // (заголовок X-RateLimit-Limit в ответе mcp.vkusvill.ru) — на IP, а у нас все
 // пользователи ходят с одного IP (сервера), в отличие от прямых запросов из
@@ -210,6 +217,11 @@ async function fetchLive(name) {
 // пользователь почти всегда застаёт запись, которой не больше этих часов.
 export const WARM_REFRESH_AFTER_MS = 8 * 60 * 60 * 1000;
 
+function isServableStale(cached, nowMs) {
+  const ageMs = nowMs - new Date(cached.updatedAt).getTime();
+  return ageMs < (cached.matched ? STALE_SERVE_MATCHED_MS : STALE_SERVE_NOT_FOUND_MS);
+}
+
 function isFresh(cached, nowMs, maxAgeMs = Infinity) {
   const ageMs = nowMs - new Date(cached.updatedAt).getTime();
   return ageMs < Math.min(maxAgeMs, cached.matched ? MATCHED_TTL_MS : NOT_FOUND_TTL_MS);
@@ -292,14 +304,17 @@ export async function resolveIngredientPricesWithCache(db, names, { maxLiveFetch
   const nowMs = Date.now();
   const cached = getIngredientPricesByName(db, uniqueNames);
   const toFetch = [];
+  const servedStale = [];
   for (const name of uniqueNames) {
     const hit = cached.get(name);
-    if (hit && isFresh(hit, nowMs, maxAgeMs)) {
+    if (hit && (isFresh(hit, nowMs, maxAgeMs) || (!warm && isServableStale(hit, nowMs)))) {
       result.set(name, { matched: hit.matched, price: hit.price, productUnit: hit.productUnit, xmlId: hit.xmlId, packageAmount: hit.packageAmount, packageUnit: hit.packageUnit });
+      if (!isFresh(hit, nowMs)) servedStale.push(name); // отдали сразу, обновим в фоне
     } else {
       toFetch.push(name);
     }
   }
+  if (servedStale.length > 0) queueNamesForWarming(servedStale);
   if (toFetch.length === 0) return result;
 
   // Потолок живых запросов (аудит 29.09.2026): один пользователь с одной

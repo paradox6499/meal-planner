@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { openDb, getIngredientPricesByName, upsertIngredientPrices } from "./db.js";
-import { resolveIngredientPricesWithCache, MATCHED_TTL_MS, NOT_FOUND_TTL_MS } from "./vkusvillPrices.js";
+import { resolveIngredientPricesWithCache, MATCHED_TTL_MS, NOT_FOUND_TTL_MS, STALE_SERVE_MATCHED_MS, STALE_SERVE_NOT_FOUND_MS, getWarmQueueSize, clearWarmQueue } from "./vkusvillPrices.js";
 
 function mockMcpResponse(data) {
   return { ok: true, json: async () => ({ jsonrpc: "2.0", id: 1, result: { content: [{ text: JSON.stringify({ ok: true, data }) }] } }) };
@@ -52,8 +52,28 @@ describe("resolveIngredientPricesWithCache", () => {
     expect(cached.get("Несуществующий ингредиент").matched).toBe(false);
   });
 
-  it("устаревшая matched-запись (старше MATCHED_TTL_MS) — переспрашивает живьём", async () => {
-    const staleAt = new Date(Date.now() - MATCHED_TTL_MS - 1000).toISOString();
+  it("устаревшая, но не древняя запись отдаётся СРАЗУ, без ожидания живого запроса; обновление уходит в очередь подогрева", async () => {
+    clearWarmQueue();
+    const old = new Date(Date.now() - MATCHED_TTL_MS - 1000).toISOString(); // протухла (>12 ч), но моложе 3 суток
+    upsertIngredientPrices(db, [{ name: "Молоко", matched: true, price: 80, productUnit: "л", xmlId: 11 }], old);
+    fetch.mockResolvedValue(mockMcpResponse({ items: [{ xml_id: 22, name: "Молоко", price: { current: 90 }, unit: "л" }] }));
+    const result = await resolveIngredientPricesWithCache(db, ["Молоко"]);
+    expect(fetch).not.toHaveBeenCalled(); // человек не ждёт сеть
+    expect(result.get("Молоко").price).toBe(80); // старая цена, честно «на момент последнего обновления»
+    expect(getWarmQueueSize()).toBe(1); // а свежую подтянет фон
+  });
+
+  it("подогрев (warm) устаревшую запись НЕ отдаёт как есть, а перекачивает", async () => {
+    const old = new Date(Date.now() - MATCHED_TTL_MS - 1000).toISOString();
+    upsertIngredientPrices(db, [{ name: "Молоко", matched: true, price: 80, productUnit: "л", xmlId: 11 }], old);
+    fetch.mockResolvedValue(mockMcpResponse({ items: [{ xml_id: 22, name: "Молоко", price: { current: 90 }, unit: "л" }] }));
+    const result = await resolveIngredientPricesWithCache(db, ["Молоко"], { warm: true });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(result.get("Молоко").price).toBe(90);
+  });
+
+  it("древняя matched-запись (старше срока отдачи устаревшего) — переспрашивает живьём", async () => {
+    const staleAt = new Date(Date.now() - STALE_SERVE_MATCHED_MS - 1000).toISOString();
     upsertIngredientPrices(db, [{ name: "Молоко", matched: true, price: 80, productUnit: "л", xmlId: 11 }], staleAt);
     fetch.mockResolvedValue(mockMcpResponse({ items: [{ xml_id: 22, name: "Молоко", price: { current: 90 }, unit: "л" }] }));
 
@@ -62,8 +82,8 @@ describe("resolveIngredientPricesWithCache", () => {
     expect(result.get("Молоко")).toEqual({ matched: true, price: 90, productUnit: "л", xmlId: 22, packageAmount: null, packageUnit: null });
   });
 
-  it("устаревшая matched:false запись живёт МЕНЬШЕ (NOT_FOUND_TTL_MS < MATCHED_TTL_MS) — переспрашивает раньше, чем matched:true", async () => {
-    const between = new Date(Date.now() - NOT_FOUND_TTL_MS - 1000).toISOString(); // старше not-found TTL, но моложе matched TTL
+  it("matched:false запись живёт МЕНЬШЕ (сутки против трёх) — переспрашивает раньше, чем matched:true", async () => {
+    const between = new Date(Date.now() - STALE_SERVE_NOT_FOUND_MS - 1000).toISOString(); // старше срока отдачи для not-found, но моложе срока для matched
     upsertIngredientPrices(db, [{ name: "Специи", matched: false, price: null, productUnit: null, xmlId: null }], between);
     fetch.mockResolvedValue(mockMcpResponse({ items: [{ xml_id: 1, name: "Специи набор", price: { current: 40 }, unit: "шт" }] }));
 
@@ -73,7 +93,7 @@ describe("resolveIngredientPricesWithCache", () => {
   });
 
   it("живой запрос не удался после исчерпания ретраев — не кэширует провал, отдаёт устаревшую запись, если она была", async () => {
-    const staleAt = new Date(Date.now() - MATCHED_TTL_MS - 1000).toISOString();
+    const staleAt = new Date(Date.now() - STALE_SERVE_MATCHED_MS - 1000).toISOString();
     upsertIngredientPrices(db, [{ name: "Сыр", matched: true, price: 500, productUnit: "кг", xmlId: 33 }], staleAt);
     vi.useFakeTimers();
     fetch.mockResolvedValue(mockMcpError(RATE_LIMIT_ERROR));
