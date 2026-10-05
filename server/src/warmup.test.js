@@ -129,12 +129,10 @@ describe("runWarmupTick", () => {
       return body.params?.name === "vkusvill_recipes" ? mcpOk(recipesPage([])) : mcpOk({ items: [] });
     });
     const t0 = Date.now();
-    // за три тика обновятся все 6 базовых страниц
-    await runWarmupTick(db, { now: t0 });
-    await runWarmupTick(db, { now: t0 });
-    resetUpstreamGate();
+    // за три тика (по RECIPES_PER_TICK страниц) обновятся все 6 базовых страниц
+    for (let i = 0; i < 6 / RECIPES_PER_TICK; i++) { await runWarmupTick(db, { now: t0 }); resetUpstreamGate(); }
     const third = await runWarmupTick(db, { now: t0 });
-    expect(third.refreshedPages).toBe(0); // все шесть уже свежие (3 + 3 + 0)
+    expect(third.refreshedPages).toBe(0); // все шесть уже свежие
     resetUpstreamGate();
     const later = await runWarmupTick(db, { now: t0 + RECIPES_REFRESH_AFTER_MS + 1000 });
     expect(later.refreshedPages).toBe(RECIPES_PER_TICK);

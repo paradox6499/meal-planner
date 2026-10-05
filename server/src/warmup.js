@@ -23,9 +23,12 @@ import { listWarmTargets } from "./db.js";
 import { peekProxyCache, refreshProxyEntry, proxyCacheKey } from "./vkusvillProxy.js";
 import { getUpstreamLoad, namesNeedingRefresh, queueNamesForWarming, runPriceWarmTick } from "./vkusvillPrices.js";
 
-export const WARM_MAX_LOAD = 25; // из 50 — остальное оставляем пользователям
+// Подогрев намеренно «тихий»: при блокировке адреса сервера защитой каталога (QRATOR, 05.10.2026)
+// не хочется давать ей повод видеть в нас бота — мало запросов, никакой равномерной «барабанной дроби».
+export const WARM_MAX_LOAD = 15; // из 50 — остальное оставляем пользователям
+export const WARM_PRICES_PER_TICK = 8;
 export const RECIPES_REFRESH_AFTER_MS = 4 * 60 * 60 * 1000;
-export const RECIPES_PER_TICK = 3;
+export const RECIPES_PER_TICK = 2;
 export const WARM_TARGETS_LIMIT = 20;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -99,6 +102,6 @@ export async function runWarmupTick(db, { now = Date.now(), maxLoad = WARM_MAX_L
   const needing = namesNeedingRefresh(db, names, now);
   queueNamesForWarming(needing);
 
-  const { warmed } = await runPriceWarmTick(db);
+  const { warmed } = await runPriceWarmTick(db, { batch: WARM_PRICES_PER_TICK });
   return { skipped: null, refreshedPages, queuedNames: needing.length, warmedPrices: warmed };
 }

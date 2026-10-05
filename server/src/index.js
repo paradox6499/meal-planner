@@ -199,7 +199,9 @@ maintenanceTick();
 // неудач подряд (см. catalogMonitor.js) — и подогрев цен из очереди раз в минуту
 // (см. warmup.js): страницы рецептов частых фильтров и цены их ингредиентов
 // обновляются заранее, плюс названия, до которых не дошли из-за общего лимита.
-const CATALOG_MONITOR_INTERVAL_MS = 10 * 60 * 1000;
+// Раз в 30 минут (было 10): одинаковая проба с равным интервалом похожа на бота; алерт админу
+// приходит после двух неудач подряд, то есть примерно через час.
+const CATALOG_MONITOR_INTERVAL_MS = 30 * 60 * 1000;
 async function catalogMonitorTick() {
   try {
     await runCatalogMonitorTick({ botToken: BOT_TOKEN, adminTelegramId: ADMIN_TELEGRAM_ID });
