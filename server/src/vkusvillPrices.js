@@ -215,12 +215,25 @@ function isFresh(cached, nowMs, maxAgeMs = Infinity) {
   return ageMs < Math.min(maxAgeMs, cached.matched ? MATCHED_TTL_MS : NOT_FOUND_TTL_MS);
 }
 
+// Названия, запрос по которым не удался: подогрев не пробует их снова целый час.
+// Без этого одно название, на которое каталог стабильно отвечает ошибкой, уходило в
+// очередь каждую минуту и бесконечно повторялось (с ретраями — десятки запросов к
+// ВкусВиллу в час впустую; они ещё и похожи на поведение бота для защиты каталога).
+export const FAILED_NAME_RETRY_AFTER_MS = 60 * 60 * 1000;
+const failedAt = new Map(); // name -> timestamp неудачи
+export function clearFailedNames() {
+  failedAt.clear();
+}
+
 /** Из списка названий — те, для которых в кэше нет записи или она старше
- * WARM_REFRESH_AFTER_MS (то есть пора обновлять заранее). */
+ * WARM_REFRESH_AFTER_MS (то есть пора обновлять заранее); недавно не
+ * получившиеся пропускаем (см. FAILED_NAME_RETRY_AFTER_MS). */
 export function namesNeedingRefresh(db, names, nowMs = Date.now()) {
   const unique = [...new Set(names)];
   const cached = getIngredientPricesByName(db, unique);
   return unique.filter((n) => {
+    const failed = failedAt.get(n);
+    if (failed != null && nowMs - failed < FAILED_NAME_RETRY_AFTER_MS) return false;
     const hit = cached.get(n);
     return !hit || !isFresh(hit, nowMs, WARM_REFRESH_AFTER_MS);
   });
@@ -338,6 +351,7 @@ export async function resolveIngredientPricesWithCache(db, names, { maxLiveFetch
     }
     // Запрос не удался (после ретраев), не дошёл до выполнения или не уложился в
     // срок. Не кэшируем как "не найдено" — временный сбой не должен залипать.
+    if (out?.error) failedAt.set(name, Date.now());
     // Если в кэше есть устаревшая запись — отдаём её: она почти наверняка
     // честнее, чем "нет цены вообще".
     const stale = cached.get(name);

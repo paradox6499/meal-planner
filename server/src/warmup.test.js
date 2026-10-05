@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { runWarmupTick, seedRecipeTargets, ingredientNamesFromRecipesPage, RECIPES_REFRESH_AFTER_MS, RECIPES_PER_TICK } from "./warmup.js";
 import { clearProxyState, peekProxyCache, refreshProxyEntry, callVkusvillCached, proxyCacheKey, RECIPES_CACHE_TTL_MS, PROXY_CACHE_TTL_MS } from "./vkusvillProxy.js";
-import { resetUpstreamGate, clearWarmQueue, getWarmQueueSize, getUpstreamLoad, UPSTREAM_MAX_PER_MINUTE, resolveIngredientPricesWithCache, WARM_REFRESH_AFTER_MS, namesNeedingRefresh } from "./vkusvillPrices.js";
+import { resetUpstreamGate, clearWarmQueue, getWarmQueueSize, getUpstreamLoad, UPSTREAM_MAX_PER_MINUTE, resolveIngredientPricesWithCache, WARM_REFRESH_AFTER_MS, namesNeedingRefresh, clearFailedNames, FAILED_NAME_RETRY_AFTER_MS } from "./vkusvillPrices.js";
 import { openDb, recordPlanGeneration, recordWarmTarget, listWarmTargets, purgeOldWarmTargets, upsertIngredientPrices, getIngredientPricesByName } from "./db.js";
 import { runMaintenance } from "./maintenance.js";
 
@@ -15,6 +15,7 @@ beforeEach(() => {
   clearProxyState();
   resetUpstreamGate();
   clearWarmQueue();
+  clearFailedNames();
   vi.stubGlobal("fetch", vi.fn());
   vi.spyOn(Math, "random").mockReturnValue(0);
   vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -186,6 +187,14 @@ describe("цены: заблаговременное обновление и с�
     await resolveIngredientPricesWithCache(db, ["лук"], { warm: true, maxAgeMs: WARM_REFRESH_AFTER_MS });
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(getIngredientPricesByName(db, ["лук"]).get("лук").price).toBe(99);
+  });
+
+  it("название, запрос по которому не удался, подогрев не повторяет целый час", async () => {
+    fetch.mockResolvedValue({ ok: false, status: 400, json: async () => ({}) });
+    const t0 = Date.now();
+    await resolveIngredientPricesWithCache(db, ["Для заливки:"], { warm: true });
+    expect(namesNeedingRefresh(db, ["Для заливки:", "Лук"], t0 + 1000)).toEqual(["Лук"]); // неудавшееся пропущено
+    expect(namesNeedingRefresh(db, ["Для заливки:"], t0 + FAILED_NAME_RETRY_AFTER_MS + 1000)).toEqual(["Для заливки:"]); // через час — снова
   });
 
   it("deadlineMs: что не успели — отдаём как «не найдено», в очередь подогрева; начатое допишется в кэш само", async () => {
