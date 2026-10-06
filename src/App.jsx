@@ -2290,9 +2290,11 @@ function LegalAndDataSection() {
   return (
     <div style={styles.acctSection}>
       <div style={styles.acctSectionTitle}>Документы и данные</div>
-      <div style={{ display: "flex", flexWrap: "wrap", gap: "6px 16px" }}>
-        <button onClick={() => openLegalPage("privacy.html")} style={styles.inlineLinkBtn}>Политика конфиденциальности</button>
-        <button onClick={() => openLegalPage("terms.html")} style={styles.inlineLinkBtn}>Пользовательское соглашение</button>
+      {/* Крупная зона нажатия (высота ~44 px): раньше ссылки были высотой 14 px, на телефоне в них
+          почти невозможно было попасть пальцем («кнопка не нажимается»). */}
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-start" }}>
+        <button onClick={() => openLegalPage("privacy.html")} style={styles.legalLinkBtn}>Политика конфиденциальности</button>
+        <button onClick={() => openLegalPage("terms.html")} style={styles.legalLinkBtn}>Пользовательское соглашение</button>
       </div>
       <button onClick={handleDelete} disabled={state.status === "loading"} style={{ ...styles.acctClearBtn, marginTop: 14 }}>
         {state.status === "loading" ? "Удаляем…" : "Удалить мои данные"}
@@ -3519,6 +3521,7 @@ const styles = {
   // интервалами в карточке (18-22px), а не выбивается мелким зазором.
   quickHint: { fontSize: 12, color: "var(--text-tertiary)", textAlign: "center", marginTop: 24, paddingTop: 4, lineHeight: 1.4 },
   inlineLinkBtn: { background: "none", border: "none", padding: 0, color: ACCENT, fontWeight: 600, fontSize: 12, cursor: "pointer", textDecoration: "underline" },
+  legalLinkBtn: { background: "none", border: "none", padding: "12px 0", minHeight: 44, color: ACCENT, fontWeight: 600, fontSize: 13, cursor: "pointer", textDecoration: "underline", textAlign: "left" },
   // Живая жалоба в чате: "надпись Аккаунт близко к кнопке" — marginBottom
   // был всего 2px, заголовок практически прилипал к пилюле "Назад" сразу
   // над ним. 14 — тот же отступ, что у resultHeader (шапка ResultView),
