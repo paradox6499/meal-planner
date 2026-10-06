@@ -18,7 +18,7 @@ import { sendTelegramMessage, buildPaymentConfirmationText } from "./telegram.js
 export const PRO_PRODUCT = "pro";
 export const EXTRA_PLAN_PRODUCT = "extra_plan";
 export const PRO_PERIOD_DAYS = 30;
-export const DEFAULT_WEBAPP_URL = "https://paradox6499.github.io/meal-planner/";
+export const DEFAULT_WEBAPP_URL = "https://s-edim.ru/";
 
 const AMOUNT_EPSILON = 0.005;
 const RECONCILE_MAX_AGE_MS = 48 * 60 * 60 * 1000;
