@@ -2399,8 +2399,13 @@ const HISTORY_DAY_EMOJI_FALLBACK = "🍽";
 // Пустой массив — реальное "пока нет истории", не то же самое, что "нечем
 // спросить" (тогда весь раздел скрыт целиком, чтобы не обещать того, что
 // зависит от недоступного бэкенда).
+// Сколько последних планов видно сразу: чем дольше человек пользуется приложением, тем длиннее
+// история (до 12 записей), и настройки Аккаунта уезжали далеко вниз. Остальное — по кнопке.
+const HISTORY_VISIBLE_DEFAULT = 3;
+
 function PlanHistorySection({ planHistory }) {
   const [openId, setOpenId] = useState(null);
+  const [showAll, setShowAll] = useState(false);
   // Запрос в чате (после созвона с другом): "история планов, когда хочет
   // пользователь открыть, то не даёт рецепты, а только список блюд". Планы,
   // сохранённые ДО этого изменения, не несут dm.ingr/steps (в истории уже
@@ -2408,6 +2413,8 @@ function PlanHistorySection({ planHistory }) {
   // кнопкой, без ошибки. Новые планы кладут полный рецепт, см. handleFinish.
   const [historyRecipe, setHistoryRecipe] = useState(null);
   if (planHistory === null) return null;
+  const hiddenCount = Math.max(0, planHistory.length - HISTORY_VISIBLE_DEFAULT);
+  const visible = showAll ? planHistory : planHistory.slice(0, HISTORY_VISIBLE_DEFAULT);
 
   return (
     <div style={styles.acctSection}>
@@ -2416,7 +2423,7 @@ function PlanHistorySection({ planHistory }) {
         <p style={styles.acctSectionHint}>Пока пусто — здесь появятся планы, которые вы соберёте.</p>
       ) : (
         <div style={styles.stack}>
-          {planHistory.map((p) => {
+          {visible.map((p) => {
             const open = openId === p.id;
             const dateLabel = new Date(p.createdAt).toLocaleDateString("ru-RU", { day: "numeric", month: "long" });
             return (
@@ -2473,6 +2480,15 @@ function PlanHistorySection({ planHistory }) {
               </div>
             );
           })}
+          {hiddenCount > 0 && (
+            <button
+              type="button"
+              onClick={() => { hapticSelect(); setShowAll((v) => !v); if (showAll) setOpenId(null); }}
+              style={{ ...styles.inlineLinkBtn, padding: "10px 0", minHeight: 44, alignSelf: "flex-start", fontSize: 13 }}
+            >
+              {showAll ? "Свернуть" : `Показать ещё ${hiddenCount}`}
+            </button>
+          )}
         </div>
       )}
       {historyRecipe && <RecipeModal dm={historyRecipe} family={historyRecipe.family} onClose={() => setHistoryRecipe(null)} />}
