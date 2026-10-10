@@ -20,6 +20,8 @@ import { ConsentCheckbox } from "./common.jsx";
 // как в PlanHistorySection) и итоговая сумма, без попытки притвориться
 // полным ResultView.
 export const PRO_PRICE_RUB = 299;
+// Цена за день — понятный ориентир рядом с ценой за месяц (299 / 30 ≈ 10 ₽).
+export const PRO_PRICE_PER_DAY_RUB = Math.round(PRO_PRICE_RUB / 30);
 
 // Живой вывод из ревью Pro-плюшек (чат): "разовая дешёвая покупка ещё одного
 // плана на этой неделе как ступенька перед полной подпиской". Дублирует
@@ -164,12 +166,13 @@ export function ProModal({ onClose }) {
             <span style={styles.proPriceNew}>{PRO_PRICE_RUB} ₽</span>
             <span style={styles.proPricePeriod}>за 30 дней</span>
           </div>
+          <p style={{ ...styles.acctSectionHint, textAlign: "center", margin: "2px 0 0 0" }}>≈ {PRO_PRICE_PER_DAY_RUB} ₽ в день</p>
           {/* Зачёркнутая "399 ₽" убрана (UX-аудит 29.09.2026): по ней никогда
               не продавали — это вводящая в заблуждение реклама. "/ мес" и
               "подписка" тоже намекали на автосписание, которого нет (см.
               terms.html: разовый платёж на 30 дней). */}
           <p style={{ ...styles.acctSectionHint, textAlign: "center", margin: "4px 0 0 0" }}>
-            Разовый платёж — автосписания нет, продлевать или нет решаете вы.
+            <b>Без автосписаний:</b> разовый платёж, продлевать или нет решаете вы.
           </p>
           {/* Обязателен для чека (54-ФЗ, см. lib/payerContact.js) — ЮKassa
               без email/телефона покупателя отклоняет платёж целиком.
