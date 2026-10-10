@@ -40,6 +40,7 @@ export function usePlanSession({
   cuisines,
   devices,
   allergies,
+  dislikes,
   maxCookTime,
   hasProfile,
   profileSnapshot,
@@ -284,7 +285,7 @@ export function usePlanSession({
       // откатываемся на прежний статический список, а не роняем экран:
       // пользователь всё равно должен получить план, просто оценочный.
       try {
-        const result = await fetchVkusvillPools({ diet, cuisines, devices, allergies, categories: neededCategories, maxCookTime });
+        const result = await fetchVkusvillPools({ diet, cuisines, devices, allergies, categories: neededCategories, maxCookTime, dislikes });
         resolvedPools = result.pools;
         resolvedPriceByName = result.priceByName;
         const gotAnything = neededCategories.some((c) => (resolvedPools[c] || []).length > 0);
@@ -292,10 +293,10 @@ export function usePlanSession({
       } catch (err) {
         console.warn("VkusVill MCP недоступен, откат на статические рецепты:", err.message);
         catalogError = String(err?.message || err).slice(0, 160);
-        resolvedPools = buildPools(diet, cuisines, devices, allergies, maxCookTime);
+        resolvedPools = buildPools(diet, cuisines, devices, allergies, maxCookTime, dislikes);
       }
     } else {
-      resolvedPools = buildPools(diet, cuisines, devices, allergies, maxCookTime);
+      resolvedPools = buildPools(diet, cuisines, devices, allergies, maxCookTime, dislikes);
     }
 
     const newPlanState = buildInitialPlan(resolvedPools, selectedMeals, budget, family, familyByMeal);
@@ -340,7 +341,7 @@ export function usePlanSession({
       saveProfile(profileSnapshot());
       setHasProfile(true);
       setProfileNote(
-        `${family} ${family === 1 ? "человек" : family < 5 ? "человека" : "человек"} · ${meals.length} ${meals.length === 1 ? "приём" : "приёма"} пищи в день · ${allergies.length > 0 ? `аллергии: ${allergies.length}` : "аллергий нет"}`
+        `${family} ${family === 1 ? "человек" : family < 5 ? "человека" : "человек"} · ${meals.length} ${meals.length === 1 ? "приём" : "приёма"} пищи в день · ${allergies.length > 0 ? `аллергии: ${allergies.length}` : "аллергий нет"}${dislikes.length > 0 ? ` · не любите: ${dislikes.length}` : ""}`
       );
       trackEvent("profile_auto_saved");
     }

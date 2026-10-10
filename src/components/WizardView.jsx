@@ -1,6 +1,7 @@
 // Шаги визарда сборки плана (магазин, семья, приёмы пищи, бюджет, рацион,
 // аллергии) и кнопки навигации. Только разметка: состояние визарда и сама
 // сборка (handleFinish) живут в MealPlanner (App.jsx).
+import { useState } from "react";
 import { Check, ChevronLeft, ChevronRight, Store, Users, Wallet, Salad, Ban, UtensilsCrossed } from "lucide-react";
 import { ALLERGENS } from "../data/recipes.js";
 import { styles, ACCENT } from "../styles.js";
@@ -9,6 +10,7 @@ import { mealsPerDayLabel } from "../lib/format.js";
 import { hapticSelect, hapticImpact } from "../lib/haptics.js";
 import { trackEvent } from "../lib/analytics.js";
 import { StepShell } from "./common.jsx";
+import { DislikesPicker } from "./DislikesPicker.jsx";
 
 export function WizardView({
   currentStepKey,
@@ -30,6 +32,8 @@ export function WizardView({
   setAllergiesAnswered,
   allergiesAnswered,
   allergies,
+  dislikes,
+  setDislikes,
   step,
   planToReturnTo,
   handleBackToPlan,
@@ -39,6 +43,8 @@ export function WizardView({
   canNextByKey,
   setShowAccount,
 }) {
+  // Нелюбимые продукты — необязательный блок под аллергиями: свёрнут, пока человек не откроет (или уже есть выбор в профиле).
+  const [dislikesOpen, setDislikesOpen] = useState(false);
   return (
     <div style={styles.stepBody} className="mp-step-body">
       {currentStepKey === "store" && (
@@ -167,6 +173,19 @@ export function WizardView({
                 <div style={{ fontWeight: 600 }}>{a.label}</div>
               </button>
             ))}
+          </div>
+          <div style={{ marginTop: 16 }}>
+            {dislikesOpen || dislikes.length > 0 ? (
+              <>
+                <div style={styles.acctLabel}>Не люблю (необязательно)</div>
+                <p style={styles.acctSectionHint}>Это пожелание, а не запрет: постараемся не брать такие блюда.</p>
+                <DislikesPicker dislikes={dislikes} setDislikes={setDislikes} />
+              </>
+            ) : (
+              <button type="button" onClick={() => { hapticSelect(); setDislikesOpen(true); }} style={styles.legalLinkBtn}>
+                + Есть продукты, которые не любите? (необязательно)
+              </button>
+            )}
           </div>
         </StepShell>
       )}

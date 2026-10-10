@@ -603,3 +603,42 @@ describe("fetchVkusvillPools — отказ каталога не маскиру
     expect(pools.main).toEqual([]);
   });
 });
+
+describe("fetchVkusvillPools — нелюбимые продукты (мягкое предпочтение)", () => {
+  const raw = (id, ...names) => ({
+    id, name: `Блюдо ${id}`, cooking_time: { name: "до 40 минут" }, steps: [], portions: 1,
+    ingredients: names.map((n) => ({ name: n, quantity: "100 г" })),
+  });
+  const args = (dislikes) => ({ diet: "any", cuisines: [], devices: [], allergies: [], categories: ["main"], maxCookTime: null, dislikes });
+  const pagesAsked = () => searchRecipes.mock.calls.map(([a]) => a.page);
+
+  beforeEach(() => { searchRecipes.mockReset(); resolvePrices.mockReset(); resolvePrices.mockResolvedValue([]); resolvePricesViaBackend.mockReset(); });
+
+  it("рецепты с нелюбимым не попадают в пул, если подходящих хватает; страницы 3–5 догружаются, когда пул мал", async () => {
+    searchRecipes.mockResolvedValue({ items: [raw(1, "Курица", "Лук"), raw(2, "Гречка"), raw(3, "Рис"), raw(4, "Картофель"), raw(5, "Тыква"), raw(6, "Лук", "Фарш")] });
+    const { pools } = await fetchVkusvillPools(args(["onion"]));
+    expect(pools.main.map((r) => r.id).sort()).toEqual(["vv-2", "vv-3", "vv-4", "vv-5"]);
+    expect(pagesAsked()).toEqual(expect.arrayContaining([1, 2, 3, 4, 5]));
+  });
+
+  it("если после догрузки всё равно мало — возвращаются рецепты без учёта нелюбимого (не пустой приём пищи)", async () => {
+    searchRecipes.mockResolvedValue({ items: [raw(1, "Курица", "Лук"), raw(2, "Лук", "Рис")] });
+    const { pools } = await fetchVkusvillPools(args(["onion"]));
+    expect(pools.main).toHaveLength(2);
+  });
+
+  it("без нелюбимого лишние страницы не запрашиваются", async () => {
+    searchRecipes.mockResolvedValue({ items: [raw(1, "Курица"), raw(2, "Гречка")] });
+    await fetchVkusvillPools(args([]));
+    expect(Math.max(...pagesAsked())).toBe(2);
+  });
+
+  it("ошибка догрузки дополнительных страниц не роняет сборку", async () => {
+    searchRecipes.mockImplementation(async ({ page }) => {
+      if (page >= 3) throw new Error("сеть");
+      return { items: [raw(1, "Курица", "Лук"), raw(2, "Гречка"), raw(3, "Рис"), raw(4, "Картофель"), raw(5, "Тыква")] };
+    });
+    const { pools } = await fetchVkusvillPools(args(["onion"]));
+    expect(pools.main.map((r) => r.id).sort()).toEqual(["vv-2", "vv-3", "vv-4", "vv-5"]);
+  });
+});

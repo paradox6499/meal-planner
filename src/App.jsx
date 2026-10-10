@@ -4,6 +4,7 @@ import { saveProfile, clearProfile } from "./lib/profile.js";
 import { loadActivePlanSlots, clearAllActivePlans } from "./lib/activePlan.js";
 import { updateMealTimes } from "./lib/backend.js";
 import { trackEvent } from "./lib/analytics.js";
+import { loadAcquisitionAnswered, saveAcquisitionAnswered, startParamKind } from "./lib/acquisition.js";
 import logoUrl from "./assets/logo.svg";
 import { hapticImpact, hapticNotify } from "./lib/haptics.js";
 import { promptAddToHomeScreen } from "./lib/homeScreen.js";
@@ -12,6 +13,7 @@ import { GLOBAL_CSS } from "./globalCss.js";
 import { STEP_META, QUICK_STEP_KEYS, STORES } from "./constants.js";
 import { DismissibleNote, SkeletonView } from "./components/common.jsx";
 import { RecipeModal } from "./components/RecipeModal.jsx";
+import { AcquisitionCard } from "./components/AcquisitionCard.jsx";
 import { ProModal, ExtraPlanModal } from "./components/ProModals.jsx";
 import { LastPlanGateView } from "./components/LastPlanGateView.jsx";
 import { LimitBlockedView } from "./components/LimitBlockedView.jsx";
@@ -55,7 +57,7 @@ export default function MealPlanner() {
   const {
     hasProfile, setHasProfile,
     family, setFamily, familyByMeal, setFamilyByMeal, meals, setMeals, diet, setDiet,
-    allergies, setAllergies, allergiesAnswered, setAllergiesAnswered, cuisines, setCuisines,
+    allergies, setAllergies, allergiesAnswered, setAllergiesAnswered, dislikes, setDislikes, cuisines, setCuisines,
     devices, setDevices, maxCookTime, setMaxCookTime, displayName, setDisplayName, mealTimes, setMealTimes,
     toggleSimple, toggleCuisine, profileSnapshot, resetAnswersToDefaults,
   } = useWizardProfile();
@@ -86,9 +88,18 @@ export default function MealPlanner() {
 
   const homeScreenStatus = useHomeScreen();
 
+  // «Откуда узнали» спрашиваем только новичка (на момент открытия у него не было профиля) и один раз.
+  const [isFirstSession] = useState(() => !hasProfile);
+  const [acquisitionAsked, setAcquisitionAsked] = useState(loadAcquisitionAnswered);
+  const finishAcquisition = (option) => {
+    if (option) trackEvent(option.event, { start: startParamKind(window.Telegram?.WebApp?.initDataUnsafe?.start_param) });
+    saveAcquisitionAnswered();
+    setAcquisitionAsked(true);
+  };
+
   // "Открыли приложение" — раз за сессию, не при каждом ререндере.
   useEffect(() => {
-    trackEvent("app_opened", { has_profile: hasProfile });
+    trackEvent("app_opened", { has_profile: hasProfile, start: startParamKind(window.Telegram?.WebApp?.initDataUnsafe?.start_param) });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -102,7 +113,7 @@ export default function MealPlanner() {
     planSlots, planSlotId, store, setStore, planCreatedAt, budget, setBudget, done, assembling, retryingPrices, generationPending, catalogReason, priceRetryFailed, handleRetryPrices, planView, autoPriceRetryPending, canAddPlanSlot, handleFinish, swapMeal, handleNewPlan, switchToSlot, removeSlot, startNewPlanSlot, planToReturnTo, handleBackToPlan,
   } = usePlanSession({
     initialPlanSlots,
-    family, familyByMeal, planStatus, mealTimes, setLimitBlocked, meals, setShowAccount, diet, cuisines, devices, allergies, maxCookTime, hasProfile, profileSnapshot, setHasProfile, setProfileNote, setStep, setOpenRecipe, resetAnswersToDefaults,
+    family, familyByMeal, planStatus, mealTimes, setLimitBlocked, meals, setShowAccount, diet, cuisines, devices, allergies, dislikes, maxCookTime, hasProfile, profileSnapshot, setHasProfile, setProfileNote, setStep, setOpenRecipe, resetAnswersToDefaults,
   });
 
   // Известный баг части Android-WebView (в т.ч. внутри Telegram Mini App) —
@@ -230,6 +241,7 @@ export default function MealPlanner() {
             meals={meals} setMeals={setMeals}
             diet={diet} setDiet={setDiet}
             allergies={allergies} setAllergies={setAllergies}
+            dislikes={dislikes} setDislikes={setDislikes}
             cuisines={cuisines} setCuisines={setCuisines}
             devices={devices} setDevices={setDevices}
             maxCookTime={maxCookTime} setMaxCookTime={setMaxCookTime}
@@ -312,6 +324,8 @@ export default function MealPlanner() {
             setAllergiesAnswered={setAllergiesAnswered}
             allergiesAnswered={allergiesAnswered}
             allergies={allergies}
+            dislikes={dislikes}
+            setDislikes={setDislikes}
             step={step}
             planToReturnTo={planToReturnTo}
             handleBackToPlan={handleBackToPlan}
@@ -339,6 +353,10 @@ export default function MealPlanner() {
             Запомнили: {profileNote}. В следующий раз спросим только магазин и бюджет. Изменить — в{" "}
             <button onClick={() => setShowAccount(true)} style={styles.inlineLinkBtn}>Аккаунте</button>.
           </DismissibleNote>
+        )}
+
+        {isFirstSession && !acquisitionAsked && !showAccount && !limitBlocked && !assembling && done && planView && (
+          <AcquisitionCard onAnswer={finishAcquisition} onClose={() => finishAcquisition(null)} />
         )}
 
         {!showAccount && !limitBlocked && !assembling && done && planView && (

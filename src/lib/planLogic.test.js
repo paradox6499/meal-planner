@@ -606,3 +606,23 @@ describe("серия и экономия: план с суммой 0 ₽ — э�
     expect(computeRecentSavings([{ budget: 4000, totalCost: 0 }, { budget: 4000, totalCost: 3000 }])).toBe(1000);
   });
 });
+
+describe("buildPools — нелюбимые продукты", () => {
+  it("рецепты со словом из нелюбимого убираются, пока подходящих хватает", () => {
+    const all = buildPools("any", [], ["stove", "oven", "multi", "grill", "airfryer", "microwave", "blender"], [], null);
+    const withoutMushrooms = buildPools("any", [], ["stove", "oven", "multi", "grill", "airfryer", "microwave", "blender"], [], null, ["mushrooms"]);
+    for (const cat of ["breakfast", "main", "snack"]) {
+      expect(withoutMushrooms[cat].length).toBeGreaterThan(0);
+      expect(withoutMushrooms[cat].length).toBeLessThanOrEqual(all[cat].length);
+      for (const r of withoutMushrooms[cat]) {
+        expect(r.ingr.some(([n]) => /гриб|шампиньон/i.test(n))).toBe(false);
+      }
+    }
+  });
+
+  it("если нелюбимое убрало бы почти всё — пул остаётся как есть", () => {
+    const every = ["mushrooms", "eggplant", "onion", "garlic", "cilantro", "celery", "broccoli", "offal", "fish", "seafood", "lamb", "spicy", "картофел", "морков", "яйц", "куриц", "рис", "мук", "молок", "сыр", "помидор"];
+    const pools = buildPools("any", [], ["stove", "oven", "multi", "grill", "airfryer", "microwave", "blender"], [], null, every);
+    for (const cat of ["breakfast", "main", "snack"]) expect(pools[cat].length).toBeGreaterThan(0);
+  });
+});

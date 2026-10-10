@@ -23,6 +23,7 @@
 // они не гарантированно вечны.
 
 import { searchRecipes, resolvePrices, searchProducts, getProductAnalogs } from "./vkusvillMcp.js";
+import { recipeHasDislike, DISLIKE_MIN_POOL } from "./dislikes.js";
 import { resolvePricesViaBackend } from "./backend.js";
 
 const CATEGORY_BY_MEAL = { breakfast: 339, main: 332, snack: 335 };
@@ -419,14 +420,14 @@ const RECIPE_SEARCH_PAGES = [1, 2];
 // комментарий у COOKING_TIME_BUCKET_IDS), с сохранением дедупликации по id.
 // Ошибка отдельного под-запроса не должна обрушивать всю категорию —
 // считаем её как "ничего не нашли на этой странице/бакете".
-export async function searchRawRecipes({ q, categoryId, cookingMethod, excludeAllergens, maxCookTime }) {
+export async function searchRawRecipes({ q, categoryId, cookingMethod, excludeAllergens, maxCookTime, pages: pageNumbers = RECIPE_SEARCH_PAGES }) {
   const bucketIds = maxCookTime ? COOKING_TIME_BUCKET_IDS[maxCookTime] : null;
   const fetchBucket = async (timeId) => {
     // Часть страниц могла не ответить — берём остальные, но если НЕ ответила ни
     // одна, это отказ каталога, а не "пусто": пробрасываем настоящую причину.
     const failures = [];
     const pages = await Promise.all(
-      RECIPE_SEARCH_PAGES.map((page) =>
+      pageNumbers.map((page) =>
         searchRecipes({
           q, page, sort: "popularity",
           id_category_filter: categoryId, id_cooking_method_filter: cookingMethod,
@@ -436,7 +437,7 @@ export async function searchRawRecipes({ q, categoryId, cookingMethod, excludeAl
           .catch((err) => { failures.push(err); return []; })
       )
     );
-    if (failures.length === RECIPE_SEARCH_PAGES.length) throw failures[0];
+    if (failures.length === pageNumbers.length) throw failures[0];
     // На случай, если у ВкусВилл страницы 1 и 2 когда-нибудь пересекутся
     // (короткий хвостовой список, дубли на границе страницы) — дедуп по id
     // тут же, а не только на уровне бакетов ниже.
@@ -456,7 +457,12 @@ export async function searchRawRecipes({ q, categoryId, cookingMethod, excludeAl
  * предпочтение, как кухня/техника: если с ним категория опустела, повторяем
  * запрос без ограничения времени — лучше показать план с рецептом подольше,
  * чем оставить приём пищи вообще без рецепта. */
-export async function fetchVkusvillPools({ diet, cuisines, devices, allergies, categories, maxCookTime }) {
+// Нелюбимые продукты (dislikes) — мягкое предпочтение: если после фильтра в категории остаётся мало рецептов,
+// сначала догружаем ещё страницы каталога (DISLIKE_EXTRA_PAGES — они же подогреваются на сервере), и только
+// если и так мало — оставляем рецепты как есть (лучше блюдо с нелюбимым ингредиентом, чем пустой приём пищи).
+const DISLIKE_EXTRA_PAGES = [3, 4, 5];
+
+export async function fetchVkusvillPools({ diet, cuisines, devices, allergies, categories, maxCookTime, dislikes = [] }) {
   const effectiveAllergies = diet === "gf" && !allergies.includes("gluten") ? [...allergies, "gluten"] : allergies;
   const excludeAllergens = [...new Set(effectiveAllergies.map((a) => ALLERGEN_EXCLUDE_ID[a]).filter(Boolean))];
   // ВкусВилл принимает ОДИН id_cooking_method_filter за запрос (см. комментарий
@@ -480,10 +486,16 @@ export async function fetchVkusvillPools({ diet, cuisines, devices, allergies, c
   const specificCuisines = cuisines.filter((c) => c !== "any");
   const q = specificCuisines.length === 1 ? CUISINE_HINT[specificCuisines[0]] || "" : "";
 
-  const normalizeAndFilter = (raw, category) =>
+  const normalizeAndFilter = (raw, category, { withDislikes = true } = {}) =>
     raw
       .map((r) => normalizeVkusvillRecipe(r, category))
-      .filter((r) => r.ingr.length > 0 && !recipeViolatesDiet(r, diet) && !recipeViolatesAllergies(r, effectiveAllergies));
+      .filter(
+        (r) =>
+          r.ingr.length > 0 &&
+          !recipeViolatesDiet(r, diet) &&
+          !recipeViolatesAllergies(r, effectiveAllergies) &&
+          !(withDislikes && recipeHasDislike(r, dislikes))
+      );
 
   const pools = {};
   const categoryErrors = [];
@@ -491,13 +503,28 @@ export async function fetchVkusvillPools({ diet, cuisines, devices, allergies, c
     categories.map(async (category) => {
       const categoryId = CATEGORY_BY_MEAL[category] || 0;
       try {
-        const raw = await searchRawRecipes({ q, categoryId, cookingMethod, excludeAllergens, maxCookTime });
+        let raw = await searchRawRecipes({ q, categoryId, cookingMethod, excludeAllergens, maxCookTime });
         let normalized = normalizeAndFilter(raw, category);
         if (normalized.length === 0 && maxCookTime) {
           // смягчаем время готовки, если из-за него пул опустел — та же
           // логика, что у buildPools() для кухни/техники в data/recipes.js
-          const rawUnrestricted = await searchRawRecipes({ q, categoryId, cookingMethod, excludeAllergens, maxCookTime: null });
-          normalized = normalizeAndFilter(rawUnrestricted, category);
+          raw = await searchRawRecipes({ q, categoryId, cookingMethod, excludeAllergens, maxCookTime: null });
+          normalized = normalizeAndFilter(raw, category);
+        }
+        if (dislikes.length > 0 && normalized.length < DISLIKE_MIN_POOL * 2) {
+          // нелюбимое отсеяло много — догружаем следующие страницы (ошибка догрузки не критична)
+          try {
+            const more = await searchRawRecipes({ q, categoryId, cookingMethod, excludeAllergens, maxCookTime, pages: DISLIKE_EXTRA_PAGES });
+            const seen = new Set(raw.map((r) => r.id));
+            raw = [...raw, ...more.filter((r) => !seen.has(r.id))];
+            normalized = normalizeAndFilter(raw, category);
+          } catch (err) {
+            console.warn("Не удалось догрузить страницы рецептов под нелюбимое:", err.message);
+          }
+        }
+        if (dislikes.length > 0 && normalized.length < DISLIKE_MIN_POOL) {
+          // подходящих всё ещё слишком мало — возвращаем рецепты без учёта нелюбимого
+          normalized = normalizeAndFilter(raw, category, { withDislikes: false });
         }
         pools[category] = normalized;
       } catch (err) {

@@ -5,10 +5,11 @@
 // компонентов — см. planLogic.test.js рядом.
 import { RECIPES, RECIPES_BY_ID, DEPARTMENTS, departmentOf, forbiddenIngredientsFor, recipeHasAllergen, effectiveRecipeCost } from "../data/recipes.js";
 import { resolveIngredientCost } from "./vkusvillRecipes.js";
+import { applyDislikes } from "./dislikes.js";
 
 // пул подходящих рецептов на категорию: рацион/кухня/техника — мягкие предпочтения
 // (при пустом пуле смягчаются), аллергии — жёсткое исключение (не смягчается никогда)
-export function buildPools(diet, cuisines, devices, allergies, maxCookTime) {
+export function buildPools(diet, cuisines, devices, allergies, maxCookTime, dislikes = []) {
   const cuisineFilter = cuisines.length === 0 || cuisines.includes("any");
   const forbidden = forbiddenIngredientsFor(allergies);
   // Найдено при разборе жалобы "не нашлось рецептов для Перекрёстка": если
@@ -45,6 +46,8 @@ export function buildPools(diet, cuisines, devices, allergies, maxCookTime) {
           (safeDiet === "any" || r.diets.includes(safeDiet))
       );
     }
+    // нелюбимое — мягко: если из-за него почти ничего не остаётся, берём пул как есть
+    pool = applyDislikes(pool, dislikes).recipes;
     return [...pool].sort((a, b) => a.cost - b.cost);
   };
 

@@ -28,6 +28,12 @@ export function shouldRunDigest(now, lastDigestAt, digestHour) {
 const EVENT_LABELS = {
   app_error: "❗ ошибок в приложении",
   app_opened: "открыли приложение",
+  acq_friend: "узнали: от друзей или семьи",
+  acq_channel: "узнали: из Telegram-канала",
+  acq_ads: "узнали: из рекламы",
+  acq_search: "узнали: из поиска",
+  acq_social: "узнали: соцсети и видео",
+  acq_other: "узнали: другое",
   wizard_started: "визард начали",
   wizard_step_completed: "шагов визарда пройдено",
   plan_generated: "планов собрано",

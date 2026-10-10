@@ -174,6 +174,12 @@ export const styles = {
     boxShadow: active ? "0 4px 14px rgba(10,132,255,0.18)" : "none",
     color: "var(--text-primary)",
   }),
+  // Компактная «таблетка» для списков коротких вариантов (нелюбимые продукты): в отличие от storeChip переносится по строкам.
+  pillChip: (active) => ({
+    display: "inline-flex", alignItems: "center", gap: 6, padding: "9px 14px", minHeight: 40, borderRadius: 999, cursor: "pointer",
+    border: active ? "1.5px solid rgba(10,132,255,0.55)" : "1px solid var(--hairline)",
+    ...glass(active ? 0.7 : 0.45, 12), fontSize: 13.5, fontWeight: 600, color: "var(--text-primary)", fontFamily: "inherit",
+  }),
   rowChip: (active) => ({
     display: "flex", alignItems: "center", justifyContent: "space-between", textAlign: "left", padding: "13px 15px", borderRadius: 18, cursor: "pointer",
     border: active ? `1.5px solid rgba(10,132,255,0.55)` : "1px solid var(--hairline)",

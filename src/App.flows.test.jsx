@@ -277,3 +277,59 @@ describe("MealPlanner: запросы статуса тарифа при зап�
     expect(backend.checkPlanStatus).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("MealPlanner: нелюбимые продукты и вопрос «откуда узнали»", () => {
+  it("выбранное на шаге аллергий уходит в сборку плана и сохраняется в профиль", async () => {
+    render(<MealPlanner />);
+    for (let i = 0; i < 5; i++) clickButton(/Далее/);
+    clickButton(/Аллергий нет/);
+    clickButton(/Есть продукты, которые не любите/);
+    fireEvent.click(screen.getByText("Грибы"));
+    fireEvent.change(screen.getByLabelText("Добавить нелюбимый продукт"), { target: { value: "Тыква" } });
+    fireEvent.click(screen.getByLabelText("Добавить"));
+    clickButton(/Собрать список/);
+    await screen.findByText("Ваш план на неделю");
+
+    expect(vkusvillRecipes.fetchVkusvillPools).toHaveBeenCalledWith(expect.objectContaining({ dislikes: ["mushrooms", "тыква"] }));
+    expect(JSON.parse(localStorage.getItem("sedim.profile.v1")).dislikes).toEqual(["mushrooms", "тыква"]);
+  });
+
+  it("без выбора нелюбимого визард работает как раньше: блок свёрнут, dislikes пустой", async () => {
+    render(<MealPlanner />);
+    await passNewUserWizard();
+    expect(vkusvillRecipes.fetchVkusvillPools).toHaveBeenCalledWith(expect.objectContaining({ dislikes: [] }));
+  });
+
+  it("новичок после первого плана видит вопрос «Откуда вы о нас узнали?», ответ скрывает его навсегда", async () => {
+    const first = render(<MealPlanner />);
+    await passNewUserWizard();
+    expect(screen.getByText("Откуда вы о нас узнали?")).toBeTruthy();
+    fireEvent.click(screen.getByText("От друзей или семьи"));
+    expect(screen.queryByText("Откуда вы о нас узнали?")).toBeNull();
+    expect(localStorage.getItem("sedim.acquisition.v1")).toBe("1");
+    first.unmount();
+
+    render(<MealPlanner />);
+    await screen.findByText("Ваш план на неделю");
+    expect(screen.queryByText("Откуда вы о нас узнали?")).toBeNull();
+  });
+
+  it("закрытие крестиком тоже считается «спросили» — не показываем снова", async () => {
+    render(<MealPlanner />);
+    await passNewUserWizard();
+    fireEvent.click(screen.getByLabelText("Закрыть вопрос"));
+    expect(screen.queryByText("Откуда вы о нас узнали?")).toBeNull();
+    expect(localStorage.getItem("sedim.acquisition.v1")).toBe("1");
+  });
+
+  it("вернувшемуся пользователю (профиль уже сохранён) вопрос не показываем", async () => {
+    localStorage.setItem("sedim.profile.v1", JSON.stringify({
+      family: 2, meals: ["lunch", "dinner"], diet: "any", allergies: [], dislikes: [], cuisines: [], devices: ALL_DEVICE_IDS,
+    }));
+    render(<MealPlanner />);
+    clickButton(/Далее/); // магазин -> бюджет
+    clickButton(/Собрать список/);
+    await screen.findByText("Ваш план на неделю");
+    expect(screen.queryByText("Откуда вы о нас узнали?")).toBeNull();
+  });
+});

@@ -9,6 +9,7 @@ import { hapticSelect, hapticImpact } from "../../lib/haptics.js";
 import { styles, ACCENT } from "../../styles.js";
 import { SUPPORT_URL, MEALS, DEFAULT_MEAL_TIMES, DIETS, CUISINES, DEVICES, COOK_TIME_TIERS } from "../../constants.js";
 import { AccountSubscriptionCard } from "./SubscriptionCard.jsx";
+import { DislikesPicker } from "../DislikesPicker.jsx";
 import { FamilySection } from "./FamilySection.jsx";
 import { ReferralSection } from "./ReferralSection.jsx";
 import { ProgressSection } from "./ProgressSection.jsx";
@@ -30,7 +31,7 @@ export const THEME_OPTIONS = [
 export function AccountView({
   displayName, setDisplayName, theme, setTheme,
   family, setFamily, familyByMeal, setFamilyByMeal, meals, setMeals, diet, setDiet,
-  allergies, setAllergies, cuisines, setCuisines, devices, setDevices,
+  allergies, setAllergies, dislikes, setDislikes, cuisines, setCuisines, devices, setDevices,
   maxCookTime, setMaxCookTime,
   mealTimes, setMealTimes,
   toggleSimple, toggleCuisine, hasProfile, onSave, onClear, onClose, onOpenPro,
@@ -352,6 +353,10 @@ export function AccountView({
             </button>
           ))}
         </div>
+
+        <div style={{ ...styles.acctLabel, marginTop: 16 }}>Не люблю</div>
+        <p style={styles.acctSectionHint}>Постараемся не брать такие блюда. Если подходящих совсем мало, часть всё же может попасть в план.</p>
+        <DislikesPicker dislikes={dislikes} setDislikes={setDislikes} />
 
         <div style={{ ...styles.acctLabel, marginTop: 16 }}>Кухня</div>
         <div style={styles.grid2}>

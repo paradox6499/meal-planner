@@ -40,6 +40,8 @@ export function useWizardProfile() {
   // запоминался в профиль навсегда). Поэтому "ответил или нет" — отдельный флаг:
   // у новичка шаг не пройти, пока он явно не выберет "Аллергий нет" или аллерген.
   const [allergiesAnswered, setAllergiesAnswered] = useState(!!savedProfile);
+  // Нелюбимые продукты — мягкое предпочтение (см. lib/dislikes.js): id готовых вариантов и свои слова.
+  const [dislikes, setDislikes] = useState(Array.isArray(savedProfile?.dislikes) ? savedProfile.dislikes : []);
   const [cuisines, setCuisines] = useState(savedProfile?.cuisines ?? []);
   const [devices, setDevices] = useState(savedProfile?.devices ?? ALL_DEVICE_IDS);
   const [maxCookTime, setMaxCookTime] = useState(savedProfile?.maxCookTime ?? null);
@@ -59,16 +61,16 @@ export function useWizardProfile() {
     });
   };
 
-  const profileSnapshot = () => ({ family, familyByMeal, meals, diet, allergies, cuisines, devices, displayName, mealTimes, maxCookTime });
+  const profileSnapshot = () => ({ family, familyByMeal, meals, diet, allergies, dislikes, cuisines, devices, displayName, mealTimes, maxCookTime });
   const resetAnswersToDefaults = () => {
     setFamily(2); setFamilyByMeal({}); setMeals(["lunch", "dinner"]); setDiet(DEFAULT_DIET);
-    setAllergies([]); setAllergiesAnswered(false); setCuisines([]); setDevices(ALL_DEVICE_IDS); setMaxCookTime(null);
+    setAllergies([]); setAllergiesAnswered(false); setDislikes([]); setCuisines([]); setDevices(ALL_DEVICE_IDS); setMaxCookTime(null);
   };
 
   return {
     hasProfile, setHasProfile,
     family, setFamily, familyByMeal, setFamilyByMeal, meals, setMeals, diet, setDiet,
-    allergies, setAllergies, allergiesAnswered, setAllergiesAnswered, cuisines, setCuisines,
+    allergies, setAllergies, allergiesAnswered, setAllergiesAnswered, dislikes, setDislikes, cuisines, setCuisines,
     devices, setDevices, maxCookTime, setMaxCookTime, displayName, setDisplayName, mealTimes, setMealTimes,
     toggleSimple, toggleCuisine, profileSnapshot, resetAnswersToDefaults,
   };
