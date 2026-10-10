@@ -25,9 +25,9 @@ export function usePlanStatus({ showAccount, hasLocalPlanAtMount }) {
   // например только что оплатили Pro).
   const [planStatus, setPlanStatus] = useState(null);
   const [planHistory, setPlanHistory] = useState(null);
-  useEffect(() => {
-    checkPlanStatus().then(setPlanStatus);
-  }, []);
+  // Статус при запуске спрашивается в эффекте lastPlanGate ниже — одним запросом
+  // на оба дела (каждый /api/plan-status на сервере сверяет незавершённые
+  // платежи с ЮKassa, два одинаковых запроса при запуске были лишними).
   useEffect(() => {
     if (!showAccount) return;
     checkPlanStatus().then(setPlanStatus);
@@ -56,11 +56,14 @@ export function usePlanStatus({ showAccount, hasLocalPlanAtMount }) {
   // существующий экран limitBlocked, а не после десятка вопросов визарда.
   const [lastPlanGate, setLastPlanGate] = useState(null); // null | { latest, status }
   useEffect(() => {
-    if (hasLocalPlanAtMount) return; // локальный план уже есть — обычный путь через ResultView, эта проверка не нужна
     let cancelled = false;
     (async () => {
       const status = await checkPlanStatus();
-      if (cancelled || !status || status.canGenerate !== false) return;
+      if (cancelled) return;
+      setPlanStatus(status);
+      // Локальный план уже есть — обычный путь через ResultView, экран «ваш
+      // последний план» не нужен.
+      if (hasLocalPlanAtMount || !status || status.canGenerate !== false) return;
       const history = await fetchPlanHistory();
       if (cancelled) return;
       const latest = history && history.length > 0 ? history[0] : null;

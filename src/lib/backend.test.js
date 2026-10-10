@@ -152,6 +152,37 @@ describe("checkPlanStatus", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false }));
     expect(await checkPlanStatus()).toBeNull();
   });
+
+  it("одновременные вызовы делят один запрос и получают один и тот же ответ", async () => {
+    vi.stubEnv("VITE_BACKEND_URL", "https://api.example.com");
+    stubTelegram("x");
+    let respond;
+    const fetchMock = vi.fn(() => new Promise((r) => { respond = r; }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const a = checkPlanStatus();
+    const b = checkPlanStatus();
+    const c = checkPlanStatus();
+    respond({ ok: true, json: async () => ({ ok: true, canGenerate: true }) });
+
+    expect(await Promise.all([a, b, c])).toEqual([{ ok: true, canGenerate: true }, { ok: true, canGenerate: true }, { ok: true, canGenerate: true }]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("после ответа (в том числе неудачного) следующий вызов снова идёт в сеть — это не кэш", async () => {
+    vi.stubEnv("VITE_BACKEND_URL", "https://api.example.com");
+    stubTelegram("x");
+    const fetchMock = vi.fn()
+      .mockRejectedValueOnce(new Error("boom"))
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ ok: true, canGenerate: false }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ ok: true, canGenerate: true }) });
+    vi.stubGlobal("fetch", fetchMock);
+
+    expect(await checkPlanStatus()).toBeNull();
+    expect(await checkPlanStatus()).toEqual({ ok: true, canGenerate: false });
+    expect(await checkPlanStatus()).toEqual({ ok: true, canGenerate: true });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
 });
 
 // Просьба в чате: "когда пользователь переходил в бота по кнопке 'написать

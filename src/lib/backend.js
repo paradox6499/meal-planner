@@ -102,8 +102,24 @@ function currentInitData() {
 /** Возвращает null, если проверять нечем/не у кого (нет бэкенда или не в
  * Telegram) — вызывающий код (App.jsx) в этом случае не блокирует сборку
  * плана вообще, тот же принцип "бэкенд опционален", что и у остальных
- * функций этого файла. */
-export async function checkPlanStatus() {
+ * функций этого файла.
+ *
+ * Одновременные вызовы делят ОДИН запрос: каждый /api/plan-status на сервере
+ * сверяет незавершённые платежи с ЮKassa, а статус спрашивают из нескольких
+ * мест (запуск, открытие Аккаунта, "Собрать список", возвращение в приложение
+ * после оплаты — иногда в одну и ту же секунду). Как только ответ пришёл,
+ * следующий вызов снова идёт в сеть — это не кэш, свежесть не теряется. */
+let planStatusInFlight = null;
+export function checkPlanStatus() {
+  if (!planStatusInFlight) {
+    planStatusInFlight = requestPlanStatus().finally(() => {
+      planStatusInFlight = null;
+    });
+  }
+  return planStatusInFlight;
+}
+
+async function requestPlanStatus() {
   const backendUrl = getBackendUrl();
   const initData = currentInitData();
   if (!backendUrl || !initData) return null;

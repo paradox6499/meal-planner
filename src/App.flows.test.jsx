@@ -252,3 +252,28 @@ describe("MealPlanner: «ждёт засчитывания» принадлеж�
     await waitFor(() => expect(pendingNote()).toBeTruthy());
   });
 });
+
+describe("MealPlanner: запросы статуса тарифа при запуске", () => {
+  // Каждый /api/plan-status на сервере запускает сверку незавершённых платежей
+  // с ЮKassa — при запуске он нужен ровно один, а не по запросу на каждый эффект.
+  it("без сохранённого плана — один checkPlanStatus (и статус, и экран лимита из одного ответа)", async () => {
+    vi.mocked(backend.checkPlanStatus).mockResolvedValue({ ok: true, isPro: false, canGenerate: false, usedThisWeek: 1, extraPlanCredits: 0, nextResetHint: "2026-10-17T10:00:00.000Z" });
+    render(<MealPlanner />);
+    expect(await screen.findByText("Бесплатный лимит на этой неделе исчерпан")).toBeTruthy();
+    await new Promise((r) => setTimeout(r, 50));
+    expect(backend.checkPlanStatus).toHaveBeenCalledTimes(1);
+  });
+
+  it("с сохранённым планом — тоже один", async () => {
+    const first = render(<MealPlanner />);
+    await passNewUserWizard();
+    first.unmount();
+    vi.clearAllMocks();
+    vi.mocked(backend.checkPlanStatus).mockResolvedValue({ ok: true, isPro: false, canGenerate: true, usedThisWeek: 1, extraPlanCredits: 0, nextResetHint: null });
+
+    render(<MealPlanner />);
+    await screen.findByText("Ваш план на неделю");
+    await new Promise((r) => setTimeout(r, 50));
+    expect(backend.checkPlanStatus).toHaveBeenCalledTimes(1);
+  });
+});
