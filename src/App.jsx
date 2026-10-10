@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo, useRef } from "react";
 import { RotateCcw, Settings } from "lucide-react";
 import { clearMcpCache } from "./lib/vkusvillMcp.js";
 import { attachRealCosts, fetchVkusvillPools } from "./lib/vkusvillRecipes.js";
-import { loadProfile, saveProfile, clearProfile } from "./lib/profile.js";
+import { saveProfile, clearProfile } from "./lib/profile.js";
 import { loadActivePlanSlots, MAX_PRO_SLOTS, saveActivePlanSlot, setActiveSlotId, genSlotId, removeActivePlanSlot, clearAllActivePlans } from "./lib/activePlan.js";
 import { buildPlanView, buildPools, buildInitialPlan } from "./lib/planLogic.js";
 import { checkPlanStatus, savePlanToHistory, reportPlanGenerated, submitPlanToBackend, updateMealTimes } from "./lib/backend.js";
@@ -12,7 +12,7 @@ import { hapticImpact, hapticSelect, hapticNotify } from "./lib/haptics.js";
 import { promptAddToHomeScreen } from "./lib/homeScreen.js";
 import { styles } from "./styles.js";
 import { GLOBAL_CSS } from "./globalCss.js";
-import { DEFAULT_STORE, DEFAULT_DIET, ALL_DEVICE_IDS, DEFAULT_MEAL_TIMES, STEP_META, QUICK_STEP_KEYS, STORES, MEALS } from "./constants.js";
+import { DEFAULT_STORE, STEP_META, QUICK_STEP_KEYS, STORES, MEALS } from "./constants.js";
 import { confirmAction } from "./lib/confirmAction.js";
 import { isCatalogPlan, assessPlanBuild, canCompletePendingBuild, toHistoryPlan } from "./lib/planBuild.js";
 import { DismissibleNote, SkeletonView } from "./components/common.jsx";
@@ -28,6 +28,7 @@ import { useFamily } from "./hooks/useFamily.js";
 import { useHomeScreen } from "./hooks/useHomeScreen.js";
 import { useReferral } from "./hooks/useReferral.js";
 import { useTheme } from "./hooks/useTheme.js";
+import { useWizardProfile } from "./hooks/useWizardProfile.js";
 
 // Telegram сам присылает имя пользователя при открытии Mini App — это
 // бесплатно (initDataUnsafe), никакого своего логина/аккаунта заводить не
@@ -54,22 +55,20 @@ export default function MealPlanner() {
     tg.expand?.();
   }, []);
 
-  // Сохранённый профиль читаем один раз при монтировании (не подписываемся
-  // на изменения localStorage из других вкладок — это редкий кейс, не стоит
-  // усложнять). Наличие профиля решает, показывать ли полный визард из 8
-  // шагов или короткий (магазин + бюджет) — см. STEP_META/QUICK_STEP_KEYS.
-  const [savedProfile] = useState(loadProfile);
-  // State, а не производное от savedProfile: профиль теперь автосохраняется в
-  // конце ПЕРВОЙ успешной сборки (handleFinish) — hasProfile должен стать true
-  // сразу, в этой же сессии, иначе reset() ("Новый план") в ней же снова
-  // сбросил бы ответы на дефолты и заставил проходить все шаги заново.
-  const [hasProfile, setHasProfile] = useState(!!savedProfile);
+  // Ответы визарда, сохраняемые как профиль, — см. useWizardProfile.
+  const {
+    hasProfile, setHasProfile,
+    family, setFamily, familyByMeal, setFamilyByMeal, meals, setMeals, diet, setDiet,
+    allergies, setAllergies, allergiesAnswered, setAllergiesAnswered, cuisines, setCuisines,
+    devices, setDevices, maxCookTime, setMaxCookTime, displayName, setDisplayName, mealTimes, setMealTimes,
+    toggleSimple, toggleCuisine, profileSnapshot, resetAnswersToDefaults,
+  } = useWizardProfile();
 
   // Раньше собранный план жил только в React-состоянии — исчезал при каждом
   // перемонтировании (вышли из Telegram и зашли снова, перезапуск WebView),
   // и единственным способом снова его увидеть было пройти сборку заново
   // (жалоба в чате: "как посмотреть старый план, который я уже собрал").
-  // Читаем один раз при монтировании, как и savedProfile выше — если план
+  // Читаем один раз при монтировании, как и профиль выше — если план
   // есть, сразу открываем ResultView, минуя визард целиком; "Заново"
   // (см. reset ниже) явно стирает запись.
   //
@@ -89,27 +88,7 @@ export default function MealPlanner() {
   // Когда план собран — нужно для подписей дней ("Сегодня · пт, 2 окт."), см.
   // lib/planDays.js. null у плана, сохранённого до появления этого поля.
   const [planCreatedAt, setPlanCreatedAt] = useState(initialActiveSlot?.createdAt ?? null);
-  const [family, setFamily] = useState(savedProfile?.family ?? 2);
-  // Необязательные точечные переопределения "Семьи" по приёмам пищи (см.
-  // комментарий у buildInitialPlan в planLogic.js) — например, пара, где
-  // один ест дома только завтрак и ужин, а второй ещё и обед. Пустой объект
-  // (по умолчанию) означает "одинаково для всех приёмов пищи", т.е. прежнее
-  // поведение — настройка сознательно "спрятана" в Аккаунте, а не в визарде
-  // (см. AccountView), чтобы не усложнять сборку плана тем, кому это не нужно.
-  const [familyByMeal, setFamilyByMeal] = useState(savedProfile?.familyByMeal ?? {});
-  const [meals, setMeals] = useState(savedProfile?.meals ?? ["lunch", "dinner"]);
   const [budget, setBudget] = useState(initialActiveSlot?.budget ?? 4000);
-  const [diet, setDiet] = useState(savedProfile?.diet ?? DEFAULT_DIET);
-  const [allergies, setAllergies] = useState(savedProfile?.allergies ?? []);
-  // Аллергии — единственный вопрос, где ответ по умолчанию небезопасен (перепроверка
-  // UX-аудита 04.10.2026: «Нет, ем всё подряд» было выбрано заранее, человек с
-  // аллергией, нажимавший «Далее», получал план без её учёта, и этот ответ сам
-  // запоминался в профиль навсегда). Поэтому "ответил или нет" — отдельный флаг:
-  // у новичка шаг не пройти, пока он явно не выберет "Аллергий нет" или аллерген.
-  const [allergiesAnswered, setAllergiesAnswered] = useState(!!savedProfile);
-  const [cuisines, setCuisines] = useState(savedProfile?.cuisines ?? []);
-  const [devices, setDevices] = useState(savedProfile?.devices ?? ALL_DEVICE_IDS);
-  const [maxCookTime, setMaxCookTime] = useState(savedProfile?.maxCookTime ?? null);
   const [done, setDone] = useState(!!initialActiveSlot);
   const [assembling, setAssembling] = useState(false);
   const [planState, setPlanState] = useState(initialActiveSlot?.planState ?? null);
@@ -122,8 +101,6 @@ export default function MealPlanner() {
   // большого компонента.
   const [showExtraPlanModal, setShowExtraPlanModal] = useState(false);
   const [showAccount, setShowAccount] = useState(false);
-  const [displayName, setDisplayName] = useState(savedProfile?.displayName ?? "");
-  const [mealTimes, setMealTimes] = useState(savedProfile?.mealTimes ?? DEFAULT_MEAL_TIMES);
 
   // Тариф и лимит, семья — в хуках (src/hooks/*). Порядок вызовов хуков = порядок
   // их эффектов при запуске: заявка реферала (useReferral ниже) должна уйти
@@ -165,19 +142,6 @@ export default function MealPlanner() {
   }, [assembling, done]);
 
   const [theme, setTheme] = useTheme();
-
-  const toggleSimple = (arr, setArr, id) => {
-    hapticSelect();
-    setArr((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
-  };
-  const toggleCuisine = (arr, setArr, id) => {
-    hapticSelect();
-    if (id === "any") return setArr(["any"]);
-    setArr((prev) => {
-      const withoutAny = prev.filter((x) => x !== "any");
-      return withoutAny.includes(id) ? withoutAny.filter((x) => x !== id) : [...withoutAny, id];
-    });
-  };
 
   // У вернувшегося пользователя (есть сохранённый профиль) визард
   // схлопывается до "Магазин" + "Бюджет" — остальное уже известно и
@@ -476,7 +440,7 @@ export default function MealPlanner() {
     // чужой уже сохранённый не перезаписываем). diet и meals — те же условия,
     // что у ручной кнопки: без них профиль бесполезен.
     if (!hasProfile && diet && meals.length > 0) {
-      saveProfile({ family, familyByMeal, meals, diet, allergies, cuisines, devices, displayName, mealTimes, maxCookTime });
+      saveProfile(profileSnapshot());
       setHasProfile(true);
       setProfileNote(
         `${family} ${family === 1 ? "человек" : family < 5 ? "человека" : "человек"} · ${meals.length} ${meals.length === 1 ? "приём" : "приёма"} пищи в день · ${allergies.length > 0 ? `аллергии: ${allergies.length}` : "аллергий нет"}`
@@ -517,10 +481,7 @@ export default function MealPlanner() {
     hapticImpact("light");
     setStep(0); setStore(DEFAULT_STORE); setBudget(4000); setDone(false); setPlanState(null);
     setOpenRecipe(null); setAssembling(false); setPools(null); setPriceByName(null); setPlanCreatedAt(null);
-    if (!hasProfile) {
-      setFamily(2); setFamilyByMeal({}); setMeals(["lunch", "dinner"]); setDiet(DEFAULT_DIET);
-      setAllergies([]); setAllergiesAnswered(false); setCuisines([]); setDevices(ALL_DEVICE_IDS); setMaxCookTime(null);
-    }
+    if (!hasProfile) resetAnswersToDefaults();
   };
 
   // UX-аудит 29.09.2026: лимит проверялся только в самом конце визарда —
@@ -612,7 +573,7 @@ export default function MealPlanner() {
 
   const handleSaveProfile = () => {
     hapticNotify("success");
-    saveProfile({ family, familyByMeal, meals, diet, allergies, cuisines, devices, displayName, mealTimes, maxCookTime });
+    saveProfile(profileSnapshot());
     // Раньше время приёмов пищи долетало до сервера напоминаний ТОЛЬКО вместе
     // с целым планом (см. useEffect ниже на submitPlanToBackend) — если
     // открыть Аккаунт и поменять время, не пересобирая план заново в этой же
