@@ -238,9 +238,14 @@ describe("MealPlanner: «ждёт засчитывания» принадлеж�
 
     fireEvent.click(slotChips()[0]); // переключились на слот 1, пока повтор в полёте
     await waitFor(() => expect(pendingNote()).toBeNull());
-    resolveRetry(fullPrices(pools));
+    const totalOfSlot1 = () => screen.getByText(/Итого за продукты/).parentElement.textContent;
+    const before = totalOfSlot1();
+    // Цены устаревшего повтора заметно другие — если бы они легли в слот 1, его сумма бы изменилась.
+    const stalePrices = new Map([...fullPrices(pools)].map(([name, info]) => [name, { ...info, price: info.price * 100 }]));
+    resolveRetry(stalePrices);
     await new Promise((r) => setTimeout(r, 50));
 
+    expect(totalOfSlot1()).toBe(before);
     expect(backend.reportPlanGenerated).toHaveBeenCalledTimes(1);
     // Слот 2 по-прежнему ждёт засчитывания: результат повтора к нему тоже не применился молча.
     fireEvent.click(slotChips()[1]);
