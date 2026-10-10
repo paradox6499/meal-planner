@@ -43,6 +43,19 @@ describe("activePlan — слоты (см. комментарий в activePlan.
     expect(loadActivePlanSlots().slots[0].priceByName).toBeNull();
   });
 
+  it("отметка «ждёт засчитывания» и причина сохраняются в слоте и переживают перезапуск", () => {
+    saveActivePlanSlot({ id: "s1", store: "vv", budget: 4000, ...emptyPlan, priceByName: new Map(), generationPending: true, catalogReason: "цены на продукты не получены" });
+    saveActivePlanSlot({ id: "s2", store: "vv", budget: 4000, ...emptyPlan, priceByName: null });
+    const { slots } = loadActivePlanSlots();
+    expect(slots.find((s) => s.id === "s1")).toMatchObject({ generationPending: true, catalogReason: "цены на продукты не получены" });
+    expect(slots.find((s) => s.id === "s2")).toMatchObject({ generationPending: false, catalogReason: null });
+  });
+
+  it("слот, сохранённый до появления отметки, читается как «не ждёт засчитывания»", () => {
+    localStorage.setItem("sedim.activePlanSlots.v1", JSON.stringify({ activeSlotId: "old", slots: [{ id: "old", store: "vv", budget: 4000, ...emptyPlan, priceByNameEntries: null }] }));
+    expect(loadActivePlanSlots().slots[0]).toMatchObject({ generationPending: false, catalogReason: null });
+  });
+
   it("повторное сохранение с тем же id обновляет слот на месте, не добавляет второй", () => {
     saveActivePlanSlot({ id: "s1", store: "vv", budget: 4000, ...emptyPlan, priceByName: null });
     saveActivePlanSlot({ id: "s1", store: "vv", budget: 5000, ...emptyPlan, priceByName: null });

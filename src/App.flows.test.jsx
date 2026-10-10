@@ -164,3 +164,86 @@ describe("MealPlanner: когда сборка засчитывается", () =
     expect(backend.reportPlanGenerated).not.toHaveBeenCalled();
   });
 });
+
+describe("MealPlanner: «ждёт засчитывания» принадлежит конкретному плану", () => {
+  const PRO = { ok: true, isPro: true, canGenerate: true, usedThisWeek: 0, extraPlanCredits: 0, nextResetHint: null };
+  const slotChips = () => screen.getAllByRole("button").filter((b) => /^ВкусВилл · /.test(b.textContent.trim()));
+  const pendingNote = () => screen.queryByText(/Бесплатный план при этом не тратится/);
+
+  // Короткий визард вернувшегося пользователя: магазин → бюджет.
+  async function passReturningUserWizard() {
+    clickButton(/Далее/);
+    clickButton(/Собрать список/);
+    await screen.findByText("Ваш план на неделю");
+  }
+
+  it("вырожденная сборка, перезапуск приложения, удачный повтор цен — засчитано ровно один раз", async () => {
+    const pools = catalogPools();
+    vi.mocked(vkusvillRecipes.fetchVkusvillPools).mockResolvedValue({ pools, priceByName: new Map() });
+    const first = render(<MealPlanner />);
+    await passNewUserWizard();
+    first.unmount();
+    vi.clearAllMocks();
+    vi.mocked(backend.checkPlanStatus).mockResolvedValue({ ok: true, isPro: false, canGenerate: true, usedThisWeek: 0, extraPlanCredits: 0, nextResetHint: null });
+
+    render(<MealPlanner />);
+    await screen.findByText("Ваш план на неделю");
+    // После перезапуска план по-прежнему «не засчитан» — и экран это говорит.
+    expect(pendingNote()).toBeTruthy();
+
+    vi.mocked(vkusvillRecipes.attachRealCosts).mockResolvedValueOnce(fullPrices(pools));
+    clickButton(/Повторить получение цен/);
+    await waitFor(() => expect(backend.reportPlanGenerated).toHaveBeenCalledTimes(1));
+    expect(backend.savePlanToHistory).toHaveBeenCalledTimes(1);
+  });
+
+  it("Pro: вырожденный слот 1, полноценный слот 2 — у слота 1 отметка сохраняется, его повтор засчитывается", async () => {
+    vi.mocked(backend.checkPlanStatus).mockResolvedValue(PRO);
+    const pools = catalogPools();
+    vi.mocked(vkusvillRecipes.fetchVkusvillPools).mockResolvedValueOnce({ pools, priceByName: new Map() });
+    render(<MealPlanner />);
+    await passNewUserWizard();
+    expect(pendingNote()).toBeTruthy();
+
+    // Слот 2 — полноценный: засчитан сразу.
+    clickButton(/Ещё план/);
+    await passReturningUserWizard();
+    expect(backend.reportPlanGenerated).toHaveBeenCalledTimes(1);
+    expect(pendingNote()).toBeNull();
+
+    // Назад к слоту 1: он всё ещё ждёт засчитывания.
+    fireEvent.click(slotChips()[0]);
+    await waitFor(() => expect(pendingNote()).toBeTruthy());
+    vi.mocked(vkusvillRecipes.attachRealCosts).mockResolvedValueOnce(fullPrices(pools));
+    clickButton(/Повторить получение цен/);
+    await waitFor(() => expect(backend.reportPlanGenerated).toHaveBeenCalledTimes(2));
+  });
+
+  it("повтор цен закончился уже после переключения на другой слот — результат не применяется к чужому плану", async () => {
+    vi.mocked(backend.checkPlanStatus).mockResolvedValue(PRO);
+    const pools = catalogPools();
+    render(<MealPlanner />);
+    await passNewUserWizard(); // слот 1 — полноценный
+    expect(backend.reportPlanGenerated).toHaveBeenCalledTimes(1);
+
+    vi.mocked(vkusvillRecipes.fetchVkusvillPools).mockResolvedValueOnce({ pools, priceByName: new Map() });
+    clickButton(/Ещё план/);
+    await passReturningUserWizard(); // слот 2 — вырожденный
+    expect(pendingNote()).toBeTruthy();
+
+    let resolveRetry;
+    vi.mocked(vkusvillRecipes.attachRealCosts).mockImplementationOnce(() => new Promise((r) => { resolveRetry = r; }));
+    clickButton(/Повторить получение цен/);
+    await waitFor(() => expect(resolveRetry).toBeTypeOf("function"));
+
+    fireEvent.click(slotChips()[0]); // переключились на слот 1, пока повтор в полёте
+    await waitFor(() => expect(pendingNote()).toBeNull());
+    resolveRetry(fullPrices(pools));
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(backend.reportPlanGenerated).toHaveBeenCalledTimes(1);
+    // Слот 2 по-прежнему ждёт засчитывания: результат повтора к нему тоже не применился молча.
+    fireEvent.click(slotChips()[1]);
+    await waitFor(() => expect(pendingNote()).toBeTruthy());
+  });
+});

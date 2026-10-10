@@ -91,13 +91,24 @@ export function usePlanSession({
   // Засчитывается только когда получим полноценный (см. handleRetryPrices /
   // повторную сборку). catalogReason — почему каталог не ответил (для экрана и
   // скриншота в поддержку).
-  const [generationPending, setGenerationPending] = useState(false);
-  const [catalogReason, setCatalogReason] = useState(null);
+  //
+  // Отметка принадлежит ПОКАЗАННОМУ плану и хранится в его слоте (см.
+  // generationPending в lib/activePlan.js): переключение слота, "Новый план" и
+  // "Ещё план" подставляют отметку того плана, что теперь на экране, — раньше она
+  // была одна на всё приложение и жила только в памяти (после перезапуска
+  // "починившийся" план бесплатного пользователя так и не засчитывался).
+  const [generationPending, setGenerationPending] = useState(initialActiveSlot?.generationPending ?? false);
+  const [catalogReason, setCatalogReason] = useState(initialActiveSlot?.catalogReason ?? null);
   // Та же отметка «ждёт засчитывания», но в ref: handleRetryPrices читает её
   // ПОСЛЕ await, когда generationPending из замыкания может быть устаревшим —
   // два повтора цен подряд засчитали бы одну сборку дважды (лишний кредит).
-  // Меняется только в markGenerationPending/completeGeneration ниже.
-  const generationPendingRef = useRef(false);
+  // Меняется только в markGenerationPending/completeGeneration/showPlan ниже.
+  const generationPendingRef = useRef(initialActiveSlot?.generationPending ?? false);
+  // Номер показанного плана: растёт при каждой смене плана на экране (другой
+  // слот, "Новый план", "Ещё план", новая сборка). handleRetryPrices запоминает
+  // его до await и выбрасывает результат, если за это время на экране уже
+  // другой план, — иначе цены и засчитывание уходили бы чужому плану.
+  const shownPlanEpochRef = useRef(0);
   const [priceRetryFailed, setPriceRetryFailed] = useState(false);
 
   // Снимок СОБРАННОГО плана в историю на сервере (Аккаунт -> «История планов»).
@@ -116,7 +127,8 @@ export function usePlanSession({
     });
   };
 
-  // Единственные два места, где меняется «засчитана ли сборка». Засчитывание
+  // Единственные два места, где меняется «засчитана ли сборка» (showPlan ниже
+  // только подставляет отметку того плана, что сейчас на экране). Засчитывание
   // (reportPlanGenerated — списание бесплатного лимита или кредита на сервере)
   // и запись в историю — только через completeGeneration, ровно один раз на
   // сборку: из runFinish для полноценной сборки или из handleRetryPrices, когда
@@ -132,6 +144,14 @@ export function usePlanSession({
     setCatalogReason(null);
     reportPlanGenerated();
     saveCompletedPlanToHistory(view);
+  };
+  // На экране теперь другой план (slot — его сохранённый слот, null — пустой
+  // визард): его отметка «ждёт засчитывания» и новый номер показанного плана.
+  const showPlan = (slot) => {
+    shownPlanEpochRef.current += 1;
+    generationPendingRef.current = !!slot?.generationPending;
+    setGenerationPending(!!slot?.generationPending);
+    setCatalogReason(slot?.catalogReason ?? null);
   };
 
   // "Повторить получение цен" — ВкусВилл иногда лимитирует burst запросов
@@ -153,8 +173,10 @@ export function usePlanSession({
     setRetryingPrices(true);
     setPriceRetryFailed(false);
     clearMcpCache();
+    const epoch = shownPlanEpochRef.current;
     try {
       const fresh = await attachRealCosts(pools);
+      if (shownPlanEpochRef.current !== epoch) return; // на экране уже другой план — см. shownPlanEpochRef
       setPriceByName(fresh);
       // Вырожденный план (не засчитан в лимит) стал полноценным: рецепты из
       // каталога ВкусВилл и цены получены — теперь это обычный собранный план,
@@ -170,7 +192,7 @@ export function usePlanSession({
       setPriceRetryFailed(fresh.size === 0);
     } catch (err) {
       console.warn("Повторная попытка получить цены не удалась:", err.message);
-      setPriceRetryFailed(true);
+      if (shownPlanEpochRef.current === epoch) setPriceRetryFailed(true);
     } finally {
       setRetryingPrices(false);
     }
@@ -231,16 +253,16 @@ export function usePlanSession({
   // handleFinish/startNewPlanSlot — оба выставляют его одновременно с done).
   useEffect(() => {
     if (done && planState && planSlotId) {
-      saveActivePlanSlot({ id: planSlotId, store, budget, planState, pools, priceByName, createdAt: planCreatedAt });
+      saveActivePlanSlot({ id: planSlotId, store, budget, planState, pools, priceByName, createdAt: planCreatedAt, generationPending, catalogReason });
       setActiveSlotId(planSlotId);
       setPlanSlots((prev) => {
         const idx = prev.slots.findIndex((s) => s.id === planSlotId);
-        const slot = { id: planSlotId, store, budget, planState, pools, priceByName, createdAt: planCreatedAt };
+        const slot = { id: planSlotId, store, budget, planState, pools, priceByName, createdAt: planCreatedAt, generationPending, catalogReason };
         const slots = idx >= 0 ? prev.slots.map((s, i) => (i === idx ? slot : s)) : [...prev.slots, slot];
         return { slots, activeSlotId: planSlotId };
       });
     }
-  }, [done, planState, pools, priceByName, store, budget, planSlotId, planCreatedAt]);
+  }, [done, planState, pools, priceByName, store, budget, planSlotId, planCreatedAt, generationPending, catalogReason]);
 
   // Оболочка над runFinish (аудит 29.09.2026): раньше экран "собираем" включался
   // только ПОСЛЕ ответа checkPlanStatus (без таймаута) — на слабой сети кнопка
@@ -321,6 +343,7 @@ export function usePlanSession({
     const freshPlanView = buildPlanView(newPlanState, resolvedPools, family, resolvedPriceByName, familyByMeal);
     // Вырожденную сборку не засчитываем и не кладём в историю — см. assessPlanBuild.
     const { degraded, reason } = assessPlanBuild({ store, catalogError, view: freshPlanView });
+    showPlan(null); // новый план на экране; его отметку выставят markGenerationPending/completeGeneration ниже
     setPools(resolvedPools);
     setPriceByName(resolvedPriceByName);
     setPlanState(newPlanState);
@@ -395,6 +418,7 @@ export function usePlanSession({
     hapticImpact("light");
     setStep(0); setStore(DEFAULT_STORE); setBudget(4000); setDone(false); setPlanState(null);
     setOpenRecipe(null); setAssembling(false); setPools(null); setPriceByName(null); setPlanCreatedAt(null);
+    showPlan(null);
     if (!hasProfile) resetAnswersToDefaults();
   };
 
@@ -426,6 +450,7 @@ export function usePlanSession({
   // ОДИН и тот же слот). applySlotToState — общая часть switchToSlot и
   // removeSlot (переключение на другой слот после удаления текущего).
   function applySlotToState(slot) {
+    showPlan(slot);
     setPlanSlotId(slot?.id ?? null);
     setStore(slot?.store ?? DEFAULT_STORE);
     setPlanCreatedAt(slot?.createdAt ?? null);
@@ -469,6 +494,7 @@ export function usePlanSession({
     setPlanSlotId(genSlotId());
     setStep(0); setStore(DEFAULT_STORE); setBudget(4000); setDone(false); setPlanState(null);
     setOpenRecipe(null); setAssembling(false); setPools(null); setPriceByName(null); setPlanCreatedAt(null);
+    showPlan(null);
     trackEvent("plan_slot_add_started");
   };
 

@@ -49,6 +49,13 @@ function deserializeSlot(raw) {
     // коду (App.jsx) не приходилось знать об этой детали сериализации.
     priceByName: Array.isArray(raw.priceByNameEntries) ? new Map(raw.priceByNameEntries) : null,
     createdAt: raw.createdAt ?? null,
+    // План собран "вырожденным" и ещё НЕ засчитан в бесплатный лимит (см.
+    // generationPending в hooks/usePlanSession.js). Хранится в слоте, а не в
+    // памяти: иначе после перезапуска приложения такой план, "починившись"
+    // повтором цен, так и не засчитывался бы, а при нескольких слотах отметка
+    // переезжала бы к чужому плану.
+    generationPending: raw.generationPending === true,
+    catalogReason: typeof raw.catalogReason === "string" ? raw.catalogReason : null,
   };
 }
 
@@ -61,6 +68,8 @@ function serializeSlot(slot) {
     pools: slot.pools,
     priceByNameEntries: slot.priceByName ? [...slot.priceByName.entries()] : null,
     createdAt: slot.createdAt ?? new Date().toISOString(),
+    generationPending: !!slot.generationPending,
+    catalogReason: slot.catalogReason ?? null,
   };
 }
 
@@ -124,7 +133,7 @@ function migrateLegacyIfNeeded() {
   }
 }
 
-/** {slots: [{id, store, budget, planState, pools, priceByName, createdAt}],
+/** {slots: [{id, store, budget, planState, pools, priceByName, createdAt, generationPending, catalogReason}],
  * activeSlotId}. Пустой slots — обычное дело для нового пользователя, не
  * ошибка. */
 export function loadActivePlanSlots() {
@@ -138,10 +147,10 @@ export function loadActivePlanSlots() {
  * трогает activeSlotId сам — вызывающий код решает, делать ли этот слот
  * активным (см. setActiveSlotId), обновление в фоне не должно переключать
  * пользователя на другой план. */
-export function saveActivePlanSlot({ id, store, budget, planState, pools, priceByName, createdAt }) {
+export function saveActivePlanSlot({ id, store, budget, planState, pools, priceByName, createdAt, generationPending = false, catalogReason = null }) {
   const current = readStore() ?? { slots: [], activeSlotId: null };
   const idx = current.slots.findIndex((s) => s.id === id);
-  const slot = { id, store, budget, planState, pools, priceByName, createdAt: createdAt ?? current.slots[idx]?.createdAt ?? new Date().toISOString() };
+  const slot = { id, store, budget, planState, pools, priceByName, createdAt: createdAt ?? current.slots[idx]?.createdAt ?? new Date().toISOString(), generationPending, catalogReason };
   const slots = idx >= 0 ? current.slots.map((s, i) => (i === idx ? slot : s)) : [...current.slots, slot];
   writeStore({ slots, activeSlotId: current.activeSlotId });
 }
