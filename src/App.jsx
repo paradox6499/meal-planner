@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { RotateCcw, Settings, Sparkles, Store, Users, UtensilsCrossed, Check, Wallet, Salad, Ban, ChevronLeft, ChevronRight } from "lucide-react";
 import { ALLERGENS } from "./data/recipes.js";
 import { clearMcpCache } from "./lib/vkusvillMcp.js";
@@ -15,6 +15,7 @@ import { styles, ACCENT } from "./styles.js";
 import { DEFAULT_STORE, DEFAULT_DIET, ALL_DEVICE_IDS, DEFAULT_MEAL_TIMES, STEP_META, QUICK_STEP_KEYS, STORES, MEALS, DIETS } from "./constants.js";
 import { formatResetDate, mealsPerDayLabel } from "./lib/format.js";
 import { confirmAction } from "./lib/confirmAction.js";
+import { isCatalogPlan, assessPlanBuild, canCompletePendingBuild, toHistoryPlan } from "./lib/planBuild.js";
 import { DismissibleNote, StepShell, SkeletonView } from "./components/common.jsx";
 import { RecipeModal } from "./components/RecipeModal.jsx";
 import { EXTRA_PLAN_PRICE_RUB, PRO_PRICE_RUB, ProModal, ExtraPlanModal } from "./components/ProModals.jsx";
@@ -392,6 +393,11 @@ export default function MealPlanner() {
   // скриншота в поддержку).
   const [generationPending, setGenerationPending] = useState(false);
   const [catalogReason, setCatalogReason] = useState(null);
+  // Та же отметка «ждёт засчитывания», но в ref: handleRetryPrices читает её
+  // ПОСЛЕ await, когда generationPending из замыкания может быть устаревшим —
+  // два повтора цен подряд засчитали бы одну сборку дважды (лишний кредит).
+  // Меняется только в markGenerationPending/completeGeneration ниже.
+  const generationPendingRef = useRef(false);
   const [priceRetryFailed, setPriceRetryFailed] = useState(false);
 
   // Снимок СОБРАННОГО плана в историю на сервере (Аккаунт -> «История планов»).
@@ -400,37 +406,32 @@ export default function MealPlanner() {
   // бюджете" и "сэкономлено" считали бы его удачей (скриншот пользователя
   // 04.10.2026). view — planView ровно этого плана (см. runFinish).
   const saveCompletedPlanToHistory = (view) => {
-      savePlanToHistory({
-        storeId: store,
-        storeName: STORES.find((s) => s.id === store)?.name || store,
-        budget,
-        family,
-        totalCost: view.total,
-        plan: {
-          total: view.total,
-          itemized: view.itemized,
-          shoppingItemsCount: view.grouped.reduce((sum, g) => sum + g.items.length, 0),
-          days: view.days.map((d) => ({
-            day: d.day,
-            // Раньше в истории сохранялось только название блюда — открыть
-            // рецепт из прошлого плана было нечем (запрос после созвона с
-            // другом: "история планов не даёт рецепты, только список блюд").
-            // Кладём сюда компактную "смотровую" версию рецепта (без служебных
-            // полей вроде cuisine/diets/devices, нужных только при подборе) —
-            // укладывается в MAX_PLAN_JSON_LENGTH на сервере с большим запасом
-            // (тот лимит и заводился "с запасом на неделю рецептов", см. app.js).
-            dayMeals: d.dayMeals.map((dm) => ({
-              mealLabel: dm.mealLabel, name: dm.recipe.name, emoji: dm.recipe.emoji, time: dm.recipe.time, cost: dm.cost,
-              photoUrl: dm.recipe.photoUrl || null,
-              ingr: dm.recipe.ingr,
-              steps: dm.recipe.steps,
-              nutritionPer100g: dm.recipe.nutritionPer100g || null,
-              family: dm.family,
-              isRealPrice: dm.isRealPrice,
-            })),
-          })),
-        },
-      });
+    savePlanToHistory({
+      storeId: store,
+      storeName: STORES.find((s) => s.id === store)?.name || store,
+      budget,
+      family,
+      totalCost: view.total,
+      plan: toHistoryPlan(view),
+    });
+  };
+
+  // Единственные два места, где меняется «засчитана ли сборка». Засчитывание
+  // (reportPlanGenerated — списание бесплатного лимита или кредита на сервере)
+  // и запись в историю — только через completeGeneration, ровно один раз на
+  // сборку: из runFinish для полноценной сборки или из handleRetryPrices, когда
+  // вырожденная стала полноценной.
+  const markGenerationPending = (reason) => {
+    generationPendingRef.current = true;
+    setGenerationPending(true);
+    setCatalogReason(reason);
+  };
+  const completeGeneration = (view) => {
+    generationPendingRef.current = false;
+    setGenerationPending(false);
+    setCatalogReason(null);
+    reportPlanGenerated();
+    saveCompletedPlanToHistory(view);
   };
 
   // "Повторить получение цен" — ВкусВилл иногда лимитирует burst запросов
@@ -458,15 +459,9 @@ export default function MealPlanner() {
       // Вырожденный план (не засчитан в лимит) стал полноценным: рецепты из
       // каталога ВкусВилл и цены получены — теперь это обычный собранный план,
       // засчитываем его РОВНО ОДИН РАЗ и кладём в историю.
-      if (generationPending && fresh.size > 0) {
+      if (generationPendingRef.current && fresh.size > 0) {
         const view = buildPlanView(planState, pools, family, fresh, familyByMeal);
-        const recipesFromCatalog = Object.values(pools).every((list) => list.every((r) => String(r.id).startsWith("vv-")));
-        if (recipesFromCatalog && !view.mostlyUnpriced) {
-          setGenerationPending(false);
-          setCatalogReason(null);
-          reportPlanGenerated();
-          saveCompletedPlanToHistory(view);
-        }
+        if (canCompletePendingBuild({ pools, view })) completeGeneration(view);
       }
       // Та же грубая эвристика, что и mostlyUnpriced в planLogic.js — если
       // цену не нашли почти ни для чего и на этот раз, честно показываем,
@@ -494,7 +489,7 @@ export default function MealPlanner() {
   const AUTO_PRICE_RETRIES = 10;
   const AUTO_PRICE_RETRY_DELAY_MS = 12_000;
   const [autoPriceRetriesUsed, setAutoPriceRetriesUsed] = useState(0);
-  const recipesFromCatalogNow = !!pools && Object.values(pools).every((list) => list.every((r) => String(r.id).startsWith("vv-")));
+  const recipesFromCatalogNow = isCatalogPlan(pools);
   const autoPriceRetryPending = done && !!planView?.mostlyUnpriced && recipesFromCatalogNow && autoPriceRetriesUsed < AUTO_PRICE_RETRIES;
   useEffect(() => { setAutoPriceRetriesUsed(0); }, [planSlotId]);
   useEffect(() => {
@@ -624,12 +619,8 @@ export default function MealPlanner() {
 
     const newPlanState = buildInitialPlan(resolvedPools, selectedMeals, budget, family, familyByMeal);
     const freshPlanView = buildPlanView(newPlanState, resolvedPools, family, resolvedPriceByName, familyByMeal);
-    // Вырожденная сборка: каталог ВкусВилл не ответил (базовые рецепты) или
-    // цены не получены почти ни на что. Такую сборку НЕ засчитываем в
-    // бесплатный лимит и НЕ кладём в историю — иначе человек получал план без
-    // цен и терял бесплатный план (баг, подтверждённый на реальном телефоне
-    // 04.10.2026). Только для ВкусВилл: у остальных сетей цен нет по определению.
-    const degraded = store === "vv" && (!!catalogError || freshPlanView.mostlyUnpriced);
+    // Вырожденную сборку не засчитываем и не кладём в историю — см. assessPlanBuild.
+    const { degraded, reason } = assessPlanBuild({ store, catalogError, view: freshPlanView });
     setPools(resolvedPools);
     setPriceByName(resolvedPriceByName);
     setPlanState(newPlanState);
@@ -648,17 +639,12 @@ export default function MealPlanner() {
     // открытия приложения (найдено техническим и UX-аудитом 29.09.2026).
     // reportPlanGenerated вызывается РОВНО ОДИН РАЗ за эту сборку.
     if (degraded) {
-      const reason = catalogError || "цены на продукты не получены";
-      setGenerationPending(true);
-      setCatalogReason(reason);
+      markGenerationPending(reason);
       // Причина — в аналитику (сводка админу), чтобы такие случаи не оставались
       // невидимыми: раньше сбой каталога замечали только по жалобам.
       trackEvent("catalog_fallback", { reason: reason.slice(0, 160), store });
     } else {
-      setGenerationPending(false);
-      setCatalogReason(null);
-      reportPlanGenerated();
-      saveCompletedPlanToHistory(freshPlanView);
+      completeGeneration(freshPlanView);
     }
 
     // UX-аудит 29.09.2026: профиль сохранялся ТОЛЬКО кнопкой "Сохранить как
