@@ -3,7 +3,7 @@
 // напоминаний и автосохранение слота в localStorage. Перенесено из MealPlanner
 // (App.jsx) как есть — одним хуком, потому что всё это делит одно состояние
 // (pools/priceByName/planState/generationPending), см. docs/refactor-plan-app-jsx.md.
-import { useState, useEffect, useMemo, useRef } from "react";
+import { useState, useEffect, useMemo, useRef, useReducer } from "react";
 import { clearMcpCache } from "../lib/vkusvillMcp.js";
 import { attachRealCosts, fetchVkusvillPools } from "../lib/vkusvillRecipes.js";
 import { saveProfile } from "../lib/profile.js";
@@ -12,9 +12,10 @@ import { buildPlanView, buildPools, buildInitialPlan } from "../lib/planLogic.js
 import { checkPlanStatus, savePlanToHistory, reportPlanGenerated, submitPlanToBackend } from "../lib/backend.js";
 import { trackEvent } from "../lib/analytics.js";
 import { hapticImpact, hapticSelect, hapticNotify } from "../lib/haptics.js";
-import { DEFAULT_STORE, STORES, MEALS } from "../constants.js";
+import { STORES, MEALS } from "../constants.js";
 import { confirmAction } from "../lib/confirmAction.js";
 import { isCatalogPlan, assessPlanBuild, canCompletePendingBuild, toHistoryPlan } from "../lib/planBuild.js";
+import { initPlanSession, planSessionReducer } from "../lib/planSessionReducer.js";
 
 /**
  * @param {object} deps
@@ -64,52 +65,29 @@ export function usePlanSession({
   // локальный "текущий" на время сессии, синхронизируются в паре мест ниже).
   const [planSlots, setPlanSlots] = useState(initialPlanSlots); // {slots, activeSlotId}
   const initialActiveSlot = planSlots.slots.find((s) => s.id === planSlots.activeSlotId) ?? null;
-  const [planSlotId, setPlanSlotId] = useState(initialActiveSlot?.id ?? null);
 
-  const [store, setStore] = useState(initialActiveSlot?.store ?? DEFAULT_STORE);
-  // Когда план собран — нужно для подписей дней ("Сегодня · пт, 2 окт."), см.
-  // lib/planDays.js. null у плана, сохранённого до появления этого поля.
-  const [planCreatedAt, setPlanCreatedAt] = useState(initialActiveSlot?.createdAt ?? null);
-  const [budget, setBudget] = useState(initialActiveSlot?.budget ?? 4000);
-  const [done, setDone] = useState(!!initialActiveSlot);
-  const [assembling, setAssembling] = useState(false);
-  const [planState, setPlanState] = useState(initialActiveSlot?.planState ?? null);
-
-  // Раньше пересчитывалось на каждое изменение фильтра (useMemo) — теперь
-  // пулы для ВкусВилл тянутся живьём из MCP, это асинхронно, поэтому
-  // считаются один раз, в момент "Собрать список" (handleFinish), а не
-  // реактивно по ходу визарда. До первого нажатия — null, и это ок:
-  // planView ниже явно проверяет planState на null раньше, чем тронуть pools.
-  const [pools, setPools] = useState(initialActiveSlot?.pools ?? null);
-  // Карта ингредиент->цена товара (ВкусВилл) — null для остальных сетей или
-  // если реальные рецепты не подтянулись (см. комментарий у buildPlanView).
-  const [priceByName, setPriceByName] = useState(initialActiveSlot?.priceByName ?? null);
-  const [retryingPrices, setRetryingPrices] = useState(false);
-  // План собран "вырожденным" (каталог ВкусВилл не ответил — базовые рецепты
-  // и/или нет цен) и НЕ засчитан в бесплатный лимит (04.10.2026: раньше такая
-  // сборка сжигала бесплатный план, а у человека на руках был план без цен).
-  // Засчитывается только когда получим полноценный (см. handleRetryPrices /
-  // повторную сборку). catalogReason — почему каталог не ответил (для экрана и
-  // скриншота в поддержку).
-  //
-  // Отметка принадлежит ПОКАЗАННОМУ плану и хранится в его слоте (см.
-  // generationPending в lib/activePlan.js): переключение слота, "Новый план" и
-  // "Ещё план" подставляют отметку того плана, что теперь на экране, — раньше она
-  // была одна на всё приложение и жила только в памяти (после перезапуска
-  // "починившийся" план бесплатного пользователя так и не засчитывался).
-  const [generationPending, setGenerationPending] = useState(initialActiveSlot?.generationPending ?? false);
-  const [catalogReason, setCatalogReason] = useState(initialActiveSlot?.catalogReason ?? null);
-  // Та же отметка «ждёт засчитывания», но в ref: handleRetryPrices читает её
-  // ПОСЛЕ await, когда generationPending из замыкания может быть устаревшим —
-  // два повтора цен подряд засчитали бы одну сборку дважды (лишний кредит).
-  // Меняется только в markGenerationPending/completeGeneration/showPlan ниже.
-  const generationPendingRef = useRef(initialActiveSlot?.generationPending ?? false);
-  // Номер показанного плана: растёт при каждой смене плана на экране (другой
-  // слот, "Новый план", "Ещё план", новая сборка). handleRetryPrices запоминает
-  // его до await и выбрасывает результат, если за это время на экране уже
-  // другой план, — иначе цены и засчитывание уходили бы чужому плану.
-  const shownPlanEpochRef = useRef(0);
-  const [priceRetryFailed, setPriceRetryFailed] = useState(false);
+  // Всё про ПОКАЗАННЫЙ план — какой слот на экране, его план, пулы, цены,
+  // отметка «ждёт засчитывания» (generationPending: вырожденная сборка ещё не
+  // засчитана в бесплатный лимит, см. lib/planBuild.js), идёт ли сборка или
+  // повтор цен — в одном редьюсере (lib/planSessionReducer.js): каждый переход
+  // — одно действие, а не перечисление полутора десятков сеттеров.
+  const [session, dispatch] = useReducer(planSessionReducer, initialActiveSlot, initPlanSession);
+  // Последнее состояние сессии, обновляется СИНХРОННО при каждом send (тот же
+  // чистый редьюсер). Нужно асинхронному коду: handleRetryPrices после await
+  // должен знать, тот ли план всё ещё на экране и ждёт ли он засчитывания, —
+  // значение из замыкания к этому моменту может быть устаревшим (двойное
+  // засчитывание = лишний списанный кредит).
+  const latestRef = useRef(session);
+  const send = (action) => {
+    latestRef.current = planSessionReducer(latestRef.current, action);
+    dispatch(action);
+  };
+  const {
+    planSlotId, store, budget, planCreatedAt, done, assembling, planState, pools, priceByName,
+    generationPending, catalogReason, retryingPrices, priceRetryFailed,
+  } = session;
+  const setStore = (value) => send({ type: "storeChanged", store: value });
+  const setBudget = (value) => send({ type: "budgetChanged", budget: value });
 
   // Снимок СОБРАННОГО плана в историю на сервере (Аккаунт -> «История планов»).
   // Только для полноценных планов: вырожденный (без каталога/цен) в историю не
@@ -127,31 +105,14 @@ export function usePlanSession({
     });
   };
 
-  // Единственные два места, где меняется «засчитана ли сборка» (showPlan ниже
-  // только подставляет отметку того плана, что сейчас на экране). Засчитывание
-  // (reportPlanGenerated — списание бесплатного лимита или кредита на сервере)
-  // и запись в историю — только через completeGeneration, ровно один раз на
-  // сборку: из runFinish для полноценной сборки или из handleRetryPrices, когда
-  // вырожденная стала полноценной.
-  const markGenerationPending = (reason) => {
-    generationPendingRef.current = true;
-    setGenerationPending(true);
-    setCatalogReason(reason);
-  };
+  // Засчитывание (reportPlanGenerated — списание бесплатного лимита или кредита
+  // на сервере) и запись в историю — только через completeGeneration, ровно один
+  // раз на сборку: из runFinish для полноценной сборки или из handleRetryPrices,
+  // когда вырожденная стала полноценной.
   const completeGeneration = (view) => {
-    generationPendingRef.current = false;
-    setGenerationPending(false);
-    setCatalogReason(null);
+    send({ type: "generationCompleted" });
     reportPlanGenerated();
     saveCompletedPlanToHistory(view);
-  };
-  // На экране теперь другой план (slot — его сохранённый слот, null — пустой
-  // визард): его отметка «ждёт засчитывания» и новый номер показанного плана.
-  const showPlan = (slot) => {
-    shownPlanEpochRef.current += 1;
-    generationPendingRef.current = !!slot?.generationPending;
-    setGenerationPending(!!slot?.generationPending);
-    setCatalogReason(slot?.catalogReason ?? null);
   };
 
   // "Повторить получение цен" — ВкусВилл иногда лимитирует burst запросов
@@ -170,31 +131,29 @@ export function usePlanSession({
   // означало по-настоящему повторить, а не отдать то же самое из кэша.
   const handleRetryPrices = async () => {
     if (!pools) return;
-    setRetryingPrices(true);
-    setPriceRetryFailed(false);
+    send({ type: "priceRetryStarted" });
     clearMcpCache();
-    const epoch = shownPlanEpochRef.current;
+    // Номер показанного плана до запроса: если за время запроса на экране
+    // окажется другой план, результат к нему не применяется (см. редьюсер).
+    const epoch = latestRef.current.epoch;
     try {
       const fresh = await attachRealCosts(pools);
-      if (shownPlanEpochRef.current !== epoch) return; // на экране уже другой план — см. shownPlanEpochRef
-      setPriceByName(fresh);
       // Вырожденный план (не засчитан в лимит) стал полноценным: рецепты из
       // каталога ВкусВилл и цены получены — теперь это обычный собранный план,
-      // засчитываем его РОВНО ОДИН РАЗ и кладём в историю.
-      if (generationPendingRef.current && fresh.size > 0) {
-        const view = buildPlanView(planState, pools, family, fresh, familyByMeal);
-        if (canCompletePendingBuild({ pools, view })) completeGeneration(view);
-      }
-      // Та же грубая эвристика, что и mostlyUnpriced в planLogic.js — если
-      // цену не нашли почти ни для чего и на этот раз, честно показываем,
-      // что попытка не удалась, а не молча оставляем ту же надпись, будто
-      // кнопка вообще ничего не сделала.
-      setPriceRetryFailed(fresh.size === 0);
+      // засчитываем его РОВНО ОДИН РАЗ и кладём в историю. Решение — по
+      // последнему состоянию (latestRef), а не по замыканию.
+      const stillShown = latestRef.current.epoch === epoch;
+      const view = stillShown && latestRef.current.generationPending && fresh.size > 0
+        ? buildPlanView(planState, pools, family, fresh, familyByMeal)
+        : null;
+      // Пустой ответ (fresh.size === 0) редьюсер покажет как «не получилось» —
+      // та же грубая эвристика, что и mostlyUnpriced в planLogic.js: честно
+      // показываем, что попытка не удалась, а не молча оставляем ту же надпись.
+      send({ type: "priceRetrySucceeded", epoch, prices: fresh });
+      if (view && canCompletePendingBuild({ pools, view })) completeGeneration(view);
     } catch (err) {
       console.warn("Повторная попытка получить цены не удалась:", err.message);
-      if (shownPlanEpochRef.current === epoch) setPriceRetryFailed(true);
-    } finally {
-      setRetryingPrices(false);
+      send({ type: "priceRetryFailed", epoch });
     }
   };
 
@@ -271,13 +230,13 @@ export function usePlanSession({
   // непойманная ошибка не оставляет приложение на вечной загрузке.
   const handleFinish = async () => {
     if (assembling) return;
-    setAssembling(true);
+    send({ type: "assemblyStarted" });
     try {
       await runFinish();
     } catch (err) {
       console.error("Сборка плана не удалась:", err);
       hapticNotify("error");
-      setAssembling(false);
+      send({ type: "assemblyStopped" });
       trackEvent("app_error", { message: String(err?.message || err).slice(0, 300), source: "handleFinish" });
     }
   };
@@ -289,7 +248,7 @@ export function usePlanSession({
     const status = await checkPlanStatus();
     if (status && status.canGenerate === false) {
       hapticNotify("error");
-      setAssembling(false);
+      send({ type: "assemblyStopped" });
       setLimitBlocked({ nextResetHint: status.nextResetHint });
       return;
     }
@@ -310,7 +269,7 @@ export function usePlanSession({
     // Найдено при аудите комбинаций, не из жалобы в чате.
     if (selectedMeals.length === 0) {
       hapticNotify("error");
-      setAssembling(false);
+      send({ type: "assemblyStopped" });
       setShowAccount(true);
       return;
     }
@@ -343,17 +302,19 @@ export function usePlanSession({
     const freshPlanView = buildPlanView(newPlanState, resolvedPools, family, resolvedPriceByName, familyByMeal);
     // Вырожденную сборку не засчитываем и не кладём в историю — см. assessPlanBuild.
     const { degraded, reason } = assessPlanBuild({ store, catalogError, view: freshPlanView });
-    showPlan(null); // новый план на экране; его отметку выставят markGenerationPending/completeGeneration ниже
-    setPools(resolvedPools);
-    setPriceByName(resolvedPriceByName);
-    setPlanState(newPlanState);
-    setDone(true);
-    setPlanCreatedAt(new Date().toISOString());
-    // Самый первый план вообще (ни "Заново", ни "Ещё один план" не заводили
-    // planSlotId заранее) — заводим id прямо здесь, иначе автосохранение
-    // (эффект выше) не сработает: он ждёт planSlotId вместе с done/planState.
-    if (!planSlotId) setPlanSlotId(genSlotId());
-    setAssembling(false);
+    // Новый план на экране. Самый первый план вообще (ни "Заново", ни "Ещё
+    // один план" не заводили id слота заранее) получает id здесь же — иначе
+    // автосохранение (эффект выше) его не увидит.
+    send({
+      type: "planBuilt",
+      newSlotId: genSlotId(),
+      planState: newPlanState,
+      pools: resolvedPools,
+      priceByName: resolvedPriceByName,
+      createdAt: new Date().toISOString(),
+      generationPending: degraded,
+      catalogReason: degraded ? reason : null,
+    });
     hapticNotify("success");
     // Именно ЗДЕСЬ, а не в useEffect на submitPlanToBackend ниже — тот
     // срабатывает на КАЖДОЕ изменение planView (открытие с сохранённым
@@ -362,7 +323,6 @@ export function usePlanSession({
     // открытия приложения (найдено техническим и UX-аудитом 29.09.2026).
     // reportPlanGenerated вызывается РОВНО ОДИН РАЗ за эту сборку.
     if (degraded) {
-      markGenerationPending(reason);
       // Причина — в аналитику (сводка админу), чтобы такие случаи не оставались
       // невидимыми: раньше сбой каталога замечали только по жалобам.
       trackEvent("catalog_fallback", { reason: reason.slice(0, 160), store });
@@ -389,22 +349,7 @@ export function usePlanSession({
 
   const swapMeal = (dayIndex, slotIndex) => {
     hapticImpact("light");
-    setPlanState((prev) => {
-      if (!prev) return prev;
-      const days = prev.days.map((d, i) => {
-        if (i !== dayIndex) return d;
-        const dayMeals = d.dayMeals.map((slot, j) => {
-          if (j !== slotIndex) return slot;
-          const pool = pools[slot.category] || [];
-          if (pool.length <= 1) return slot;
-          const curIdx = pool.findIndex((r) => r.id === slot.recipeId);
-          const nextRecipe = pool[(curIdx + 1) % pool.length];
-          return { ...slot, recipeId: nextRecipe.id };
-        });
-        return { ...d, dayMeals };
-      });
-      return { ...prev, days };
-    });
+    send({ type: "mealSwapped", dayIndex, slotIndex });
   };
 
   // "Заново" — начать новый план ВЗАМЕН текущего (тот же слот, planSlotId не
@@ -416,9 +361,8 @@ export function usePlanSession({
   // специфично для конкретной прошлой сборки: магазин, бюджет и сам план.
   const reset = () => {
     hapticImpact("light");
-    setStep(0); setStore(DEFAULT_STORE); setBudget(4000); setDone(false); setPlanState(null);
-    setOpenRecipe(null); setAssembling(false); setPools(null); setPriceByName(null); setPlanCreatedAt(null);
-    showPlan(null);
+    send({ type: "blankPlanStarted" });
+    setStep(0); setOpenRecipe(null);
     if (!hasProfile) resetAnswersToDefaults();
   };
 
@@ -450,16 +394,8 @@ export function usePlanSession({
   // ОДИН и тот же слот). applySlotToState — общая часть switchToSlot и
   // removeSlot (переключение на другой слот после удаления текущего).
   function applySlotToState(slot) {
-    showPlan(slot);
-    setPlanSlotId(slot?.id ?? null);
-    setStore(slot?.store ?? DEFAULT_STORE);
-    setPlanCreatedAt(slot?.createdAt ?? null);
-    setBudget(slot?.budget ?? 4000);
-    setPlanState(slot?.planState ?? null);
-    setPools(slot?.pools ?? null);
-    setPriceByName(slot?.priceByName ?? null);
-    setDone(!!slot);
-    setStep(0); setAssembling(false); setOpenRecipe(null);
+    send({ type: "slotShown", slot });
+    setStep(0); setOpenRecipe(null);
   }
 
   const switchToSlot = (id) => {
@@ -491,10 +427,8 @@ export function usePlanSession({
   // здесь предполагается, что кнопку уже не показали бы, если нельзя.
   const startNewPlanSlot = () => {
     hapticImpact("light");
-    setPlanSlotId(genSlotId());
-    setStep(0); setStore(DEFAULT_STORE); setBudget(4000); setDone(false); setPlanState(null);
-    setOpenRecipe(null); setAssembling(false); setPools(null); setPriceByName(null); setPlanCreatedAt(null);
-    showPlan(null);
+    send({ type: "blankPlanStarted", slotId: genSlotId() });
+    setStep(0); setOpenRecipe(null);
     trackEvent("plan_slot_add_started");
   };
 
