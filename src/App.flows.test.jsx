@@ -134,6 +134,27 @@ describe("MealPlanner: когда сборка засчитывается", () =
     await waitFor(() => expect(screen.queryByRole("button", { name: /Повторить получение цен/ })).toBeNull());
   });
 
+  it("открытие по реферальной ссылке с сохранённым планом — заявка уходит РАНЬШЕ синхронизации плана", async () => {
+    // Синхронизация (/api/plan) создаёт строку пользователя на сервере — после
+    // неё заявка была бы отклонена как «уже существует». Порядок держится
+    // порядком вызова хуков в MealPlanner.
+    const first = render(<MealPlanner />);
+    await passNewUserWizard();
+    first.unmount();
+    vi.clearAllMocks();
+
+    window.Telegram = { WebApp: { initDataUnsafe: { start_param: "ref_5" } } };
+    try {
+      render(<MealPlanner />);
+      await waitFor(() => expect(backend.submitPlanToBackend).toHaveBeenCalled());
+      expect(backend.claimReferral).toHaveBeenCalledWith(5);
+      expect(vi.mocked(backend.claimReferral).mock.invocationCallOrder[0])
+        .toBeLessThan(vi.mocked(backend.submitPlanToBackend).mock.invocationCallOrder[0]);
+    } finally {
+      delete window.Telegram;
+    }
+  });
+
   it("бесплатный лимит исчерпан — экран лимита сразу при открытии, каталог не запрашивается", async () => {
     vi.mocked(backend.checkPlanStatus).mockResolvedValue({ ok: true, isPro: false, canGenerate: false, usedThisWeek: 1, extraPlanCredits: 0, nextResetHint: "2026-10-17T10:00:00.000Z" });
     render(<MealPlanner />);

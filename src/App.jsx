@@ -3,14 +3,14 @@ import { RotateCcw, Settings, Sparkles, Store, Users, UtensilsCrossed, Check, Wa
 import { ALLERGENS } from "./data/recipes.js";
 import { clearMcpCache } from "./lib/vkusvillMcp.js";
 import { attachRealCosts, fetchVkusvillPools } from "./lib/vkusvillRecipes.js";
-import { loadProfile, loadTheme, saveTheme, saveProfile, clearProfile } from "./lib/profile.js";
+import { loadProfile, saveProfile, clearProfile } from "./lib/profile.js";
 import { loadActivePlanSlots, MAX_PRO_SLOTS, saveActivePlanSlot, setActiveSlotId, genSlotId, removeActivePlanSlot, clearAllActivePlans } from "./lib/activePlan.js";
 import { buildPlanView, buildPools, buildInitialPlan } from "./lib/planLogic.js";
-import { checkPlanStatus, fetchFamilyStatus, fetchPlanHistory, fetchReferralStatus, joinFamily, createFamily, leaveFamily, toggleFamilyPantryItem, claimReferral, savePlanToHistory, reportPlanGenerated, submitPlanToBackend, updateMealTimes } from "./lib/backend.js";
+import { checkPlanStatus, savePlanToHistory, reportPlanGenerated, submitPlanToBackend, updateMealTimes } from "./lib/backend.js";
 import { trackEvent } from "./lib/analytics.js";
 import logoUrl from "./assets/logo.svg";
 import { hapticImpact, hapticSelect, hapticNotify } from "./lib/haptics.js";
-import { checkHomeScreenStatus, onHomeScreenAdded, promptAddToHomeScreen } from "./lib/homeScreen.js";
+import { promptAddToHomeScreen } from "./lib/homeScreen.js";
 import { styles, ACCENT } from "./styles.js";
 import { DEFAULT_STORE, DEFAULT_DIET, ALL_DEVICE_IDS, DEFAULT_MEAL_TIMES, STEP_META, QUICK_STEP_KEYS, STORES, MEALS, DIETS } from "./constants.js";
 import { formatResetDate, mealsPerDayLabel } from "./lib/format.js";
@@ -22,6 +22,11 @@ import { EXTRA_PLAN_PRICE_RUB, PRO_PRICE_RUB, ProModal, ExtraPlanModal } from ".
 import { LastPlanGateView } from "./components/LastPlanGateView.jsx";
 import { PlanSlotsBar, ResultView } from "./components/ResultView.jsx";
 import { AccountView } from "./components/account/AccountView.jsx";
+import { usePlanStatus } from "./hooks/usePlanStatus.js";
+import { useFamily } from "./hooks/useFamily.js";
+import { useHomeScreen } from "./hooks/useHomeScreen.js";
+import { useReferral } from "./hooks/useReferral.js";
+import { useTheme } from "./hooks/useTheme.js";
 
 // Telegram сам присылает имя пользователя при открытии Mini App — это
 // бесплатно (initDataUnsafe), никакого своего логина/аккаунта заводить не
@@ -119,170 +124,16 @@ export default function MealPlanner() {
   const [displayName, setDisplayName] = useState(savedProfile?.displayName ?? "");
   const [mealTimes, setMealTimes] = useState(savedProfile?.mealTimes ?? DEFAULT_MEAL_TIMES);
 
-  // Тариф и история — реальные данные с бэкенда (null = ещё не спрашивали
-  // или нечем спросить, см. lib/backend.js). planHistory/referralStatus —
-  // только при открытии Аккаунта (единственное место, где они видны).
-  // planStatus (isPro) нужен ещё и в ResultView — переключатель слотов плана
-  // ("Ещё один план") должен знать про тариф ДО того, как пользователь
-  // вообще откроет Аккаунт, поэтому спрашивается сразу при монтировании (и
-  // ещё раз — при открытии Аккаунта, на случай если тариф поменялся,
-  // например только что оплатили Pro).
-  const [planStatus, setPlanStatus] = useState(null);
-  const [planHistory, setPlanHistory] = useState(null);
-  const [referralStatus, setReferralStatus] = useState(null);
-  // familyStatus — null (ещё не спрашивали/нечем спросить) | {inFamily:false}
-  // | {inFamily:true, isOwner, familyId, members, pantryNames}. Нужен на
-  // мониторинге сразу, не только при открытии Аккаунта — ResultView
-  // подмешивает pantryNames в локальный "уже есть дома" (см. ниже), это
-  // должно случиться независимо от того, открывал ли человек Аккаунт в этой
-  // сессии вообще.
-  const [familyStatus, setFamilyStatus] = useState(null);
-  useEffect(() => {
-    checkPlanStatus().then(setPlanStatus);
-    fetchFamilyStatus().then((r) => { if (r?.ok) setFamilyStatus(r.status); });
-  }, []);
-  useEffect(() => {
-    if (!showAccount) return;
-    checkPlanStatus().then(setPlanStatus);
-    fetchPlanHistory().then(setPlanHistory);
-    fetchReferralStatus().then(setReferralStatus);
-    fetchFamilyStatus().then((r) => { if (r?.ok) setFamilyStatus(r.status); });
-  }, [showAccount]);
+  // Тариф и лимит, семья — в хуках (src/hooks/*). Порядок вызовов хуков = порядок
+  // их эффектов при запуске: заявка реферала (useReferral ниже) должна уйти
+  // раньше синхронизации плана (эффект submitPlanToBackend) — та создаёт строку
+  // пользователя на сервере. Проверяется тестом в App.flows.test.jsx.
+  const { planStatus, planHistory, limitBlocked, setLimitBlocked, lastPlanGate } =
+    usePlanStatus({ showAccount, hasLocalPlanAtMount: !!initialActiveSlot });
+  const { familyStatus, familyJoinedNote, setFamilyJoinedNote, familyActionState, handleCreateFamily, handleLeaveFamily, handleToggleFamilyPantry } =
+    useFamily({ showAccount });
 
-  // "Общий список на семью" — вступление по ссылке
-  // t.me/s_edim_bot?startapp=fam_<inviteCode> (см. AccountView: FamilySection,
-  // "Пригласить"), та же startapp-схема, что уже работает у рефералов (см.
-  // эффект claimReferral ниже). Код приглашения, не id семьи — живая жалоба
-  // в чате: короткий id легко перебираем (см. genInviteCode в
-  // server/src/db.js). Best-effort, один раз при монтировании — сервер сам
-  // решает, принять ли (лимит участников, уже состоит в другой семье и т.п.,
-  // см. server/src/family.js).
-  useEffect(() => {
-    const startParam = window.Telegram?.WebApp?.initDataUnsafe?.start_param;
-    const match = /^fam_([A-Za-z0-9_-]+)$/.exec(startParam || "");
-    if (match) {
-      joinFamily(match[1]).then((r) => {
-        if (!r?.ok) return;
-        setFamilyStatus(r.status);
-        // Раньше вступление было молчаливым: первый экран — обычный визард, о
-        // семье ни слова (перепроверка UX-аудита 04.10.2026).
-        setFamilyJoinedNote(true);
-      });
-    }
-  }, []);
-  const [familyJoinedNote, setFamilyJoinedNote] = useState(false);
-
-  const handleCreateFamily = async () => {
-    hapticImpact("light");
-    setFamilyActionState({ status: "loading" });
-    const result = await createFamily();
-    if (result?.ok) {
-      setFamilyStatus(result.status);
-      setFamilyActionState({ status: "idle" });
-      trackEvent("family_created");
-    } else {
-      setFamilyActionState({ status: "error", message: result?.error || "Не удалось создать семью" });
-    }
-  };
-  const handleLeaveFamily = async () => {
-    hapticImpact("light");
-    setFamilyActionState({ status: "loading" });
-    const result = await leaveFamily();
-    if (result?.ok) {
-      setFamilyStatus({ inFamily: false });
-      setFamilyActionState({ status: "idle" });
-      trackEvent("family_left");
-    } else {
-      setFamilyActionState({ status: "error", message: result?.error || "Не удалось покинуть семью" });
-    }
-  };
-  const [familyActionState, setFamilyActionState] = useState({ status: "idle" }); // idle | loading | error
-
-  // "Отметил купленное один член семьи — увидят все" — пуш серверу best-effort
-  // при каждом клике по "уже есть дома" в ResultView (см. проп onToggleFamilyPantry
-  // ниже), сервер отвечает актуальным полным набором сразу же — не нужно
-  // отдельно перезапрашивать весь статус семьи ради одного изменения.
-  const handleToggleFamilyPantry = async (name, present) => {
-    const result = await toggleFamilyPantryItem(name, present);
-    if (result?.ok) setFamilyStatus((prev) => (prev?.inFamily ? { ...prev, pantryNames: result.pantryNames } : prev));
-  };
-
-  // Блокировка "бесплатный лимит исчерпан" — раньше узнавали об этом только
-  // после ответа бэкенда на попытку "Собрать список" (см. handleFinish),
-  // поэтому отдельное состояние, а не часть planStatus выше (тот обновляется
-  // только пока открыт Аккаунт). Теперь может выставиться и раньше — см.
-  // эффект lastPlanGate ниже, для случая "локального плана нет, а
-  // бесплатный лимит уже исчерпан".
-  const [limitBlocked, setLimitBlocked] = useState(null); // null | { nextResetHint }
-
-  // Просьба в чате: "когда пользователь составил свой 1 бесплатный план, ему
-  // не открывался визард заново с шагами, а показывался план при входе" —
-  // initialActiveSlot (localStorage) уже решает это для обычного случая, но
-  // Telegram WebView иногда сам чистит localStorage (или человек открыл с
-  // другого устройства) — тогда локального плана нет, и до этой правки
-  // человек каждый раз проходил ВЕСЬ визард заново, чтобы узнать только в
-  // самом конце (см. handleFinish), что бесплатный лимит уже исчерпан. Здесь
-  // та же проверка выполняется СРАЗУ при входе, не дожидаясь конца визарда:
-  // если план на эту неделю уже есть в истории на бэкенде — показываем его
-  // (см. LastPlanGateView), а не форму заново; если истории почему-то нет
-  // (savePlanToHistory — best-effort, могла не сохраниться) — сразу
-  // существующий экран limitBlocked, а не после десятка вопросов визарда.
-  const [lastPlanGate, setLastPlanGate] = useState(null); // null | { latest, status }
-  useEffect(() => {
-    if (initialActiveSlot) return; // локальный план уже есть — обычный путь через ResultView, эта проверка не нужна
-    let cancelled = false;
-    (async () => {
-      const status = await checkPlanStatus();
-      if (cancelled || !status || status.canGenerate !== false) return;
-      const history = await fetchPlanHistory();
-      if (cancelled) return;
-      const latest = history && history.length > 0 ? history[0] : null;
-      if (latest) setLastPlanGate({ latest, status });
-      else setLimitBlocked({ nextResetHint: status.nextResetHint });
-    })();
-    return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- один раз на монтировании, как и соседний эффект homeScreenStatus ниже
-  }, []);
-
-  // После оплаты человек возвращается из браузера в тот же Mini App, а экран
-  // лимита в нём так и остаётся "исчерпан" (UX-аудит 29.09.2026: "после
-  // оплаты тишина"). Возвращаясь в приложение, тихо перепроверяем статус — и
-  // если платёж уже прошёл (canGenerate), убираем экран лимита сами.
-  // visibilitychange — обычный браузер/часть клиентов; activated — событие
-  // Telegram Mini Apps (Bot API 8.0+), срабатывает при возврате в приложение.
-  useEffect(() => {
-    if (!limitBlocked && !lastPlanGate) return;
-    let cancelled = false;
-    const recheck = async () => {
-      const status = await checkPlanStatus();
-      if (cancelled || !status?.canGenerate) return;
-      setPlanStatus(status);
-      setLimitBlocked(null);
-      setLastPlanGate(null);
-    };
-    const onVisible = () => { if (document.visibilityState === "visible") recheck(); };
-    document.addEventListener("visibilitychange", onVisible);
-    const tg = window.Telegram?.WebApp;
-    tg?.onEvent?.("activated", recheck);
-    return () => {
-      cancelled = true;
-      document.removeEventListener("visibilitychange", onVisible);
-      tg?.offEvent?.("activated", recheck);
-    };
-  }, [limitBlocked, lastPlanGate]);
-
-  // "Добавить на экран" (Bot API 8.0+, см. lib/homeScreen.js) — статус
-  // проверяем один раз при монтировании, а не при каждом открытии Аккаунта:
-  // он не меняется сам по себе, кроме момента, когда пользователь реально
-  // подтвердит добавление (тогда прилетит событие homeScreenAdded).
-  const [homeScreenStatus, setHomeScreenStatus] = useState("unsupported");
-  useEffect(() => {
-    checkHomeScreenStatus().then(setHomeScreenStatus);
-    return onHomeScreenAdded(() => {
-      setHomeScreenStatus("added");
-      trackEvent("home_screen_added");
-    });
-  }, []);
+  const homeScreenStatus = useHomeScreen();
 
   // "Открыли приложение" — раз за сессию, не при каждом ререндере.
   useEffect(() => {
@@ -290,29 +141,7 @@ export default function MealPlanner() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Реферальная ссылка — t.me/s_edim_bot?startapp=ref_<id> (см. AccountView
-  // ниже, "Пригласить друга"). start_param — официальный механизм Telegram
-  // Mini Apps для передачи параметра при открытии ИМЕННО приложения (не
-  // чата с ботом, это другой сценарий — см. server/src/webhook.js). Шлём
-  // регистрацию один раз при монтировании, best-effort — сервер сам решит,
-  // засчитывать ли (самоприглашение/уже существующий пользователь/уже был
-  // приглашён кем-то другим, см. server/src/referrals.js), фронтенду
-  // результат не нужен.
-  useEffect(() => {
-    const startParam = window.Telegram?.WebApp?.initDataUnsafe?.start_param;
-    const match = /^ref_(\d+)$/.exec(startParam || "");
-    if (match) {
-      claimReferral(Number(match[1])).then((result) => {
-        // Отказ "вы уже пользовались приложением" раньше не видел никто: проверка
-        // ссылки на втором аккаунте, который уже собирал план, выглядела как
-        // "реферальная программа не работает" (жалоба 04.10.2026). Это правило
-        // (бонус только новым пользователям — иначе его можно накручивать самому
-        // себе), его надо просто объяснить.
-        if (result && result.claimed === false && /уже существует/.test(result.reason || "")) setReferralNote(true);
-      });
-    }
-  }, []);
-  const [referralNote, setReferralNote] = useState(false);
+  const { referralStatus, referralNote, setReferralNote } = useReferral({ showAccount });
   // Строка «Запомнили: …» под первым планом — один раз, пока человек её не закроет.
   const [profileNote, setProfileNote] = useState(null);
 
@@ -334,15 +163,7 @@ export default function MealPlanner() {
     return () => cancelAnimationFrame(raf);
   }, [assembling, done]);
 
-  // "system" | "light" | "dark" — управляется вручную из Аккаунта, поверх
-  // системной темы по умолчанию (см. data-theme в <style> ниже и useEffect,
-  // который проставляет атрибут на <html>).
-  const [theme, setTheme] = useState(loadTheme);
-  useEffect(() => {
-    saveTheme(theme);
-    if (theme === "system") document.documentElement.removeAttribute("data-theme");
-    else document.documentElement.setAttribute("data-theme", theme);
-  }, [theme]);
+  const [theme, setTheme] = useTheme();
 
   const toggleSimple = (arr, setArr, id) => {
     hapticSelect();
