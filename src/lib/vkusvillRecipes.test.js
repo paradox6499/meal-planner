@@ -642,3 +642,56 @@ describe("fetchVkusvillPools — нелюбимые продукты (мягко
     expect(pools.main.map((r) => r.id).sort()).toEqual(["vv-2", "vv-3", "vv-4", "vv-5"]);
   });
 });
+
+describe("fetchVkusvillPools — диеты по КБЖУ", () => {
+  const raw = (id, calories, proteins, fats, ...names) => ({
+    id, name: `Блюдо ${id}`, cooking_time: { name: "до 40 минут" }, steps: [], portions: 1,
+    ingredients: (names.length ? names : ["Курица"]).map((n) => ({ name: n, quantity: "100 г" })),
+    nutritional: calories == null ? null : { calories, proteins, fats, carbs: 5 },
+  });
+  const args = (diet, categories = ["main"], extra = {}) => ({ diet, cuisines: [], devices: [], allergies: [], categories, maxCookTime: null, ...extra });
+  const pagesAsked = () => searchRecipes.mock.calls.map(([a]) => a.page);
+
+  beforeEach(() => { searchRecipes.mockReset(); resolvePrices.mockReset(); resolvePrices.mockResolvedValue([]); resolvePricesViaBackend.mockReset(); });
+
+  it("высокобелковый: в пул идут только блюда с подходящим КБЖУ; без данных — исключаются", async () => {
+    searchRecipes.mockResolvedValue({ items: [raw(1, 140, 17, 7), raw(2, 300, 8, 20), raw(3, 144, 8, 5), raw(4, 120, 20, 3), raw(5, 130, 15, 4), raw(6, null), raw(7, 400, 5, 30)] });
+    const { pools } = await fetchVkusvillPools(args("protein"));
+    expect(pools.main.map((r) => r.id).sort()).toEqual(["vv-1", "vv-3", "vv-4", "vv-5"]);
+  });
+
+  it("мало подходящих — догружаются страницы 3–5", async () => {
+    searchRecipes.mockResolvedValue({ items: [raw(1, 140, 17, 7), raw(2, 300, 8, 20)] });
+    await fetchVkusvillPools(args("protein"));
+    expect(pagesAsked()).toEqual(expect.arrayContaining([3, 4, 5]));
+  });
+
+  it("если подходящих всё равно мало — для этой категории берутся обычные рецепты (диета ослаблена, пул не пуст)", async () => {
+    searchRecipes.mockResolvedValue({ items: [raw(1, 140, 17, 7), raw(2, 300, 8, 20), raw(3, 400, 5, 30)] });
+    const { pools } = await fetchVkusvillPools(args("protein"));
+    expect(pools.main).toHaveLength(3);
+  });
+
+  it("ослабление — отдельно по категориям: у завтраков хватает подходящих, у перекусов нет", async () => {
+    searchRecipes.mockImplementation(async ({ id_category_filter }) => ({
+      items: id_category_filter === 339
+        ? [raw(1, 140, 17, 7), raw(2, 144, 8, 5), raw(3, 120, 20, 3), raw(4, 130, 15, 4), raw(5, 400, 5, 30)]
+        : [raw(11, 300, 8, 20), raw(12, 400, 5, 30)],
+    }));
+    const { pools } = await fetchVkusvillPools(args("protein", ["breakfast", "snack"]));
+    expect(pools.breakfast.map((r) => r.id).sort()).toEqual(["vv-1", "vv-2", "vv-3", "vv-4"]); // строго по диете
+    expect(pools.snack).toHaveLength(2); // ослаблено
+  });
+
+  it("лёгкое: ≤ 150 ккал и ≤ 7 г жира", async () => {
+    searchRecipes.mockResolvedValue({ items: [raw(1, 120, 10, 4), raw(2, 150, 5, 7), raw(3, 140, 5, 3), raw(4, 100, 5, 2), raw(5, 200, 5, 10)] });
+    const { pools } = await fetchVkusvillPools(args("light"));
+    expect(pools.main.map((r) => r.id).sort()).toEqual(["vv-1", "vv-2", "vv-3", "vv-4"]);
+  });
+
+  it("другие диеты и аллергии при ослаблении КБЖУ сохраняются: веган остаётся строгим", async () => {
+    searchRecipes.mockResolvedValue({ items: [raw(1, 300, 8, 20, "Курица"), raw(2, 400, 5, 30, "Гречка"), raw(3, 350, 4, 25, "Рис")] });
+    const { pools } = await fetchVkusvillPools(args("vegan"));
+    expect(pools.main.map((r) => r.id).sort()).toEqual(["vv-2", "vv-3"]); // курица убрана веганской диетой
+  });
+});

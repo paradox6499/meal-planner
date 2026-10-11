@@ -333,3 +333,36 @@ describe("MealPlanner: нелюбимые продукты и вопрос «о�
     expect(screen.queryByText("Откуда вы о нас узнали?")).toBeNull();
   });
 });
+
+describe("MealPlanner: диеты по КБЖУ", () => {
+  async function buildWithDiet(dietLabel) {
+    render(<MealPlanner />);
+    for (let i = 0; i < 4; i++) clickButton(/Далее/); // магазин → семья → приёмы пищи → бюджет
+    clickButton(new RegExp(dietLabel));
+    clickButton(/Далее/);
+    clickButton(/Аллергий нет/);
+    clickButton(/Собрать список/);
+    await screen.findByText("Ваш план на неделю");
+  }
+
+  it("диета передаётся в сборку; если ни у одного блюда нет подходящего КБЖУ — честная заметка", async () => {
+    await buildWithDiet("Высокобелковый");
+    expect(vkusvillRecipes.fetchVkusvillPools).toHaveBeenCalledWith(expect.objectContaining({ diet: "protein" }));
+    expect(screen.getByText(/Рецептов, подходящих под диету «Высокобелковый», не нашлось/)).toBeTruthy();
+  });
+
+  it("часть блюд подходит — заметка считает неподходящие", async () => {
+    const pools = catalogPools();
+    // Половине блюд пула даём КБЖУ под «лёгкое», остальным — нет
+    for (const list of Object.values(pools)) list.forEach((r, i) => { r.nutritionPer100g = i % 2 === 0 ? { calories: 100, protein: 5, fat: 3, carbs: 10 } : null; });
+    vi.mocked(vkusvillRecipes.fetchVkusvillPools).mockResolvedValue({ pools, priceByName: fullPrices(pools) });
+    await buildWithDiet("Лёгкое");
+    expect(screen.getByText(/блюд не подходят под диету «Лёгкое» по КБЖУ/)).toBeTruthy();
+  });
+
+  it("без диеты по КБЖУ заметки нет", async () => {
+    render(<MealPlanner />);
+    await passNewUserWizard();
+    expect(screen.queryByText(/по КБЖУ/)).toBeNull();
+  });
+});

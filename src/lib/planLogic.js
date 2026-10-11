@@ -6,6 +6,7 @@
 import { RECIPES, RECIPES_BY_ID, DEPARTMENTS, departmentOf, forbiddenIngredientsFor, recipeHasAllergen, effectiveRecipeCost } from "../data/recipes.js";
 import { resolveIngredientCost } from "./vkusvillRecipes.js";
 import { applyDislikes } from "./dislikes.js";
+import { isNutritionDiet } from "./nutrition.js";
 
 // пул подходящих рецептов на категорию: рацион/кухня/техника — мягкие предпочтения
 // (при пустом пуле смягчаются), аллергии — жёсткое исключение (не смягчается никогда)
@@ -24,7 +25,9 @@ export function buildPools(diet, cuisines, devices, allergies, maxCookTime, disl
   // рациона, а не требует точного совпадения. Нормализуем null/undefined в
   // "any" здесь же — так же, как теперь обязательно в Аккаунте (см. AccountView).
   // Регрессионный тест на этот баг — planLogic.test.js.
-  const safeDiet = diet || "any";
+  // Диеты по КБЖУ (высокобелковый/лёгкое) у встроенных рецептов не проверить — данных КБЖУ нет, берём как «без диеты»
+  // (иначе пул был бы пуст: ни у одного рецепта нет такой диеты в diets). Экран плана предупредит.
+  const safeDiet = !diet || isNutritionDiet(diet) ? "any" : diet;
 
   const buildPool = (category) => {
     let pool = RECIPES.filter((r) => {

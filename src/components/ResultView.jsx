@@ -1,11 +1,12 @@
 // Экран готового плана и переключатель слотов планов.
 
 import { useState, useEffect, useMemo } from "react";
-import { X, Plus, TriangleAlert, Loader2, ChevronRight, Repeat, Home, PackageSearch, Share2 } from "lucide-react";
+import { X, Plus, TriangleAlert, Loader2, ChevronRight, Repeat, Home, PackageSearch, Share2, Info } from "lucide-react";
 import { toVkusvillQuantity, buildCartFromShoppingList } from "../lib/vkusvillMcp.js";
 import { getSubstituteOptions } from "../lib/vkusvillRecipes.js";
 import { findTodayDayIndex, describePlanDay } from "../lib/planDays.js";
 import { DayStrip, dayBlockId } from "./DayStrip.jsx";
+import { NUTRITION_DIETS, isNutritionDiet, countDietMismatches } from "../lib/nutrition.js";
 import { interleaveGroups } from "../lib/planLogic.js";
 import { loadPantryStaples, savePantryStaples } from "../lib/pantry.js";
 import { trackEvent } from "../lib/analytics.js";
@@ -399,6 +400,25 @@ export function ResultView({ plan, planStartISO, onRebuild, generationPending, c
           </span>
         )}
       </div>
+
+      {/* Диета по КБЖУ считается только по каталогу ВкусВилл и только там, где подходящих рецептов хватило: честно
+          говорим, если часть блюд ей не соответствует (или магазин вообще не ВкусВилл). */}
+      {isNutritionDiet(diet) && !fallbackRecipes && (() => {
+        const { mismatched, total } = countDietMismatches(plan.days, diet);
+        if (mismatched === 0) return null;
+        const name = NUTRITION_DIETS[diet].label;
+        const text = storeId !== "vv"
+          ? `Диета «${name}» считается по КБЖУ каталога ВкусВилл, поэтому для этого магазина подобран обычный набор блюд.`
+          : mismatched === total
+            ? `Рецептов, подходящих под диету «${name}», не нашлось — показали обычные блюда.`
+            : `${mismatched} из ${total} блюд не подходят под диету «${name}» по КБЖУ: подходящих рецептов в каталоге оказалось мало (чаще всего это завтраки и перекусы).`;
+        return (
+          <div style={styles.warningBox}>
+            <Info size={15} style={{ flexShrink: 0, marginTop: 1 }} />
+            <span>{text}</span>
+          </div>
+        );
+      })()}
 
       <h3 style={styles.sectionTitle}>Рецепты на неделю</h3>
       <p style={{ fontSize: 12, color: "var(--text-tertiary)", margin: "-4px 0 10px 0" }}>

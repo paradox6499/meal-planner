@@ -24,6 +24,7 @@
 
 import { searchRecipes, resolvePrices, searchProducts, getProductAnalogs } from "./vkusvillMcp.js";
 import { recipeHasDislike, DISLIKE_MIN_POOL } from "./dislikes.js";
+import { isNutritionDiet, matchesNutritionDiet } from "./nutrition.js";
 import { resolvePricesViaBackend } from "./backend.js";
 
 const CATEGORY_BY_MEAL = { breakfast: 339, main: 332, snack: 335 };
@@ -205,6 +206,8 @@ function recipeViolatesAllergies(recipe, allergyIds) {
 function recipeViolatesDiet(recipe, diet) {
   if (diet === "veg") return recipeHasKeyword(recipe, MEAT_FISH_KEYWORDS);
   if (diet === "vegan") return recipeHasKeyword(recipe, VEGAN_FORBIDDEN_KEYWORDS);
+  // Диеты по КБЖУ: без данных о КБЖУ подтвердить нельзя — считаем неподходящим (null !== true)
+  if (isNutritionDiet(diet)) return matchesNutritionDiet(recipe.nutritionPer100g, diet) !== true;
   return false;
 }
 
@@ -486,13 +489,15 @@ export async function fetchVkusvillPools({ diet, cuisines, devices, allergies, c
   const specificCuisines = cuisines.filter((c) => c !== "any");
   const q = specificCuisines.length === 1 ? CUISINE_HINT[specificCuisines[0]] || "" : "";
 
-  const normalizeAndFilter = (raw, category, { withDislikes = true } = {}) =>
+  // withNutritionDiet=false — диету по КБЖУ (высокобелковый/лёгкое) не применяем: для этой категории
+  // подходящих рецептов слишком мало; остальные диеты (veg, vegan…) и аллергии применяются ВСЕГДА.
+  const normalizeAndFilter = (raw, category, { withDislikes = true, withNutritionDiet = true } = {}) =>
     raw
       .map((r) => normalizeVkusvillRecipe(r, category))
       .filter(
         (r) =>
           r.ingr.length > 0 &&
-          !recipeViolatesDiet(r, diet) &&
+          !recipeViolatesDiet(r, withNutritionDiet || !isNutritionDiet(diet) ? diet : "any") &&
           !recipeViolatesAllergies(r, effectiveAllergies) &&
           !(withDislikes && recipeHasDislike(r, dislikes))
       );
@@ -511,20 +516,28 @@ export async function fetchVkusvillPools({ diet, cuisines, devices, allergies, c
           raw = await searchRawRecipes({ q, categoryId, cookingMethod, excludeAllergens, maxCookTime: null });
           normalized = normalizeAndFilter(raw, category);
         }
-        if (dislikes.length > 0 && normalized.length < DISLIKE_MIN_POOL * 2) {
-          // нелюбимое отсеяло много — догружаем следующие страницы (ошибка догрузки не критична)
+        const nutritionDiet = isNutritionDiet(diet);
+        if ((dislikes.length > 0 || nutritionDiet) && normalized.length < DISLIKE_MIN_POOL * 2) {
+          // нелюбимое/диета по КБЖУ отсеяли много — догружаем следующие страницы (ошибка догрузки не критична)
           try {
             const more = await searchRawRecipes({ q, categoryId, cookingMethod, excludeAllergens, maxCookTime, pages: DISLIKE_EXTRA_PAGES });
             const seen = new Set(raw.map((r) => r.id));
             raw = [...raw, ...more.filter((r) => !seen.has(r.id))];
             normalized = normalizeAndFilter(raw, category);
           } catch (err) {
-            console.warn("Не удалось догрузить страницы рецептов под нелюбимое:", err.message);
+            console.warn("Не удалось догрузить страницы рецептов под нелюбимое/диету:", err.message);
           }
+        }
+        let nutritionRelaxed = false;
+        if (nutritionDiet && normalized.length < DISLIKE_MIN_POOL) {
+          // с диетой по КБЖУ в этой категории слишком мало — для неё берём обычные рецепты (нелюбимое и аллергии
+          // сохраняются); экран плана покажет, что часть блюд под диету не подходит (см. countDietMismatches)
+          nutritionRelaxed = true;
+          normalized = normalizeAndFilter(raw, category, { withNutritionDiet: false });
         }
         if (dislikes.length > 0 && normalized.length < DISLIKE_MIN_POOL) {
           // подходящих всё ещё слишком мало — возвращаем рецепты без учёта нелюбимого
-          normalized = normalizeAndFilter(raw, category, { withDislikes: false });
+          normalized = normalizeAndFilter(raw, category, { withDislikes: false, withNutritionDiet: !nutritionRelaxed });
         }
         pools[category] = normalized;
       } catch (err) {

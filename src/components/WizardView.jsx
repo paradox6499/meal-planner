@@ -137,7 +137,7 @@ export function WizardView({
       {currentStepKey === "diet" && (
         <StepShell icon={<Salad size={20} />} title="Какой рацион вам нужен?" sub="Мы подберём рецепты под ваши предпочтения">
           <div style={styles.stack}>
-            {DIETS.map((d) => (
+            {DIETS.filter((d) => !d.vvOnly || store === "vv").map((d) => (
               <button key={d.id} className="chip" onClick={() => { hapticSelect(); setDiet(d.id); }} style={styles.rowChip(diet === d.id)}>
                 <div>
                   <div style={{ fontWeight: 600 }}>{d.label}</div>

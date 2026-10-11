@@ -626,3 +626,14 @@ describe("buildPools — нелюбимые продукты", () => {
     for (const cat of ["breakfast", "main", "snack"]) expect(pools[cat].length).toBeGreaterThan(0);
   });
 });
+
+describe("buildPools — диеты по КБЖУ у встроенных рецептов", () => {
+  it("«высокобелковый» и «лёгкое» не опустошают пулы: берутся как «без диеты»", () => {
+    const devices = ["stove", "oven", "multi", "grill", "airfryer", "microwave", "blender"];
+    const any = buildPools("any", [], devices, [], null);
+    for (const diet of ["protein", "light"]) {
+      const pools = buildPools(diet, [], devices, [], null);
+      for (const cat of ["breakfast", "main", "snack"]) expect(pools[cat].length).toBe(any[cat].length);
+    }
+  });
+});
