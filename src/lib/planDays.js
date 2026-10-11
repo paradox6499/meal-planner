@@ -12,7 +12,7 @@ function startOfLocalDay(d) {
 
 /** createdAtISO — когда план собран (слот плана хранит это поле; у старых
  * планов оно может быть null — тогда null и вызывающий код показывает
- * прежнее "День N"). Возвращает { label, isToday, isPast } или null. */
+ * прежнее "День N"). Возвращает { label, isToday, isPast, weekday, dayOfMonth } или null. */
 export function describePlanDay(createdAtISO, day, now = new Date()) {
   if (!createdAtISO) return null;
   const created = new Date(createdAtISO);
@@ -26,7 +26,14 @@ export function describePlanDay(createdAtISO, day, now = new Date()) {
   const isPast = date.getTime() < today.getTime();
   const dateLabel = date.toLocaleDateString("ru-RU", { weekday: "short", day: "numeric", month: "short" });
 
-  return { label: isToday ? `Сегодня · ${dateLabel}` : dateLabel, isToday, isPast };
+  return {
+    label: isToday ? `Сегодня · ${dateLabel}` : dateLabel,
+    isToday,
+    isPast,
+    // для полосы дней (DayStrip): «пт» и число отдельно
+    weekday: date.toLocaleDateString("ru-RU", { weekday: "short" }),
+    dayOfMonth: date.getDate(),
+  };
 }
 
 /** Индекс дня, который сегодня, среди days (массив {day}) — или -1, если

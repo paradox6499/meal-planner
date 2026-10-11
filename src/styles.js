@@ -256,6 +256,17 @@ export const styles = {
   },
   totalBox: { display: "flex", flexDirection: "column", alignItems: "center", gap: 2, padding: "18px 0", border: "1px solid var(--hairline)", borderRadius: 20, marginBottom: 20, ...glass(0.55, 12) },
   sectionTitle: { fontSize: 13, fontWeight: 600, color: "var(--text-tertiary)", margin: "0 0 8px 0" },
+  // Полоса дней над рецептами: липкая в пределах секции «Рецепты на неделю», нажатие прокручивает к дню.
+  dayStrip: {
+    position: "sticky", top: 0, zIndex: 4, display: "flex", gap: 6, padding: "8px 0 10px", margin: "0 0 6px",
+    background: "var(--strip-bg, var(--bg, transparent))", backdropFilter: "blur(14px)", WebkitBackdropFilter: "blur(14px)",
+  },
+  dayChip: (active, isToday) => ({
+    flex: 1, minWidth: 0, display: "flex", flexDirection: "column", alignItems: "center", gap: 2, padding: "7px 0 8px",
+    borderRadius: 14, cursor: "pointer", fontFamily: "inherit",
+    border: isToday && !active ? "1.5px solid rgba(10,132,255,0.55)" : "1px solid var(--hairline)",
+    background: active ? ACCENT : "transparent", color: active ? "#fff" : "var(--text-primary)",
+  }),
   dayBlock: { paddingBottom: 8, marginBottom: 4, borderBottom: "1px solid var(--hairline)" },
   dayTag: { fontSize: 11, fontWeight: 700, color: ACCENT, marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.02em" },
   dayTagToday: { display: "inline-block", background: ACCENT, color: "#fff", padding: "2px 9px", borderRadius: 8 },

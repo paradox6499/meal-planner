@@ -54,3 +54,14 @@ describe("findTodayDayIndex", () => {
     expect(findTodayDayIndex(null, days)).toBe(-1);
   });
 });
+
+describe("describePlanDay: поля для полосы дней", () => {
+  it("weekday и dayOfMonth — день недели коротко и число месяца для даты дня", () => {
+    // 2026-10-02 (пятница), день 1 = день сборки
+    const created = new Date(2026, 9, 2, 12, 0).toISOString();
+    const now = new Date(2026, 9, 2, 15, 0);
+    expect(describePlanDay(created, 1, now)).toMatchObject({ weekday: "пт", dayOfMonth: 2, isToday: true });
+    expect(describePlanDay(created, 4, now)).toMatchObject({ weekday: "пн", dayOfMonth: 5, isToday: false });
+    expect(describePlanDay(created, 7, now)).toMatchObject({ weekday: "чт", dayOfMonth: 8 });
+  });
+});

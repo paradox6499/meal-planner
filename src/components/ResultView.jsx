@@ -5,6 +5,7 @@ import { X, Plus, TriangleAlert, Loader2, ChevronRight, Repeat, Home, PackageSea
 import { toVkusvillQuantity, buildCartFromShoppingList } from "../lib/vkusvillMcp.js";
 import { getSubstituteOptions } from "../lib/vkusvillRecipes.js";
 import { findTodayDayIndex, describePlanDay } from "../lib/planDays.js";
+import { DayStrip, dayBlockId } from "./DayStrip.jsx";
 import { interleaveGroups } from "../lib/planLogic.js";
 import { loadPantryStaples, savePantryStaples } from "../lib/pantry.js";
 import { trackEvent } from "../lib/analytics.js";
@@ -91,7 +92,7 @@ export function ResultView({ plan, planStartISO, onRebuild, generationPending, c
   // не трогаем прокрутку.
   useEffect(() => {
     if (findTodayDayIndex(planStartISO, plan.days) > 0) {
-      document.getElementById("plan-day-today")?.scrollIntoView({ block: "start" });
+      document.getElementById(dayBlockId(plan.days[findTodayDayIndex(planStartISO, plan.days)].day))?.scrollIntoView({ block: "start" });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- только при первом показе экрана плана
   }, []);
@@ -403,14 +404,18 @@ export function ResultView({ plan, planStartISO, onRebuild, generationPending, c
       <p style={{ fontSize: 12, color: "var(--text-tertiary)", margin: "-4px 0 10px 0" }}>
         Нажмите на блюдо, чтобы посмотреть рецепт
       </p>
+      {/* Секция целиком (полоса + дни): липкая полоса держится только пока видны рецепты, не наезжает на список покупок. */}
+      <div>
+      <DayStrip days={plan.days} planStartISO={planStartISO} />
       <div style={styles.stack}>
         {plan.days.map(({ day, dayMeals }, dayIndex) => {
           const info = describePlanDay(planStartISO, day);
           return (
           <div
             key={day}
-            id={info?.isToday ? "plan-day-today" : undefined}
-            style={{ ...styles.dayBlock, scrollMarginTop: 16, opacity: info?.isPast ? 0.6 : 1 }}
+            id={dayBlockId(day)}
+            data-day={day}
+            style={{ ...styles.dayBlock, scrollMarginTop: 78, opacity: info?.isPast ? 0.6 : 1 }}
           >
             <div style={{ ...styles.dayTag, ...(info?.isToday ? styles.dayTagToday : null) }}>{info ? info.label : `День ${day}`}</div>
             {dayMeals.map((dm, i) => (
@@ -451,6 +456,7 @@ export function ResultView({ plan, planStartISO, onRebuild, generationPending, c
           </div>
           );
         })}
+      </div>
       </div>
 
       <h3 style={styles.sectionTitle}>Список покупок</h3>
