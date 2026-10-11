@@ -11,6 +11,7 @@ import { hapticSelect, hapticImpact } from "../lib/haptics.js";
 import { trackEvent } from "../lib/analytics.js";
 import { StepShell } from "./common.jsx";
 import { DislikesPicker } from "./DislikesPicker.jsx";
+import { BudgetCheck } from "./BudgetCheck.jsx";
 
 export function WizardView({
   currentStepKey,
@@ -21,6 +22,7 @@ export function WizardView({
   setShowOtherStores,
   setFamily,
   family,
+  familyByMeal,
   toggleSimple,
   meals,
   setMeals,
@@ -116,6 +118,7 @@ export function WizardView({
           <div style={styles.budgetVal}>{budget.toLocaleString("ru-RU")} ₽</div>
           <input type="range" min={1500} max={15000} step={250} value={budget} onChange={(e) => setBudget(Number(e.target.value))} style={styles.slider} />
           <div style={styles.sliderLabels}><span>1 500 ₽</span><span>15 000 ₽</span></div>
+          <BudgetCheck budget={budget} setBudget={setBudget} meals={meals} family={family} familyByMeal={familyByMeal} store={store} />
           {/* Вопрос в чате: "выдаёт 17 000 при бюджете 15 000, почему?"
               — честный ответ: алгоритм целится в сумму, но не может
               дать железную гарантию "не больше" — если рацион/аллергии/

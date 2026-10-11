@@ -313,6 +313,7 @@ export default function MealPlanner() {
             setShowOtherStores={setShowOtherStores}
             setFamily={setFamily}
             family={family}
+            familyByMeal={familyByMeal}
             toggleSimple={toggleSimple}
             meals={meals}
             setMeals={setMeals}
