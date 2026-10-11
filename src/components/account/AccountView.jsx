@@ -14,6 +14,7 @@ import { FamilySection } from "./FamilySection.jsx";
 import { ReferralSection } from "./ReferralSection.jsx";
 import { ProgressSection } from "./ProgressSection.jsx";
 import { PlanHistorySection } from "./PlanHistorySection.jsx";
+import { FavoritesSection } from "./FavoritesSection.jsx";
 import { LegalAndDataSection } from "./LegalAndDataSection.jsx";
 
 export const THEME_OPTIONS = [
@@ -121,6 +122,7 @@ export function AccountView({
           первой настройки — посмотреть, что уже собирали, поэтому теперь
           это первое, что видно, без прокрутки. */}
       <PlanHistorySection planHistory={planHistory} />
+      <FavoritesSection family={family} />
       {/* Жалоба в чате: "История планов близко к самому плану находится" —
           дальше сразу шли настройки без какой-либо визуальной паузы. Тот же
           разделитель, что уже стоит между "Профиль для плана" и карточками

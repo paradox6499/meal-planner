@@ -1,12 +1,20 @@
 // Окно рецепта (портал в document.body).
 
 import { createPortal } from "react-dom";
-import { X, Clock, Clapperboard } from "lucide-react";
+import { X, Clock, Clapperboard, Heart, Check } from "lucide-react";
 import { trackEvent } from "../lib/analytics.js";
-import { styles } from "../styles.js";
+import { styles, ACCENT } from "../styles.js";
+import { hapticSelect } from "../lib/haptics.js";
+import { useRecipeBook, isFavorite, toggleFavorite, cookedToday, cookedDates, toggleCookedToday } from "../lib/recipeBook.js";
 
 export function RecipeModal({ dm, family, onClose }) {
   const { recipe, cost, isRealPrice } = dm;
+  // «Книга рецептов» (избранное и «приготовил»): хранится на устройстве, см. lib/recipeBook.js.
+  const book = useRecipeBook();
+  const favorite = isFavorite(book, recipe);
+  const cookedNow = cookedToday(book, recipe);
+  const cookedTimes = cookedDates(book, recipe);
+  const lastCooked = cookedTimes.length > 0 ? cookedTimes[cookedTimes.length - 1] : null;
   // Через портал в document.body (скриншот пользователя 04.10.2026: «открываю
   // план из истории — чёрное окно, дальше ничего»). Карточка приложения имеет
   // will-change: transform, а у такого предка position: fixed считается ОТ НЕГО,
@@ -51,6 +59,31 @@ export function RecipeModal({ dm, family, onClose }) {
             <span>У {Math.round(recipe.nutritionPer100g.carbs)} г</span>
             <span style={{ color: "var(--text-tertiary)" }}>на 100 г</span>
           </div>
+        )}
+
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8, margin: "4px 0 6px" }}>
+          <button
+            type="button"
+            aria-pressed={favorite}
+            onClick={() => { hapticSelect(); if (toggleFavorite(dm)) trackEvent("recipe_favorited"); }}
+            style={styles.pillChip(favorite)}
+          >
+            <Heart size={15} color={favorite ? ACCENT : "currentColor"} fill={favorite ? ACCENT : "none"} /> {favorite ? "В избранном" : "В избранное"}
+          </button>
+          <button
+            type="button"
+            aria-pressed={cookedNow}
+            onClick={() => { hapticSelect(); if (toggleCookedToday(recipe)) trackEvent("recipe_cooked"); }}
+            style={styles.pillChip(cookedNow)}
+          >
+            <Check size={15} color={cookedNow ? ACCENT : "currentColor"} /> {cookedNow ? "Приготовлено сегодня" : "Приготовил(а)"}
+          </button>
+        </div>
+        {cookedTimes.length > 0 && (
+          <p style={{ ...styles.chipHint, margin: "0 0 4px" }}>
+            Готовили {cookedTimes.length} {cookedTimes.length === 1 ? "раз" : cookedTimes.length < 5 ? "раза" : "раз"}
+            {lastCooked ? ` · последний раз ${new Date(`${lastCooked}T12:00:00`).toLocaleDateString("ru-RU", { day: "numeric", month: "long" })}` : ""}
+          </p>
         )}
 
         <h3 style={styles.sectionTitle}>Ингредиенты</h3>

@@ -28,6 +28,8 @@ export function shouldRunDigest(now, lastDigestAt, digestHour) {
 const EVENT_LABELS = {
   app_error: "❗ ошибок в приложении",
   app_opened: "открыли приложение",
+  recipe_favorited: "добавили рецепт в избранное",
+  recipe_cooked: "отметили «приготовил(а)»",
   budget_hint_applied: "приняли подсказку по бюджету",
   acq_friend: "узнали: от друзей или семьи",
   acq_channel: "узнали: из Telegram-канала",
