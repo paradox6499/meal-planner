@@ -23,6 +23,7 @@
 // они не гарантированно вечны.
 
 import { searchRecipes, resolvePrices, searchProducts, getProductAnalogs, productIdOf } from "./vkusvillMcp.js";
+import { findProductFor } from "./productMatch.js";
 import { recipeHasDislike, DISLIKE_MIN_POOL } from "./dislikes.js";
 import { isNutritionDiet, matchesNutritionDiet } from "./nutrition.js";
 import { resolvePricesViaBackend } from "./backend.js";
@@ -595,8 +596,7 @@ function stemOf(text) {
  * Все — уже прошедшие те же проверки на аллергию/рацион, что и обычные
  * рецепты, без этого "замена" могла бы тихо подсунуть что-то запрещённое. */
 export async function getSubstituteOptions({ name, allergies, diet }) {
-  const search = await searchProducts({ q: name, mode: "short", vvonly: 0 });
-  const original = search.items?.[0];
+  const original = await findProductFor(name, (q) => searchProducts({ q, mode: "short", vvonly: 0 }));
   const originalId = productIdOf(original);
   // Нет номера товара — аналоги спрашивать не у кого; раньше уходил запрос без id и пользователь
   // видел ошибку каталога «Missing required properties: id».

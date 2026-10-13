@@ -819,7 +819,11 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
 
       try {
         const result = createFamily(db, { ownerTelegramId: auth.telegramUserId, ownerDisplayName: auth.firstName, nowISO: new Date().toISOString() });
-        if (!result.ok) return sendJson(res, 400, { ok: false, error: result.reason });
+        if (!result.ok) {
+          console.log(`[api/family/join] отказ для ${auth.telegramUserId}: ${result.reason}`);
+          return sendJson(res, 400, { ok: false, error: result.reason });
+        }
+        console.log(`[api/family/join] ${auth.telegramUserId} вступил в семью ${result.familyId}`);
         sendJson(res, 200, { ok: true, status: getFamilyStatus(db, auth.telegramUserId) });
       } catch (err) {
         console.error("[api/family/create] ошибка:", err);
@@ -846,7 +850,11 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
           return sendJson(res, 400, { ok: false, error: "у владельца этой семьи закончился Pro — приглашение пока не действует" });
         }
         const result = joinFamily(db, { inviteCode: parsed.value.inviteCode, joiningTelegramId: auth.telegramUserId, displayName: auth.firstName, nowISO: new Date().toISOString() });
-        if (!result.ok) return sendJson(res, 400, { ok: false, error: result.reason });
+        if (!result.ok) {
+          console.log(`[api/family/join] отказ для ${auth.telegramUserId}: ${result.reason}`);
+          return sendJson(res, 400, { ok: false, error: result.reason });
+        }
+        console.log(`[api/family/join] ${auth.telegramUserId} вступил в семью ${result.familyId}`);
         sendJson(res, 200, { ok: true, status: getFamilyStatus(db, auth.telegramUserId) });
       } catch (err) {
         console.error("[api/family/join] ошибка:", err);

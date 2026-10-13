@@ -257,9 +257,16 @@ export const styles = {
   totalBox: { display: "flex", flexDirection: "column", alignItems: "center", gap: 2, padding: "18px 0", border: "1px solid var(--hairline)", borderRadius: 20, marginBottom: 20, ...glass(0.55, 12) },
   sectionTitle: { fontSize: 13, fontWeight: 600, color: "var(--text-tertiary)", margin: "0 0 8px 0" },
   // Полоса дней над рецептами: липкая в пределах секции «Рецепты на неделю», нажатие прокручивает к дню.
+  // Липкая полоса дней. На своём месте — прозрачный ряд кнопок; прилипнув (dayStripStuck), становится матовой
+  // плашкой с тенью, как панель навигации в iOS. Раньше подложка была всегда: тёмный прямоугольник резал глаз.
   dayStrip: {
-    position: "sticky", top: 0, zIndex: 4, display: "flex", gap: 6, padding: "8px 0 10px", margin: "0 0 6px",
-    background: "var(--strip-bg)", backdropFilter: "blur(14px)", WebkitBackdropFilter: "blur(14px)",
+    position: "sticky", top: 6, zIndex: 4, display: "flex", gap: 6, padding: 6, margin: "0 -6px 6px",
+    borderRadius: 20, background: "transparent", boxShadow: "0 0 0 rgba(0,0,0,0)",
+    transition: "background-color .2s ease, box-shadow .2s ease",
+  },
+  dayStripStuck: {
+    background: "var(--strip-bg)", backdropFilter: "blur(16px) saturate(160%)", WebkitBackdropFilter: "blur(16px) saturate(160%)",
+    boxShadow: "0 8px 24px rgba(0,0,0,0.18), 0 0 0 1px var(--hairline)",
   },
   dayChip: (active, isToday) => ({
     flex: 1, minWidth: 0, display: "flex", flexDirection: "column", alignItems: "center", gap: 2, padding: "7px 0 8px",
@@ -291,7 +298,7 @@ export const styles = {
   // subFindBtn/subRevertBtn) — те уже отмечены как слишком мелкая тач-зона
   // при аудите доступности, не повторяем ту же ошибку в новом элементе:
   // 13 (иконка) + 6*2 = 25px, укладывается в минимум WCAG 2.5.8 (24×24).
-  buyLaterBadge: { fontSize: 11, color: "var(--warning-text)", fontWeight: 600, whiteSpace: "nowrap" },
+  buyLaterBadge: { fontSize: 11, color: "var(--text-secondary)", fontWeight: 600, whiteSpace: "nowrap" },
   pantryBtn: { display: "flex", alignItems: "center", justifyContent: "center", background: "none", border: "none", padding: 6, margin: -6, color: "var(--text-tertiary)", cursor: "pointer" },
   pantryBtnActive: { display: "flex", alignItems: "center", justifyContent: "center", background: "none", border: "none", padding: 6, margin: -6, color: "var(--accent)", cursor: "pointer" },
   subPanel: { display: "flex", flexDirection: "column", gap: 6, padding: "8px 10px 10px", marginBottom: 4, borderRadius: 14, ...glass(0.5, 10), border: "1px solid var(--hairline)" },

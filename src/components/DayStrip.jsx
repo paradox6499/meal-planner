@@ -13,6 +13,10 @@ export function DayStrip({ days, planStartISO }) {
   const infos = days.map(({ day }) => ({ day, info: describePlanDay(planStartISO, day) }));
   const todayDay = infos.find((d) => d.info?.isToday)?.day ?? days[0]?.day;
   const [activeDay, setActiveDay] = useState(todayDay);
+  // «Прилипла» ли полоса к верху экрана. Пока она на своём месте — просто ряд кнопок без подложки; подложка
+  // (матовая плашка с тенью) появляется только когда под полосой едет текст, чтобы он не сливался с кнопками.
+  const sentinel = useRef(null);
+  const [stuck, setStuck] = useState(false);
 
   // Какой день сейчас вверху экрана: последний, чей блок уже дошёл до линии под полосой (ниже недели ещё идёт
   // список покупок, так что до линии доходит и последний день). Считаем по положению блоков при прокрутке: так
@@ -20,6 +24,8 @@ export function DayStrip({ days, planStartISO }) {
   const lockUntil = useRef(0);
   useEffect(() => {
     const compute = () => {
+      const top = sentinel.current?.getBoundingClientRect().top;
+      if (top != null) setStuck((prev) => { const next = top < -1; return prev === next ? prev : next; });
       if (Date.now() < lockUntil.current) return; // идёт прокрутка после нажатия — не перебиваем выбранный день
       let current = days[0]?.day;
       let anyBlock = false;
@@ -47,7 +53,9 @@ export function DayStrip({ days, planStartISO }) {
 
   if (days.length < 2) return null;
   return (
-    <nav aria-label="Дни недели" style={styles.dayStrip}>
+    <>
+    <div ref={sentinel} aria-hidden="true" style={{ height: 0 }} />
+    <nav aria-label="Дни недели" className="day-strip" style={{ ...styles.dayStrip, ...(stuck ? styles.dayStripStuck : null) }}>
       {infos.map(({ day, info }) => {
         const active = activeDay === day;
         return (
@@ -65,5 +73,6 @@ export function DayStrip({ days, planStartISO }) {
         );
       })}
     </nav>
+    </>
   );
 }

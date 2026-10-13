@@ -5,7 +5,7 @@ export const GLOBAL_CSS = `
         :root {
           --page-bg: radial-gradient(circle at 12% 15%, #dcebff 0%, transparent 42%), radial-gradient(circle at 88% 12%, #ffe1f0 0%, transparent 40%), radial-gradient(circle at 50% 95%, #dcfce4 0%, transparent 45%), #eef1f5;
           --glass-rgb: 255,255,255;
-          --strip-bg: rgba(238,241,245,0.96);
+          --strip-bg: rgba(244,246,250,0.9);
           --text-primary: #1c1c1e;
           --text-secondary: #6e6e73;
           /* Было #8e8e93 — 2.88:1 на фоне страницы, ниже минимума WCAG AA
@@ -39,7 +39,7 @@ export const GLOBAL_CSS = `
           :root:not([data-theme="light"]) {
             --page-bg: radial-gradient(circle at 12% 15%, rgba(10,70,130,0.4) 0%, transparent 42%), radial-gradient(circle at 88% 12%, rgba(140,20,80,0.32) 0%, transparent 40%), radial-gradient(circle at 50% 95%, rgba(20,100,55,0.32) 0%, transparent 45%), #0b0b0d;
             --glass-rgb: 42,42,46;
-            --strip-bg: rgba(22,22,26,0.96);
+            --strip-bg: rgba(30,30,36,0.92);
             --text-primary: #f2f2f7;
             --text-secondary: #b6b6bb;
             --text-tertiary: #8e8e93;
@@ -64,7 +64,7 @@ export const GLOBAL_CSS = `
         :root[data-theme="dark"] {
           --page-bg: radial-gradient(circle at 12% 15%, rgba(10,70,130,0.4) 0%, transparent 42%), radial-gradient(circle at 88% 12%, rgba(140,20,80,0.32) 0%, transparent 40%), radial-gradient(circle at 50% 95%, rgba(20,100,55,0.32) 0%, transparent 45%), #0b0b0d;
           --glass-rgb: 42,42,46;
-            --strip-bg: rgba(22,22,26,0.96);
+            --strip-bg: rgba(30,30,36,0.92);
           --text-primary: #f2f2f7;
           --text-secondary: #b6b6bb;
           --text-tertiary: #8e8e93;
@@ -107,7 +107,7 @@ export const GLOBAL_CSS = `
         /* Размытие фона нужно только самой карточке. На экране Аккаунта у каждой строки, чипа и
            кнопки было своё backdrop-filter — 63 штуки на одном экране; WebKit пересчитывает каждое
            при прокрутке, отсюда «тормозит». Внутри карточки оставляем только полупрозрачную заливку. */
-        .mp-card * { backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }
+        .mp-card *:not(.day-strip) { backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }
         .basket-body { position: absolute; left: 50%; bottom: 0; transform: translateX(-50%); font-size: 52px; line-height: 1; animation: basket-bob 1.6s ease-in-out infinite; }
         .basket-drop { position: absolute; top: -8px; font-size: 24px; line-height: 1; opacity: 0; animation: basket-drop 2.25s cubic-bezier(.4,0,.6,1) infinite; }
         @keyframes basket-drop {

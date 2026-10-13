@@ -27,6 +27,7 @@
 // безопасен (в отличие от server/src/vkusvillPrices.js, который сознательно
 // НЕ импортирует этот файл — см. его шапку): backend.js ничего не
 // импортирует сам, цикла импортов не образуется.
+import { findProductFor } from "./productMatch.js";
 import { resolvePricesViaBackend, isCatalogProxyAvailable, callCatalogViaBackend } from "./backend.js";
 
 const MCP_URL = "https://mcp.vkusvill.ru/mcp";
@@ -359,8 +360,7 @@ export async function resolvePrices(items) {
         q: toVkusvillQuantity(item.amount, item.unit, item.knownUnit),
       };
     }
-    const data = await searchProducts({ q: item.name, mode: "short", vvonly: 0 });
-    const match = data.items?.[0];
+    const match = await findProductFor(item.name, (q) => searchProducts({ q, mode: "short", vvonly: 0 }));
     if (!match) return { matched: false, name: item.name };
     // Вес/объём упаковки — только когда сам товар "поштучный" (шт): если
     // ВкусВилл и так продаёт на вес/объём (кг/л/г/мл), пересчитывать нечего,

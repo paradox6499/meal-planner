@@ -435,7 +435,7 @@ export function ResultView({ plan, planStartISO, onRebuild, generationPending, c
             key={day}
             id={dayBlockId(day)}
             data-day={day}
-            style={{ ...styles.dayBlock, scrollMarginTop: 78, opacity: info?.isPast ? 0.6 : 1 }}
+            style={{ ...styles.dayBlock, scrollMarginTop: 86, opacity: info?.isPast ? 0.6 : 1 }}
           >
             <div style={{ ...styles.dayTag, ...(info?.isToday ? styles.dayTagToday : null) }}>{info ? info.label : `День ${day}`}</div>
             {dayMeals.map((dm, i) => (
@@ -534,8 +534,8 @@ export function ResultView({ plan, planStartISO, onRebuild, generationPending, c
                               купить всё сразу в день 0 — см. buyLater в
                               planLogic.js (buildPlanView). */}
                           {it.buyLater && (
-                            <span style={styles.buyLaterBadge} title="Понадобится ближе к концу недели — храните дольше рискованно, лучше докупить свежим позже">
-                              {" "}🕒 докупить позже
+                            <span style={styles.buyLaterBadge} title="Понадобится ближе к концу недели: если заказываете сразу, уберите в морозилку — так мясо и рыба не испортятся">
+                              {" "}❄️ можно заморозить
                             </span>
                           )}
                         </>

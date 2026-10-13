@@ -19,6 +19,7 @@
 // сознательно, держите их в синхроне вручную, если поменяются в одном месте.
 
 import { getIngredientPricesByName, upsertIngredientPrices } from "./db.js";
+import { findProductFor } from "./productMatch.js";
 
 const MCP_URL = "https://mcp.vkusvill.ru/mcp";
 const DEFAULT_TIMEOUT_MS = 8000;
@@ -198,8 +199,7 @@ function parsePackageAmount(productName) {
 /** Один живой поиск товара по названию — сравните с searchProducts в
  * src/lib/vkusvillMcp.js, тот же вызов, тот же инструмент MCP. */
 async function fetchLive(name) {
-  const data = await callTool("vkusvill_products_search", { q: name, page: 1, sort: "popularity", vvonly: 1, mode: "short" });
-  const match = data.items?.[0];
+  const match = await findProductFor(name, (q) => callTool("vkusvill_products_search", { q, page: 1, sort: "popularity", vvonly: 1, mode: "short" }));
   if (!match) return { matched: false, name, price: null, productUnit: null, xmlId: null, packageAmount: null, packageUnit: null };
   const pkg = match.unit === "шт" ? parsePackageAmount(match.name) : null;
   return {
