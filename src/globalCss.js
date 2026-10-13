@@ -104,7 +104,22 @@ export const GLOBAL_CSS = `
            у него уже линейный минимальный keyframe. Остальное — либо
            убираем движение полностью (только opacity), либо сокращаем
            длительность почти до нуля. */
+        /* Размытие фона нужно только самой карточке. На экране Аккаунта у каждой строки, чипа и
+           кнопки было своё backdrop-filter — 63 штуки на одном экране; WebKit пересчитывает каждое
+           при прокрутке, отсюда «тормозит». Внутри карточки оставляем только полупрозрачную заливку. */
+        .mp-card * { backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }
+        .basket-body { position: absolute; left: 50%; bottom: 0; transform: translateX(-50%); font-size: 52px; line-height: 1; animation: basket-bob 1.6s ease-in-out infinite; }
+        .basket-drop { position: absolute; top: -8px; font-size: 24px; line-height: 1; opacity: 0; animation: basket-drop 2.25s cubic-bezier(.4,0,.6,1) infinite; }
+        @keyframes basket-drop {
+          0% { opacity: 0; left: var(--from); top: -8px; transform: translateX(-50%) scale(1); }
+          12% { opacity: 1; }
+          72% { opacity: 1; }
+          100% { opacity: 0; left: 50%; top: 56px; transform: translateX(-50%) scale(.5); }
+        }
+        @keyframes basket-bob { 0%, 100% { transform: translateX(-50%) translateY(0); } 50% { transform: translateX(-50%) translateY(-3px); } }
         @media (prefers-reduced-motion: reduce) {
+          .basket-drop { animation: none !important; opacity: 1; position: static; display: inline-block; margin: 0 4px; }
+          .basket-body { animation: none !important; }
           .fade-in-up, .modal-card-in { animation-duration: .01ms !important; animation-iteration-count: 1 !important; }
           .greeting-fade { animation: none !important; opacity: 1; }
           .skeleton-bar { animation-duration: 2.8s !important; }

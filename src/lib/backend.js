@@ -327,6 +327,26 @@ export async function fetchPlanHistory() {
   }
 }
 
+/** Удаляет один план из истории. true — удалён (или его уже не было), false — не получилось. */
+export async function deletePlanFromHistory(id) {
+  const backendUrl = getBackendUrl();
+  const initData = currentInitData();
+  if (!backendUrl || !initData) return false;
+  try {
+    const res = await fetchWithTimeout(`${backendUrl}/api/plans/delete`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ initData, id }),
+    });
+    if (!res.ok) return false;
+    const data = await res.json();
+    return data.ok === true;
+  } catch (err) {
+    console.warn("Не удалось удалить план из истории:", err.message);
+    return false;
+  }
+}
+
 /** Обновляет время приёмов пищи для УЖЕ сохранённого на сервере плана,
  * напрямую, без пересборки всего плана (см. server/src/db.js:
  * updateMealTimesForUser). Раньше время долетало до сервера только вместе

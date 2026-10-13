@@ -553,6 +553,28 @@ describe("HTTP-сервер", () => {
     expect(data.plans[0].budget).toBe(4000);
   });
 
+  it("POST /api/plans/delete удаляет только свой план; чужой id не трогает", async () => {
+    const post = (path, body) => fetch(`${baseUrl}${path}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    await post("/api/plans", { initData: validInitData(42), ...validPlanBody, budget: 4000 });
+    await post("/api/plans", { initData: validInitData(7), ...validPlanBody, budget: 9999 });
+    const mine = (await (await post("/api/plans/list", { initData: validInitData(42) })).json()).plans[0];
+    const theirs = (await (await post("/api/plans/list", { initData: validInitData(7) })).json()).plans[0];
+
+    const foreign = await (await post("/api/plans/delete", { initData: validInitData(42), id: theirs.id })).json();
+    expect(foreign).toEqual({ ok: true, deleted: false });
+    expect((await (await post("/api/plans/list", { initData: validInitData(7) })).json()).plans).toHaveLength(1);
+
+    const own = await (await post("/api/plans/delete", { initData: validInitData(42), id: mine.id })).json();
+    expect(own).toEqual({ ok: true, deleted: true });
+    expect((await (await post("/api/plans/list", { initData: validInitData(42) })).json()).plans).toHaveLength(0);
+  });
+
+  it("POST /api/plans/delete без числового id -> 400, без initData -> 401", async () => {
+    const post = (body) => fetch(`${baseUrl}/api/plans/delete`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    expect((await post({ initData: validInitData(42), id: "1; DROP TABLE" })).status).toBe(400);
+    expect((await post({ id: 1 })).status).toBe(401);
+  });
+
   it("POST /api/plans/list без initData -> 401", async () => {
     const res = await fetch(`${baseUrl}/api/plans/list`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
     expect(res.status).toBe(401);

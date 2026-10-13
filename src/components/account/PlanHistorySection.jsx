@@ -1,7 +1,9 @@
 // Раздел «История планов» в Аккаунте.
 
 import { useState } from "react";
-import { ChevronRight } from "lucide-react";
+import { ChevronRight, Trash2 } from "lucide-react";
+import { confirmAction } from "../../lib/confirmAction.js";
+import { SwipeToDelete } from "./SwipeToDelete.jsx";
 import { describePlanDay } from "../../lib/planDays.js";
 import { hapticSelect } from "../../lib/haptics.js";
 import { styles } from "../../styles.js";
@@ -17,7 +19,7 @@ import { RecipeModal } from "../RecipeModal.jsx";
 // история (до 12 записей), и настройки Аккаунта уезжали далеко вниз. Остальное — по кнопке.
 export const HISTORY_VISIBLE_DEFAULT = 3;
 
-export function PlanHistorySection({ planHistory }) {
+export function PlanHistorySection({ planHistory, onDeletePlan }) {
   const [openId, setOpenId] = useState(null);
   const [showAll, setShowAll] = useState(false);
   // Запрос в чате (после созвона с другом): "история планов, когда хочет
@@ -26,7 +28,17 @@ export function PlanHistorySection({ planHistory }) {
   // лежит старый плоский формат) — тогда блюдо остаётся простым текстом, не
   // кнопкой, без ошибки. Новые планы кладут полный рецепт, см. handleFinish.
   const [historyRecipe, setHistoryRecipe] = useState(null);
+  const [deleteError, setDeleteError] = useState(false);
   if (planHistory === null) return null;
+
+  const requestDelete = async (p) => {
+    const ok = await confirmAction("Вы точно хотите удалить этот план?");
+    if (!ok) return;
+    setDeleteError(false);
+    const done = await onDeletePlan?.(p.id);
+    if (done === false) setDeleteError(true);
+    else if (openId === p.id) setOpenId(null);
+  };
   const hiddenCount = Math.max(0, planHistory.length - HISTORY_VISIBLE_DEFAULT);
   const visible = showAll ? planHistory : planHistory.slice(0, HISTORY_VISIBLE_DEFAULT);
 
@@ -42,6 +54,7 @@ export function PlanHistorySection({ planHistory }) {
             const dateLabel = new Date(p.createdAt).toLocaleDateString("ru-RU", { day: "numeric", month: "long" });
             return (
               <div key={p.id}>
+                <SwipeToDelete onDelete={() => requestDelete(p)}>
                 <button className="chip" onClick={() => { hapticSelect(); setOpenId(open ? null : p.id); }} style={styles.rowChip(false)}>
                   <div>
                     <div style={{ fontWeight: 600 }}>{dateLabel} · {p.storeName}</div>
@@ -51,6 +64,7 @@ export function PlanHistorySection({ planHistory }) {
                   </div>
                   <ChevronRight size={16} style={{ transform: open ? "rotate(90deg)" : "none", transition: "transform .15s" }} />
                 </button>
+                </SwipeToDelete>
                 {open && (
                   <div style={styles.historyDetail}>
                     {p.plan?.days?.map((d) => (
@@ -84,6 +98,13 @@ export function PlanHistorySection({ planHistory }) {
                         </span>
                       </div>
                     ))}
+                    <button
+                      type="button"
+                      onClick={() => requestDelete(p)}
+                      style={{ ...styles.acctClearBtn, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, minHeight: 44 }}
+                    >
+                      <Trash2 size={14} /> Удалить этот план
+                    </button>
                     {p.plan?.days?.some((d) => d.dayMeals.some((dm) => !dm.ingr)) && (
                       <p style={{ ...styles.chipHint, color: "var(--warning-text)", margin: "4px 0 0" }}>
                         Блюда без подчёркивания — рецепт для них не сохранён (план собран до обновления)
@@ -94,6 +115,7 @@ export function PlanHistorySection({ planHistory }) {
               </div>
             );
           })}
+          {deleteError && <p style={styles.orderError}>Не удалось удалить план. Проверьте соединение и попробуйте ещё раз.</p>}
           {hiddenCount > 0 && (
             <button
               type="button"

@@ -37,7 +37,7 @@ export function AccountView({
   mealTimes, setMealTimes,
   toggleSimple, toggleCuisine, hasProfile, onSave, onClear, onClose, onOpenPro,
   homeScreenStatus, onAddToHomeScreen,
-  planStatus, planHistory, referralStatus,
+  planStatus, planHistory, onDeletePlan, referralStatus,
   familyStatus, familyActionState, onCreateFamily, onLeaveFamily,
 }) {
   const [saved, setSaved] = useState(false);
@@ -121,7 +121,7 @@ export function AccountView({
           подписки. Самое частое, зачем вообще открывают Аккаунт после
           первой настройки — посмотреть, что уже собирали, поэтому теперь
           это первое, что видно, без прокрутки. */}
-      <PlanHistorySection planHistory={planHistory} />
+      <PlanHistorySection planHistory={planHistory} onDeletePlan={onDeletePlan} />
       <FavoritesSection family={family} />
       {/* Жалоба в чате: "История планов близко к самому плану находится" —
           дальше сразу шли настройки без какой-либо визуальной паузы. Тот же

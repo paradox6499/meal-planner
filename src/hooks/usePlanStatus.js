@@ -101,5 +101,5 @@ export function usePlanStatus({ showAccount, hasLocalPlanAtMount }) {
     };
   }, [limitBlocked, lastPlanGate]);
 
-  return { planStatus, setPlanStatus, planHistory, limitBlocked, setLimitBlocked, lastPlanGate, setLastPlanGate };
+  return { planStatus, setPlanStatus, planHistory, setPlanHistory, limitBlocked, setLimitBlocked, lastPlanGate, setLastPlanGate };
 }

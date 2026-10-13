@@ -1,6 +1,7 @@
 // Мелкие общие части экранов: оболочка шага, скелетон, закрываемая заметка, галочка согласия.
 
-import { Loader2, TriangleAlert, X } from "lucide-react";
+import { useEffect, useState } from "react";
+import { TriangleAlert, X } from "lucide-react";
 import { openLegalPage } from "../lib/consent.js";
 import { styles } from "../styles.js";
 
@@ -15,12 +16,35 @@ export function StepShell({ icon, title, sub, children }) {
   );
 }
 
+// Этапы сборки плана. Привязаны ко времени, а не к настоящему прогрессу (его у нас нет): смена
+// подписи показывает, что работа идёт, и ничего не обещает про проценты. Последний этап держится до конца.
+export const ASSEMBLING_STAGES = [
+  "Подбираем рецепты под ваш бюджет…",
+  "Ищем продукты в каталоге…",
+  "Считаем цены…",
+  "Собираем список покупок…",
+];
+export const ASSEMBLING_STAGE_MS = 3000;
+const BASKET_FOOD = ["🥕", "🍅", "🥛", "🍞", "🧀"];
+
 export function SkeletonView() {
+  const [stage, setStage] = useState(0);
+  useEffect(() => {
+    if (stage >= ASSEMBLING_STAGES.length - 1) return undefined;
+    const t = setTimeout(() => setStage((n) => n + 1), ASSEMBLING_STAGE_MS);
+    return () => clearTimeout(t);
+  }, [stage]);
+
   return (
     <div style={styles.stepBody} className="fade-in-up mp-skeleton-body">
-      <div style={styles.assemblingCaption}>
-        <Loader2 size={15} className="spin" />
-        Собираем план и список покупок…
+      <div style={styles.assembleStage} aria-hidden="true">
+        {BASKET_FOOD.map((emoji, i) => (
+          <span key={emoji} className="basket-drop" style={{ "--from": `${14 + i * 18}%`, animationDelay: `${i * 0.45}s` }}>{emoji}</span>
+        ))}
+        <span className="basket-body">🧺</span>
+      </div>
+      <div style={styles.assemblingCaption} role="status" aria-live="polite">
+        <span key={stage} className="fade-in-up">{ASSEMBLING_STAGES[stage]}</span>
       </div>
       <div className="skeleton-bar" style={styles.skeletonBar(24, "65%")} />
       <div className="skeleton-bar" style={styles.skeletonBar(74)} />

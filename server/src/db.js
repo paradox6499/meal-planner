@@ -959,6 +959,14 @@ export function savePlanHistory(db, { telegramUserId, createdAtISO, storeId, sto
   }
 }
 
+/** Удаляет ОДИН план из истории пользователя. Чужой или несуществующий id -> false (ничего не тронуто).
+ * Журнал plan_generations не трогаем: удалённая запись не возвращает бесплатный план. */
+export function deletePlanHistoryEntry(db, telegramUserId, planId) {
+  if (!Number.isInteger(planId)) return false;
+  const res = db.prepare(`DELETE FROM plan_history WHERE id = ? AND telegram_user_id = ?`).run(planId, telegramUserId);
+  return Number(res.changes) > 0;
+}
+
 export function listPlanHistory(db, telegramUserId, limit = PLAN_HISTORY_KEEP_PER_USER) {
   const rows = db
     .prepare(`SELECT id, created_at, store_id, store_name, budget, family, total_cost, plan_json FROM plan_history WHERE telegram_user_id = ? ORDER BY created_at DESC LIMIT ?`)

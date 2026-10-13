@@ -338,5 +338,7 @@ export const styles = {
   stepItem: { paddingLeft: 4 },
 
   skeletonBar: (h, w) => ({ height: h, width: w || "100%", marginBottom: 10 }),
-  assemblingCaption: { display: "flex", alignItems: "center", gap: 8, fontSize: 13.5, color: "var(--text-secondary)", marginBottom: 20 },
+  assemblingCaption: { display: "flex", alignItems: "center", justifyContent: "center", gap: 8, fontSize: 14, color: "var(--text-secondary)", marginBottom: 20, minHeight: 20 },
+  // Сцена с корзиной: продукты по очереди падают в неё (анимация .basket-drop в globalCss.js).
+  assembleStage: { position: "relative", height: 96, margin: "4px 0 6px", overflow: "hidden" },
 };

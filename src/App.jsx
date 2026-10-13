@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo } from "react";
 import { RotateCcw, Settings } from "lucide-react";
 import { saveProfile, clearProfile } from "./lib/profile.js";
 import { loadActivePlanSlots, clearAllActivePlans } from "./lib/activePlan.js";
-import { updateMealTimes } from "./lib/backend.js";
+import { updateMealTimes, deletePlanFromHistory } from "./lib/backend.js";
 import { trackEvent } from "./lib/analytics.js";
 import { loadAcquisitionAnswered, saveAcquisitionAnswered, startParamKind } from "./lib/acquisition.js";
 import logoUrl from "./assets/logo.svg";
@@ -81,12 +81,19 @@ export default function MealPlanner() {
   // их эффектов при запуске: заявка реферала (useReferral ниже) должна уйти
   // раньше синхронизации плана (эффект submitPlanToBackend) — та создаёт строку
   // пользователя на сервере. Проверяется тестом в App.flows.test.jsx.
-  const { planStatus, planHistory, limitBlocked, setLimitBlocked, lastPlanGate } =
+  const { planStatus, planHistory, setPlanHistory, limitBlocked, setLimitBlocked, lastPlanGate } =
     usePlanStatus({ showAccount, hasLocalPlanAtMount: initialPlanSlots.slots.some((s) => s.id === initialPlanSlots.activeSlotId) });
   const { familyStatus, familyJoinedNote, setFamilyJoinedNote, familyActionState, handleCreateFamily, handleLeaveFamily, handleToggleFamilyPantry } =
     useFamily({ showAccount });
 
   const homeScreenStatus = useHomeScreen();
+
+  // Удаление плана из истории (свайп или кнопка в Аккаунте): сначала сервер, потом список на экране.
+  const handleDeletePlan = async (id) => {
+    const ok = await deletePlanFromHistory(id);
+    if (ok) setPlanHistory((list) => (list ? list.filter((p) => p.id !== id) : list));
+    return ok;
+  };
 
   // «Откуда узнали» спрашиваем только новичка (на момент открытия у него не было профиля) и один раз.
   const [isFirstSession] = useState(() => !hasProfile);
@@ -256,6 +263,7 @@ export default function MealPlanner() {
             onAddToHomeScreen={() => { hapticImpact("light"); trackEvent("home_screen_prompted"); promptAddToHomeScreen(); }}
             planStatus={planStatus}
             planHistory={planHistory}
+            onDeletePlan={handleDeletePlan}
             referralStatus={referralStatus}
             familyStatus={familyStatus}
             familyActionState={familyActionState}

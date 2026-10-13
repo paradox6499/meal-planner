@@ -6,7 +6,7 @@ import { createServer } from "node:http";
 import { validateInitData } from "./initData.js";
 import {
   saveUserPlan, insertEvent,
-  getUserPro, savePlanHistory, listPlanHistory,
+  getUserPro, savePlanHistory, listPlanHistory, deletePlanHistoryEntry,
   saveFeedback, listRecentFeedback, updateMealTimesForUser,
   createPendingPayment, getPaymentByYookassaId,
   countRewardedReferrals,
@@ -739,6 +739,22 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
       } catch (err) {
         console.error("[api/plans/list] ошибка чтения:", err);
         sendJson(res, 500, { ok: false, error: "не удалось получить историю" });
+      }
+      return;
+    }
+
+    // Удаление одного плана из истории (свайп в Аккаунте). Только свои записи.
+    if (req.method === "POST" && req.url === "/api/plans/delete") {
+      const auth = await readAuthenticatedBody(req, botToken);
+      if (!auth.ok) return sendJson(res, auth.status, { ok: false, error: auth.error });
+      const planId = auth.body?.id;
+      if (!Number.isInteger(planId)) return sendJson(res, 400, { ok: false, error: "нужен числовой id плана" });
+
+      try {
+        sendJson(res, 200, { ok: true, deleted: deletePlanHistoryEntry(db, auth.telegramUserId, planId) });
+      } catch (err) {
+        console.error("[api/plans/delete] ошибка удаления:", err);
+        sendJson(res, 500, { ok: false, error: "не удалось удалить план" });
       }
       return;
     }
