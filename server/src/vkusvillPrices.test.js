@@ -30,6 +30,20 @@ describe("resolveIngredientPricesWithCache", () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
+  it("каталог отдаёт номер товара в поле id: он попадает в кэш как xmlId", async () => {
+    fetch.mockResolvedValue(mockMcpResponse({ items: [{ id: 76931, name: "Гречка", price: { current: 95 }, unit: "кг" }] }));
+    const result = await resolveIngredientPricesWithCache(db, ["Гречка"]);
+    expect(result.get("Гречка").xmlId).toBe(76931);
+  });
+
+  it("найденный товар без номера (записан до переименования xml_id → id) пересчитывается живьём, а не отдаётся из кэша", async () => {
+    upsertIngredientPrices(db, [{ name: "Лук", matched: true, price: 58, productUnit: "кг", xmlId: null }], new Date().toISOString());
+    fetch.mockResolvedValue(mockMcpResponse({ items: [{ id: 5, name: "Лук", price: { current: 60 }, unit: "кг" }] }));
+    const result = await resolveIngredientPricesWithCache(db, ["Лук"]);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(result.get("Лук")).toMatchObject({ matched: true, price: 60, xmlId: 5 });
+  });
+
   it("нет в кэше — идёт живьём и сохраняет результат для следующего раза", async () => {
     fetch.mockResolvedValue(mockMcpResponse({ items: [{ xml_id: 9, name: "Гречка", price: { current: 95 }, unit: "кг" }] }));
     const result = await resolveIngredientPricesWithCache(db, ["Гречка"]);

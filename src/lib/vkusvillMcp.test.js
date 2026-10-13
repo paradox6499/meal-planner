@@ -119,6 +119,13 @@ describe("кэширование read-only вызовов", () => {
     expect(fetch).toHaveBeenCalledTimes(2);
   });
 
+  it("ссылка на корзину: товар уходит каталогу под ключом id (xml_id он больше не принимает)", async () => {
+    fetch.mockResolvedValue(mockMcpResponse({ link: "https://vkusvill.ru/?share_basket=1" }));
+    await createCartLink([{ xml_id: 105270, q: 2 }]);
+    const [, opts] = fetch.mock.calls[0];
+    expect(JSON.parse(opts.body).params.arguments.products).toEqual([{ id: 105270, q: 2 }]);
+  });
+
   it("после истечения TTL запрос повторяется", async () => {
     vi.useFakeTimers();
     fetch.mockResolvedValue(mockMcpResponse({ items: [] }));
@@ -416,7 +423,7 @@ describe("buildCartFromShoppingList — общий серверный кэш ц�
     expect(unmatched).toEqual([]);
     // сам вызов cart_link_create получил xml_id из ответа бэкенда (777), не выдуманный
     const [, opts] = fetch.mock.calls.find(([, o]) => JSON.parse(o.body).params.name === "vkusvill_cart_link_create");
-    expect(JSON.parse(opts.body).params.arguments.products).toEqual([{ xml_id: 777, q: 1 }]);
+    expect(JSON.parse(opts.body).params.arguments.products).toEqual([{ id: 777, q: 1 }]);
   });
 
   it("xml_id из кэша сервера пришёл строкой «605.0» -> в корзину уходит целое 605 (каталог требует integer)", async () => {
@@ -425,7 +432,7 @@ describe("buildCartFromShoppingList — общий серверный кэш ц�
     ]);
     await buildCartFromShoppingList([{ name: "Майонез", amount: 200, unit: "г" }]);
     const [, opts] = fetch.mock.calls.find(([, o]) => JSON.parse(o.body).params.name === "vkusvill_cart_link_create");
-    expect(JSON.parse(opts.body).params.arguments.products).toEqual([{ xml_id: 605, q: 1 }]);
+    expect(JSON.parse(opts.body).params.arguments.products).toEqual([{ id: 605, q: 1 }]);
   });
 
   it("товар без пригодного xml_id считается не найденным и не роняет весь заказ", async () => {
@@ -439,7 +446,7 @@ describe("buildCartFromShoppingList — общий серверный кэш ц�
     expect(matchedCount).toBe(1);
     expect(unmatched).toEqual(["Странный"]);
     const [, opts] = fetch.mock.calls.find(([, o]) => JSON.parse(o.body).params.name === "vkusvill_cart_link_create");
-    expect(JSON.parse(opts.body).params.arguments.products).toEqual([{ xml_id: 777, q: 1 }]);
+    expect(JSON.parse(opts.body).params.arguments.products).toEqual([{ id: 777, q: 1 }]);
   });
 
   it("бэкенд недоступен (вернул null) -> откат на прежний прямой поиск по ВкусВилл", async () => {

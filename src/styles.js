@@ -259,7 +259,7 @@ export const styles = {
   // Полоса дней над рецептами: липкая в пределах секции «Рецепты на неделю», нажатие прокручивает к дню.
   dayStrip: {
     position: "sticky", top: 0, zIndex: 4, display: "flex", gap: 6, padding: "8px 0 10px", margin: "0 0 6px",
-    background: "var(--strip-bg, var(--bg, transparent))", backdropFilter: "blur(14px)", WebkitBackdropFilter: "blur(14px)",
+    background: "var(--strip-bg)", backdropFilter: "blur(14px)", WebkitBackdropFilter: "blur(14px)",
   },
   dayChip: (active, isToday) => ({
     flex: 1, minWidth: 0, display: "flex", flexDirection: "column", alignItems: "center", gap: 2, padding: "7px 0 8px",
@@ -324,7 +324,7 @@ export const styles = {
   recipeThumb: { width: 34, height: 34, borderRadius: 9, objectFit: "cover", flexShrink: 0 },
 
   modalOverlay: { position: "fixed", inset: 0, background: "var(--modal-backdrop)", backdropFilter: "blur(6px)", WebkitBackdropFilter: "blur(6px)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20, zIndex: 50 },
-  modalCard: { width: "100%", maxWidth: 420, maxHeight: "85vh", overflowY: "auto", ...glass(0.9, 30), borderRadius: 28, border: "1px solid var(--hairline)", padding: 26, boxShadow: "var(--modal-shadow)", position: "relative" },
+  modalCard: { width: "100%", maxWidth: 420, maxHeight: "85vh", overflowY: "auto", ...glass(0.9, 30), borderRadius: 28, border: "1px solid var(--hairline)", padding: 26, boxShadow: "var(--modal-shadow)", position: "relative", color: "var(--text-primary)", fontFamily: FONT },
   modalClose: { position: "absolute", top: 16, right: 16, width: 32, height: 32, borderRadius: "50%", border: "1px solid var(--hairline)", background: "rgba(120,120,128,0.16)", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: "var(--text-primary)" },
   modalHero: { width: "100%", height: 120, borderRadius: 20, background: "linear-gradient(135deg, rgba(10,132,255,0.14), rgba(100,210,255,0.14))", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 56, marginBottom: 16 },
   modalHeroPhoto: { width: "100%", height: 180, borderRadius: 20, objectFit: "cover", marginBottom: 16, display: "block" },

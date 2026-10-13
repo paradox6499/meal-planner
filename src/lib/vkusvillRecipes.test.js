@@ -565,6 +565,26 @@ describe("getSubstituteOptions — приоритет совпадений по 
     expect(options).toHaveLength(0);
   });
 
+  it("каталог отдаёт номер товара в поле id (а не xml_id): аналоги спрашиваем по нему", async () => {
+    searchProducts.mockResolvedValue({ items: [{ id: 105270, name: "Лук зелёный" }] });
+    getProductAnalogs.mockResolvedValue({
+      products: [
+        { id: 35710, name: "Лук репчатый", price: { current: 40 }, unit: "кг" },
+        { id: 105270, name: "Лук зелёный", price: { current: 60 }, unit: "шт" },
+      ],
+    });
+    const options = await getSubstituteOptions({ name: "Лук перо", allergies: [], diet: "any" });
+    expect(getProductAnalogs).toHaveBeenCalledWith(105270);
+    expect(options.map((o) => o.xmlId)).toEqual([35710]); // сам товар отфильтрован
+  });
+
+  it("у найденного товара нет номера -> пустой список и запрос аналогов не уходит (раньше: «Missing required properties: id»)", async () => {
+    searchProducts.mockResolvedValue({ items: [{ name: "Лук перо" }] });
+    const options = await getSubstituteOptions({ name: "Лук перо", allergies: [], diet: "any" });
+    expect(options).toEqual([]);
+    expect(getProductAnalogs).not.toHaveBeenCalled();
+  });
+
   it("товар не найден в каталоге -> пустой список, не падает", async () => {
     searchProducts.mockResolvedValue({ items: [] });
     const options = await getSubstituteOptions({ name: "Неизвестный товар", allergies: [], diet: "any" });

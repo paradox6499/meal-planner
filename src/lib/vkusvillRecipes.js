@@ -22,7 +22,7 @@
 // вдруг перестанут иметь смысл — стоит перепроверить эти ID тем же вызовом,
 // они не гарантированно вечны.
 
-import { searchRecipes, resolvePrices, searchProducts, getProductAnalogs } from "./vkusvillMcp.js";
+import { searchRecipes, resolvePrices, searchProducts, getProductAnalogs, productIdOf } from "./vkusvillMcp.js";
 import { recipeHasDislike, DISLIKE_MIN_POOL } from "./dislikes.js";
 import { isNutritionDiet, matchesNutritionDiet } from "./nutrition.js";
 import { resolvePricesViaBackend } from "./backend.js";
@@ -597,21 +597,24 @@ function stemOf(text) {
 export async function getSubstituteOptions({ name, allergies, diet }) {
   const search = await searchProducts({ q: name, mode: "short", vvonly: 0 });
   const original = search.items?.[0];
-  if (!original) return [];
+  const originalId = productIdOf(original);
+  // Нет номера товара — аналоги спрашивать не у кого; раньше уходил запрос без id и пользователь
+  // видел ошибку каталога «Missing required properties: id».
+  if (originalId == null) return [];
 
-  const analogs = await getProductAnalogs(original.xml_id);
+  const analogs = await getProductAnalogs(originalId);
   const effectiveAllergies = diet === "gf" && !allergies.includes("gluten") ? [...allergies, "gluten"] : allergies;
   const stem = stemOf(name);
 
   const options = (analogs.products || [])
     .map((p) => ({
-      xmlId: p.xml_id,
+      xmlId: productIdOf(p),
       name: decodeHtmlEntities(p.name || ""),
       price: p.price?.current ?? null,
       productUnit: p.unit,
       image: p.images?.[0]?.small || null,
     }))
-    .filter((p) => p.price != null && p.xmlId !== original.xml_id)
+    .filter((p) => p.price != null && p.xmlId != null && p.xmlId !== originalId)
     .filter((p) => !nameViolatesAllergies(p.name, effectiveAllergies) && !nameViolatesDiet(p.name, diet));
 
   const sameItem = options.filter((p) => stem.length >= 3 && p.name.toLowerCase().includes(stem));

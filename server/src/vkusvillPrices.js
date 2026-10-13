@@ -207,7 +207,8 @@ async function fetchLive(name) {
     name,
     price: match.price?.current ?? null,
     productUnit: match.unit ?? null,
-    xmlId: match.xml_id ?? null,
+    // Каталог переименовал xml_id → id (октябрь 2026); старое имя оставлено на случай отката.
+    xmlId: match.id ?? match.xml_id ?? null,
     packageAmount: pkg?.amount ?? null,
     packageUnit: pkg?.unit ?? null,
   };
@@ -223,6 +224,9 @@ function isServableStale(cached, nowMs) {
 }
 
 function isFresh(cached, nowMs, maxAgeMs = Infinity) {
+  // Найденный товар без номера (записан, пока мы не знали про переименование xml_id → id) для
+  // корзины бесполезен — считаем запись устаревшей, пусть обновится.
+  if (cached.matched && cached.xmlId == null) return false;
   const ageMs = nowMs - new Date(cached.updatedAt).getTime();
   return ageMs < Math.min(maxAgeMs, cached.matched ? MATCHED_TTL_MS : NOT_FOUND_TTL_MS);
 }
@@ -307,7 +311,8 @@ export async function resolveIngredientPricesWithCache(db, names, { maxLiveFetch
   const servedStale = [];
   for (const name of uniqueNames) {
     const hit = cached.get(name);
-    if (hit && (isFresh(hit, nowMs, maxAgeMs) || (!warm && isServableStale(hit, nowMs)))) {
+    const lacksId = hit && hit.matched && hit.xmlId == null; // см. isFresh
+    if (hit && !lacksId && (isFresh(hit, nowMs, maxAgeMs) || (!warm && isServableStale(hit, nowMs)))) {
       result.set(name, { matched: hit.matched, price: hit.price, productUnit: hit.productUnit, xmlId: hit.xmlId, packageAmount: hit.packageAmount, packageUnit: hit.packageUnit });
       if (!isFresh(hit, nowMs)) servedStale.push(name); // отдали сразу, обновим в фоне
     } else {

@@ -243,9 +243,14 @@ export function searchRecipes({
   });
 }
 
-/** products: [{ xml_id, q }] — 1..20 позиций, q (количество) в диапазоне 0.01..40. */
+/** products: [{ xml_id, q }] — 1..20 позиций, q (количество) в диапазоне 0.01..40.
+ * Каталог ВкусВилл в октябре 2026 переименовал поле товара xml_id → id (в запросе корзины
+ * «Некорректный массив товаров», в analogs «Missing required properties: id»): внутри
+ * приложения поле по-прежнему называется xml_id, на границе с каталогом переводим. */
 export function createCartLink(products) {
-  return callTool("vkusvill_cart_link_create", { products });
+  return callTool("vkusvill_cart_link_create", {
+    products: products.map(({ id, xml_id, q }) => ({ id: toIntegerXmlId(id ?? xml_id), q })),
+  });
 }
 
 // Наши ингредиенты — граммы/миллилитры/штуки на порцию (см. recipes.js).
@@ -364,7 +369,7 @@ export async function resolvePrices(items) {
     return {
       matched: true,
       name: item.name,
-      xml_id: match.xml_id,
+      xml_id: productIdOf(match),
       price: match.price?.current ?? null,
       productUnit: match.unit,
       packageAmount: pkg?.amount ?? null,
@@ -410,6 +415,11 @@ const CART_LINK_LIMIT = 20;
 // раньше в этом случае.
 // xml_id для корзины — строго целое число (иначе «Invalid type. Expected integer»). Из кэша
 // сервера или из ответа поиска он мог прийти строкой/вещественным («605.0»); нет числа — null.
+/** Идентификатор товара из ответа каталога: сейчас `id`, раньше `xml_id`. Целое число или null. */
+export function productIdOf(item) {
+  return toIntegerXmlId(item?.id ?? item?.xml_id);
+}
+
 export function toIntegerXmlId(value) {
   if (value === null || value === undefined || value === "") return null;
   const n = Number(value);
