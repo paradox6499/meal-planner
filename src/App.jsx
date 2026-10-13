@@ -83,7 +83,7 @@ export default function MealPlanner() {
   // пользователя на сервере. Проверяется тестом в App.flows.test.jsx.
   const { planStatus, planHistory, setPlanHistory, limitBlocked, setLimitBlocked, lastPlanGate } =
     usePlanStatus({ showAccount, hasLocalPlanAtMount: initialPlanSlots.slots.some((s) => s.id === initialPlanSlots.activeSlotId) });
-  const { familyStatus, familyJoinedNote, setFamilyJoinedNote, familyActionState, handleCreateFamily, handleLeaveFamily, handleToggleFamilyPantry } =
+  const { familyStatus, familyJoinedNote, setFamilyJoinedNote, familyJoinError, setFamilyJoinError, familyActionState, handleCreateFamily, handleLeaveFamily, handleToggleFamilyPantry } =
     useFamily({ showAccount });
 
   const homeScreenStatus = useHomeScreen();
@@ -229,6 +229,12 @@ export default function MealPlanner() {
         {referralNote && !showAccount && (
           <DismissibleNote onClose={() => setReferralNote(false)}>
             Бонус за приглашение действует только для тех, кто открывает «Съедим» впервые, — вы уже пользовались приложением.
+          </DismissibleNote>
+        )}
+
+        {familyJoinError && !showAccount && (
+          <DismissibleNote onClose={() => setFamilyJoinError(null)}>
+            Не удалось вступить в семью: {familyJoinError}
           </DismissibleNote>
         )}
 

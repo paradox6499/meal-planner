@@ -54,6 +54,8 @@ const EVENT_LABELS = {
   family_created: "создали семью",
   family_left: "вышли из семьи / распустили",
   family_invite_shared: "поделились приглашением в семью",
+  family_joined: "вступили в семью по ссылке",
+  family_join_failed: "не удалось вступить в семью по ссылке",
   referral_share_clicked: "поделились реферальной ссылкой",
   plan_slot_add_started: "начали «ещё план» (Pro)",
   plan_slot_switched: "переключили план (Pro)",
