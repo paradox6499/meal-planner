@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { estimateWeek, assessBudget, budgetMessage, PORTION_COST_VV, PORTION_COST_STATIC, WEEK_DAYS } from "./budgetCheck.js";
+import { estimateWeek, assessBudget, budgetMessage, budgetRange, DEFAULT_BUDGET_RANGE, PORTION_COST_VV, PORTION_COST_STATIC, WEEK_DAYS } from "./budgetCheck.js";
 
 const two = { meals: ["lunch", "dinner"], family: 2 };
 
@@ -88,5 +88,36 @@ describe("budgetMessage", () => {
     expect(budgetMessage({ ...base, level: "ok" }).title).toBe("Хватит");
     expect(budgetMessage({ ...base, level: "rich" }).title).toBe("С запасом");
     expect(budgetMessage({ ...base, level: "ok" }).text).toMatch(/90 ₽ на порцию/);
+  });
+});
+
+describe("budgetRange", () => {
+  it("один человек, три приёма: узкий диапазон с мелким шагом", () => {
+    const r = budgetRange(estimateWeek({ meals: ["breakfast", "lunch", "dinner"], family: 1 }));
+    expect(r.step).toBe(250);
+    expect(r.min).toBe(1000);
+    expect(r.max).toBeGreaterThanOrEqual(5100); // не ниже «с запасом»
+    expect(r.max).toBeLessThan(8000);
+  });
+
+  it("большая семья: потолок сильно выше прежних 15 000, шаг 500", () => {
+    const r = budgetRange(estimateWeek({ meals: ["breakfast", "lunch", "dinner", "snack"], family: 8 }));
+    expect(r.step).toBe(500);
+    expect(r.max).toBeGreaterThan(40000);
+    expect(r.min % r.step).toBe(0);
+    expect(r.max % r.step).toBe(0);
+  });
+
+  it("«комфортная» сумма любого состава попадает в диапазон", () => {
+    for (const family of [1, 2, 4, 6, 8]) {
+      const e = estimateWeek({ meals: ["breakfast", "lunch", "dinner", "snack"], family });
+      const r = budgetRange(e);
+      expect(e.comfy).toBeGreaterThanOrEqual(r.min);
+      expect(e.comfy).toBeLessThanOrEqual(r.max);
+    }
+  });
+
+  it("без приёмов пищи — прежний диапазон", () => {
+    expect(budgetRange(estimateWeek({ meals: [], family: 2 }))).toEqual(DEFAULT_BUDGET_RANGE);
   });
 });

@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { createHmac } from "node:crypto";
 import { request as httpRequest } from "node:http";
-import { openDb, findCandidateSlots, summarizeEventsSince, setUserPro, insertEvent, recordPlanGeneration, listPlanHistory, listRecentFeedback, createPendingPayment, getPaymentByYookassaId, getUserPro, getExtraPlanCredits, addExtraPlanCredit, extendUserPro, getProUntil } from "./db.js";
+import { openDb, findCandidateSlots, summarizeEventsSince, setUserPro, insertEvent, recordPlanGeneration, listPlanHistory, savePlanHistory, listRecentFeedback, createPendingPayment, getPaymentByYookassaId, getUserPro, getExtraPlanCredits, addExtraPlanCredit, extendUserPro, getProUntil } from "./db.js";
 import { createApp, parsePlanRequest, parseEventRequest, parseSavePlanRequest, parseMealTimesRequest, parsePricesRequest, computePlanStatus, FREE_PLANS_PER_WEEK, EXTRA_PLAN_PRODUCT, EXTRA_PLAN_PRICE_RUB, PRO_PRICE_RUB, RATE_LIMIT_MAX_REQUESTS, PRICES_RATE_LIMIT_MAX_REQUESTS, PAY_RATE_LIMIT_MAX_REQUESTS, EVENTS_PER_USER_PER_DAY } from "./app.js";
 import { clearRateLimitState } from "./rateLimit.js";
 import { clearReconcileState } from "./payments.js";
@@ -683,15 +683,28 @@ describe("POST /api/referral/claim и /api/referral/status", () => {
 // бизнес-правилами (лимит участников, роспуск при выходе владельца и т.п.),
 // здесь — только HTTP-обвязка (авторизация, Pro-гейт на создание, коды ответов).
 describe("POST /api/family/*", () => {
-  let db, server, baseUrl;
+  let db, server, baseUrl, telegramCalls;
+  const realFetch = globalThis.fetch;
 
   beforeEach(async () => {
     db = openDb(":memory:");
     server = createApp(db, { botToken: BOT_TOKEN });
     await new Promise((resolve) => server.listen(0, resolve));
     baseUrl = `http://127.0.0.1:${server.address().port}`;
+    // Сообщения владельцу уходят в api.telegram.org: перехватываем их, наружу в тестах ничего не идёт.
+    telegramCalls = [];
+    vi.stubGlobal("fetch", vi.fn((url, opts) => {
+      if (String(url).includes("api.telegram.org")) {
+        telegramCalls.push(JSON.parse(opts.body));
+        return Promise.resolve({ ok: true, json: async () => ({ ok: true, result: {} }) });
+      }
+      return realFetch(url, opts);
+    }));
   });
-  afterEach(() => new Promise((resolve) => server.close(resolve)));
+  afterEach(async () => {
+    vi.unstubAllGlobals();
+    await new Promise((resolve) => server.close(resolve));
+  });
 
   const post = (path, body) => fetch(`${baseUrl}${path}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
 
@@ -710,6 +723,22 @@ describe("POST /api/family/*", () => {
     expect(body.status.inFamily).toBe(true);
     expect(body.status.isOwner).toBe(true);
     expect(body.status.members).toHaveLength(1);
+  });
+
+  it("кто-то вступил по ссылке -> владельцу уходит сообщение в чат с именем вступившего", async () => {
+    setUserPro(db, 1, true);
+    const { status } = await (await post("/api/family/create", { initData: validInitData(1) })).json();
+    expect(telegramCalls).toHaveLength(0); // создание семьи ничего не шлёт
+    await post("/api/family/join", { initData: validInitData(2), inviteCode: status.inviteCode });
+    await new Promise((r) => setTimeout(r, 20)); // отправка не ждёт ответа Telegram
+    expect(telegramCalls).toHaveLength(1);
+    expect(telegramCalls[0].chat_id).toBe(1);
+    expect(telegramCalls[0].text).toMatch(/вступил\(а\) в вашу семью/);
+  });
+
+  it("отказ во вступлении владельцу ничего не шлёт", async () => {
+    await post("/api/family/join", { initData: validInitData(2), inviteCode: "не-существует" });
+    expect(telegramCalls).toHaveLength(0);
   });
 
   it("create без initData -> 401", async () => {
@@ -1280,6 +1309,26 @@ describe("POST /telegram/webhook", () => {
     const sentBody = JSON.parse(opts.body);
     expect(sentBody.chat_id).toBe(42);
     expect(sentBody.text).toContain("Съедим");
+    // под приветствием кнопка запуска приложения
+    expect(sentBody.reply_markup.inline_keyboard[0][0].web_app.url).toMatch(/^https:\/\//);
+    expect(sentBody.parse_mode).toBe("HTML");
+  });
+
+  it("/start у человека с сохранённым планом -> «с возвращением» и кнопка «Открыть мой план»", async () => {
+    savePlanHistory(db, { telegramUserId: 42, createdAtISO: new Date().toISOString(), storeId: "vv", storeName: "ВкусВилл", budget: 4000, family: 2, totalCost: 3500, plan: { days: [] } });
+    await post({ message: { text: "/start", chat: { id: 42 }, from: { id: 42 } } });
+    const sentBody = JSON.parse(telegramCalls[0][1].body);
+    expect(sentBody.text).toMatch(/С возвращением/);
+    expect(sentBody.reply_markup.inline_keyboard[0][0].text).toBe("Открыть мой план");
+  });
+
+  it("/help -> подсказка с кнопкой, /support -> просит написать обращение; в поддержку они не уходят", async () => {
+    await post({ message: { text: "/help", chat: { id: 42 }, from: { id: 42 } } });
+    await post({ message: { text: "/support", chat: { id: 42 }, from: { id: 42 } } });
+    expect(telegramCalls).toHaveLength(2);
+    expect(JSON.parse(telegramCalls[0][1].body).text).toMatch(/Как это работает/);
+    expect(JSON.parse(telegramCalls[1][1].body).text).toMatch(/Напишите сейчас/);
+    expect(db.prepare("SELECT COUNT(*) AS n FROM feedback").get().n).toBe(0);
   });
 
   it("/report от админа -> шлёт дайджест (не sendMessage напрямую, а через sendDigestNow)", async () => {

@@ -13,7 +13,7 @@ import {
   getExtraPlanCredits, consumeExtraPlanCredit, getProUntil, getProEndedAt,
   recordWarmTarget, recordPlanGeneration, countEventsSince, deleteUserData, getFamilyForUser, getFamilyByInviteCode, freeGenerationTimesSince,
 } from "./db.js";
-import { planReplyForUpdate, buildDiagText, buildWelcomeText, buildFeedbackAckText, buildFeedbackListText, buildFeedbackAdminNotifyText, buildSupportPromptText } from "./webhook.js";
+import { planReplyForUpdate, buildDiagText, buildWelcomeText, buildOpenAppKeyboard, buildHelpText, buildFamilyJoinedText, buildFeedbackAckText, buildFeedbackListText, buildFeedbackAdminNotifyText, buildSupportPromptText } from "./webhook.js";
 import { sendTelegramMessage, copyTelegramMessage } from "./telegram.js";
 import {
   PRO_PRODUCT, EXTRA_PLAN_PRODUCT, PRO_PERIOD_DAYS, DEFAULT_WEBAPP_URL,
@@ -819,11 +819,7 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
 
       try {
         const result = createFamily(db, { ownerTelegramId: auth.telegramUserId, ownerDisplayName: auth.firstName, nowISO: new Date().toISOString() });
-        if (!result.ok) {
-          console.log(`[api/family/join] отказ для ${auth.telegramUserId}: ${result.reason}`);
-          return sendJson(res, 400, { ok: false, error: result.reason });
-        }
-        console.log(`[api/family/join] ${auth.telegramUserId} вступил в семью ${result.familyId}`);
+        if (!result.ok) return sendJson(res, 400, { ok: false, error: result.reason });
         sendJson(res, 200, { ok: true, status: getFamilyStatus(db, auth.telegramUserId) });
       } catch (err) {
         console.error("[api/family/create] ошибка:", err);
@@ -855,6 +851,13 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
           return sendJson(res, 400, { ok: false, error: result.reason });
         }
         console.log(`[api/family/join] ${auth.telegramUserId} вступил в семью ${result.familyId}`);
+        // Владельцу — сообщение в чат: сам он об этом иначе не узнает, пока не откроет Аккаунт. Best-effort:
+        // если бот ему писать не может (не нажимал Start), вступление от этого не страдает.
+        if (target?.owner_telegram_id && target.owner_telegram_id !== auth.telegramUserId) {
+          sendTelegramMessage(botToken, target.owner_telegram_id, buildFamilyJoinedText(auth.firstName), {
+            replyMarkup: buildOpenAppKeyboard(webAppUrl, "Открыть Аккаунт"),
+          }).catch((err) => console.error("[api/family/join] не удалось сообщить владельцу:", err.message));
+        }
         sendJson(res, 200, { ok: true, status: getFamilyStatus(db, auth.telegramUserId) });
       } catch (err) {
         console.error("[api/family/join] ошибка:", err);
@@ -1162,7 +1165,21 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
       const reply = planReplyForUpdate(update, { adminTelegramId });
       try {
         if (reply?.kind === "start") {
-          await sendTelegramMessage(botToken, reply.chatId, buildWelcomeText());
+          let hasPlan = false;
+          let isPro = false;
+          try {
+            hasPlan = listPlanHistory(db, reply.telegramUserId, 1).length > 0;
+            isPro = getUserPro(db, reply.telegramUserId, new Date().toISOString());
+          } catch (err) {
+            console.error("[telegram/webhook] не удалось определить, новый ли пользователь:", err.message);
+          }
+          await sendTelegramMessage(botToken, reply.chatId, buildWelcomeText({ hasPlan, isPro }), {
+            parseMode: "HTML", replyMarkup: buildOpenAppKeyboard(webAppUrl, hasPlan ? "Открыть мой план" : "Открыть «Съедим»"),
+          });
+        } else if (reply?.kind === "help") {
+          await sendTelegramMessage(botToken, reply.chatId, buildHelpText(), { parseMode: "HTML", replyMarkup: buildOpenAppKeyboard(webAppUrl) });
+        } else if (reply?.kind === "support") {
+          await sendTelegramMessage(botToken, reply.chatId, buildSupportPromptText());
         } else if (reply?.kind === "report") {
           // updateWatermark:false — /report это "посмотреть", не "отметить
           // прочитанным" (см. комментарий у sendDigestNow в digest.js).

@@ -1,11 +1,27 @@
 import { describe, it, expect } from "vitest";
-import { buildWelcomeText, buildFeedbackAckText, buildFeedbackListText, buildFeedbackAdminNotifyText, buildSupportPromptText, planReplyForUpdate } from "./webhook.js";
+import { buildOpenAppKeyboard, buildHelpText, buildFamilyJoinedText, buildWelcomeText, buildFeedbackAckText, buildFeedbackListText, buildFeedbackAdminNotifyText, buildSupportPromptText, planReplyForUpdate } from "./webhook.js";
 
 describe("buildWelcomeText", () => {
   it("объясняет, что за бот и что нажать, чтобы запустить приложение", () => {
     const text = buildWelcomeText();
     expect(text).toContain("Съедим");
-    expect(text).toMatch(/открыть/i);
+    expect(text).toMatch(/кнопк/i);
+  });
+
+  it("вернувшемуся с планом — другой текст; про Pro только если он активен", () => {
+    expect(buildWelcomeText({ hasPlan: true })).toMatch(/С возвращением/);
+    expect(buildWelcomeText({ hasPlan: true })).not.toMatch(/Pro/);
+    expect(buildWelcomeText({ hasPlan: true, isPro: true })).toMatch(/Pro/);
+  });
+
+  it("кнопка запуска — web_app с нужным адресом", () => {
+    expect(buildOpenAppKeyboard("https://s-edim.ru/").inline_keyboard[0][0]).toEqual({ text: "Открыть «Съедим»", web_app: { url: "https://s-edim.ru/" } });
+  });
+
+  it("справка называет команды, сообщение владельцу — имя вступившего", () => {
+    expect(buildHelpText()).toMatch(/\/support/);
+    expect(buildFamilyJoinedText("Анна")).toContain("Анна");
+    expect(buildFamilyJoinedText(null)).toMatch(/Новый участник/);
   });
 });
 
@@ -48,7 +64,7 @@ function mkUpdate(text, { chatId = 42, fromId } = {}) {
 describe("planReplyForUpdate", () => {
   it("/start -> kind:start для того же чата", () => {
     const reply = planReplyForUpdate(mkUpdate("/start"), { adminTelegramId: null });
-    expect(reply).toEqual({ chatId: 42, kind: "start" });
+    expect(reply).toEqual({ chatId: 42, kind: "start", telegramUserId: 42 });
   });
 
   it("/start с startapp-payload (например, /start plan_123) -> тоже kind:start", () => {

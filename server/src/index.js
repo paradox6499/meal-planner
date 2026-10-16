@@ -13,6 +13,7 @@ import { runMaintenance } from "./maintenance.js";
 import { runCatalogMonitorTick } from "./catalogMonitor.js";
 import { guardTick } from "./http.js";
 import { runWarmupTick } from "./warmup.js";
+import { applyBotProfile } from "./botProfile.js";
 
 const PORT = Number(process.env.PORT) || 3000;
 // HOST — на VPS за обратным прокси (Caddy) слушаем только 127.0.0.1, чтобы порт не был виден из
@@ -71,6 +72,8 @@ const server = createApp(db, { botToken: BOT_TOKEN, adminTelegramId: ADMIN_TELEG
 
 server.listen(PORT, HOST, () => {
   console.log(`meal-planner-server слушает порт ${PORT}, БД: ${DB_PATH}`);
+  // Команды и описание бота — не блокируя запуск; сбой только в лог (см. botProfile.js).
+  applyBotProfile(BOT_TOKEN);
 });
 
 async function tick() {

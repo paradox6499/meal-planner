@@ -25,11 +25,48 @@ export function buildDiagText(probe, warmQueueSize = 0) {
   return `${verdict}\n${hint}\nЦен в очереди на подогрев: ${warmQueueSize}.`;
 }
 
-export function buildWelcomeText() {
+// Приветствие на /start. Разметка HTML, текст целиком наш (без чужого ввода). Первый заход — что это и что нажать;
+// вернувшемуся, у кого уже есть план, — «с возвращением» и прямой путь к плану.
+export function buildWelcomeText({ hasPlan = false, isPro = false } = {}) {
+  if (hasPlan) {
+    return (
+      "С возвращением! 👋\n\n" +
+      "Ваш план на неделю сохранён — откройте «Съедим», чтобы посмотреть рецепты и список покупок или собрать новый." +
+      (isPro ? "\n\n✨ У вас активен <b>Pro</b>: напоминания о приёмах пищи и несколько планов одновременно." : "")
+    );
+  }
   return (
-    "Привет! 👋 Я «Съедим» — помогу собрать меню на неделю под ваш бюджет и список покупок с реальными ценами ВкусВилл.\n\n" +
-    "Чтобы начать, нажмите кнопку «Открыть» рядом с полем ввода (или пункт меню бота внизу слева) — приложение откроется прямо здесь, в Telegram."
+    "Привет! 👋 Я <b>«Съедим»</b> — собираю меню на неделю и список покупок с реальными ценами ВкусВилл.\n\n" +
+    "<b>Что умею:</b>\n" +
+    "🍽 подобрать 7 дней рецептов под ваш бюджет и рацион\n" +
+    "💰 посчитать стоимость недели по ценам магазина\n" +
+    "🛒 собрать корзину ВкусВилл одним нажатием\n\n" +
+    "Нажмите кнопку ниже — на первый план уйдёт пара минут."
   );
+}
+
+/** Кнопка запуска приложения под сообщениями бота. */
+export function buildOpenAppKeyboard(webAppUrl, text = "Открыть «Съедим»") {
+  return { inline_keyboard: [[{ text, web_app: { url: webAppUrl } }]] };
+}
+
+export function buildHelpText() {
+  return (
+    "<b>Как это работает</b>\n\n" +
+    "1. Откройте «Съедим» и ответьте на несколько вопросов: сколько вас, какие приёмы пищи, бюджет, рацион, аллергии.\n" +
+    "2. Получите меню на 7 дней и список покупок с ценами.\n" +
+    "3. Нажмите «Заказать» — корзина ВкусВилл соберётся сама.\n\n" +
+    "<b>Команды</b>\n" +
+    "/start — открыть приложение\n" +
+    "/support — написать в поддержку\n" +
+    "/help — эта подсказка"
+  );
+}
+
+/** Владельцу семьи: к нему кто-то вступил (раньше узнать об этом можно было, только открыв Аккаунт). */
+export function buildFamilyJoinedText(displayName) {
+  const who = displayName && String(displayName).trim() ? String(displayName).trim() : "Новый участник";
+  return `👨‍👩‍👧 ${who} вступил(а) в вашу семью в «Съедим». Теперь отметки «уже есть дома» в списке покупок у вас общие.`;
 }
 
 export function buildFeedbackAckText() {
@@ -75,7 +112,7 @@ export function buildFeedbackListText(items) {
 /**
  * @param {object} update — Update от Telegram (см. core.telegram.org/bots/api#update)
  * @param {{ adminTelegramId?: number|null }} [opts]
- * @returns {{ chatId: number, kind: "start" | "report" | "list_feedback" | "backup" | "diag" } |
+ * @returns {{ chatId: number, kind: "start" | "help" | "support" | "report" | "list_feedback" | "backup" | "diag" } |
  *           { chatId: number, kind: "feedback", telegramUserId: number, text: string, attachment?: { chatId: number, messageId: number } } | null}
  */
 export function planReplyForUpdate(update, { adminTelegramId = null } = {}) {
@@ -106,8 +143,10 @@ export function planReplyForUpdate(update, { adminTelegramId = null } = {}) {
   // startapp-параметры Mini App приходят как "/start <payload>" — приветствие
   // уместно в любом случае, не только на голый "/start".
   if (text === "/start" || text.startsWith("/start ")) {
-    return { chatId, kind: "start" };
+    return { chatId, kind: "start", telegramUserId: fromId };
   }
+  if (text === "/help") return { chatId, kind: "help" };
+  if (text === "/support") return { chatId, kind: "support" };
 
   // Все три — только сам админ, иначе любой пользователь мог бы выдёргивать
   // внутреннюю статистику, чужие обращения или сам файл базы командой.

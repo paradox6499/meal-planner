@@ -55,6 +55,21 @@ export function estimateWeek({ meals, family, familyByMeal = {}, store = "vv" })
   return { floor: roundTo(totals.floor, 50), comfy: roundTo(totals.comfy, 50), generous: roundTo(totals.generous, 50), portions: totals.portions };
 }
 
+export const DEFAULT_BUDGET_RANGE = { min: 1500, max: 15000, step: 250 };
+
+/** Границы слайдера бюджета под выбранный состав: один человек — от 1 000 ₽ с мелким шагом, большая семья или
+ * четыре приёма — до десятков тысяч. Потолок — «с запасом» с небольшой надбавкой: дороже наших рецептов
+ * подобрать нечего, лишние тысячи ничего бы не меняли. Раньше у всех было 1 500–15 000 ₽, и семье из шести человек
+ * не хватало даже до «комфортно». Шаг 250 ₽, а на больших суммах 500 ₽ — чтобы слайдер оставался точным. */
+export function budgetRange(estimate) {
+  if (!estimate || estimate.portions <= 0) return DEFAULT_BUDGET_RANGE;
+  const rawMax = estimate.generous * 1.15;
+  const step = rawMax > 20000 ? 500 : 250;
+  const min = Math.max(1000, Math.floor((estimate.floor * 0.6) / step) * step);
+  const max = Math.max(Math.ceil(rawMax / step) * step, min + 8 * step);
+  return { min, max, step };
+}
+
 /** Что сказать про выбранную сумму: level — low | tight | ok | rich; perPortion — ₽ на порцию; suggest — разумная сумма (или null). */
 export function assessBudget(budget, estimate, { min = 1500, max = 15000, step = 250 } = {}) {
   if (!estimate || estimate.portions <= 0) return null;
