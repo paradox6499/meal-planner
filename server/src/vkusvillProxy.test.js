@@ -168,7 +168,7 @@ describe("подогрев цен: что не успели — доделыва
   });
 
   it("пустая очередь — ничего не делает", async () => {
-    expect(await runPriceWarmTick(openDb(":memory:"))).toEqual({ warmed: 0 });
+    expect(await runPriceWarmTick(openDb(":memory:"))).toEqual({ warmed: 0, failed: 0 });
     expect(fetch).not.toHaveBeenCalled();
   });
 });

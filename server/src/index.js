@@ -231,5 +231,8 @@ async function priceWarmTick() {
 if (process.env.WARMUP === "off") {
   console.log("[warmup] выключен (WARMUP=off)");
 } else {
-  setInterval(guardTick("priceWarm", priceWarmTick), 60 * 1000);
+  // Интервал случайный (45–120 с), а не ровно минута: равномерная «барабанная дробь» похожа на бота.
+  const guardedWarm = guardTick("priceWarm", priceWarmTick);
+  const scheduleWarm = () => setTimeout(async () => { await guardedWarm(); scheduleWarm(); }, 45000 + Math.random() * 75000);
+  scheduleWarm();
 }

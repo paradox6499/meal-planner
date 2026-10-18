@@ -140,12 +140,12 @@ export async function probeVkusvill(timeoutMs = 8000) {
   }
 }
 
-async function callTool(name, args) {
+async function callTool(name, args, { retry = true } = {}) {
   for (let attempt = 0; ; attempt++) {
     try {
       return await callToolOnce(name, args);
     } catch (err) {
-      if ((err.httpStatus === 429 || err.retryable) && attempt < RETRY_DELAYS_MS.length) {
+      if (retry && (err.httpStatus === 429 || err.retryable) && attempt < RETRY_DELAYS_MS.length) {
         const delay = RETRY_DELAYS_MS[attempt];
         await sleep(delay + Math.random() * delay * 0.3);
         continue;
@@ -198,8 +198,8 @@ function parsePackageAmount(productName) {
 
 /** Один живой поиск товара по названию — сравните с searchProducts в
  * src/lib/vkusvillMcp.js, тот же вызов, тот же инструмент MCP. */
-async function fetchLive(name) {
-  const match = await findProductFor(name, (q) => callTool("vkusvill_products_search", { q, page: 1, sort: "popularity", vvonly: 1, mode: "short" }));
+async function fetchLive(name, { retry = true } = {}) {
+  const match = await findProductFor(name, (q) => callTool("vkusvill_products_search", { q, page: 1, sort: "popularity", vvonly: 1, mode: "short" }, { retry }));
   if (!match) return { matched: false, name, price: null, productUnit: null, xmlId: null, packageAmount: null, packageUnit: null };
   const pkg = match.unit === "шт" ? parsePackageAmount(match.name) : null;
   return {
@@ -290,9 +290,13 @@ export function clearWarmQueue() {
 export async function runPriceWarmTick(db, { batch = 20 } = {}) {
   const names = [...warmQueue].slice(0, batch);
   names.forEach((n) => warmQueue.delete(n));
-  if (names.length === 0) return { warmed: 0 };
-  await resolveIngredientPricesWithCache(db, names, { maxLiveFetches: batch, warm: true, maxAgeMs: WARM_REFRESH_AFTER_MS });
-  return { warmed: names.length };
+  if (names.length === 0) return { warmed: 0, failed: 0 };
+  const startedAt = Date.now();
+  // По одному, а не по четыре сразу: пачка одновременных запросов выглядит для защиты каталога ботом.
+  await resolveIngredientPricesWithCache(db, names, { maxLiveFetches: batch, warm: true, maxAgeMs: WARM_REFRESH_AFTER_MS, concurrency: 1 });
+  // Неудачей считаем запрос, у которого отметка о сбое появилась уже в этом проходе.
+  const failed = names.filter((n) => (failedAt.get(n) ?? 0) >= startedAt).length;
+  return { warmed: names.length, failed };
 }
 
 // deadlineMs — ответить пользователю не позже, чем через столько: на холодном
@@ -300,7 +304,7 @@ export async function runPriceWarmTick(db, { batch = 20 } = {}) {
 // минутами (клиент всё равно бросит запрос) незачем. Что не успели — остаётся
 // в работе: уже летящие запросы допишут свой результат в кэш сами, остальные
 // уходят в очередь подогрева.
-export async function resolveIngredientPricesWithCache(db, names, { maxLiveFetches = Infinity, takeLiveBudget = null, warm = false, maxAgeMs = Infinity, deadlineMs = null } = {}) {
+export async function resolveIngredientPricesWithCache(db, names, { maxLiveFetches = Infinity, takeLiveBudget = null, warm = false, maxAgeMs = Infinity, deadlineMs = null, concurrency = CONCURRENCY } = {}) {
   const uniqueNames = [...new Set(names.filter((n) => typeof n === "string" && n.trim().length > 0))];
   const result = new Map();
   if (uniqueNames.length === 0) return result;
@@ -346,10 +350,11 @@ export async function resolveIngredientPricesWithCache(db, names, { maxLiveFetch
 
   const deadlineAt = deadlineMs != null ? Date.now() + deadlineMs : null;
   const outcomes = new Map(); // name -> {value} | {error} | отсутствует (не дошли до запроса)
-  const work = mapWithConcurrency(toFetch, CONCURRENCY, async (name) => {
+  const work = mapWithConcurrency(toFetch, concurrency, async (name) => {
     if (deadlineAt != null && Date.now() > deadlineAt) return; // не начинаем новый запрос после срока
     try {
-      const value = await fetchLive(name);
+      // Подогрев не повторяет неудавшиеся запросы: на заблокированный адрес каждый повтор — лишний стук.
+      const value = await fetchLive(name, { retry: !warm });
       // Пишем сразу, а не пачкой в конце: если мы уже ответили по сроку, запрос
       // всё равно доработает и его результат достанется следующим пользователям.
       upsertIngredientPrices(db, [{ name, ...value }], new Date().toISOString());

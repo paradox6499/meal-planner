@@ -26,9 +26,29 @@ import { getUpstreamLoad, namesNeedingRefresh, queueNamesForWarming, runPriceWar
 // Подогрев намеренно «тихий»: при блокировке адреса сервера защитой каталога (QRATOR, 05.10.2026)
 // не хочется давать ей повод видеть в нас бота — мало запросов, никакой равномерной «барабанной дроби».
 export const WARM_MAX_LOAD = 15; // из 50 — остальное оставляем пользователям
-export const WARM_PRICES_PER_TICK = 8;
+export const WARM_PRICES_PER_TICK = 3;
 export const RECIPES_REFRESH_AFTER_MS = 4 * 60 * 60 * 1000;
-export const RECIPES_PER_TICK = 2;
+export const RECIPES_PER_TICK = 1;
+// Первый запуск на новом адресе (18.10.2026): ≈10 запросов в минуту, и через 4 минуты ВкусВилл перестал отвечать
+// (блокировка отпустила минут через пять тишины). Поэтому — потолок запросов в час и «автомат»: любой сбой
+// останавливает подогрев на полчаса, чтобы не стучать в заблокированный адрес.
+export const WARM_MAX_PER_HOUR = 90;
+export const WARM_PAUSE_AFTER_FAILURE_MS = 30 * 60 * 1000;
+const HOUR_MS = 60 * 60 * 1000;
+let pausedUntil = 0;
+let spentAt = []; // отметки времени наших запросов за последний час
+
+export function resetWarmupState() {
+  pausedUntil = 0;
+  spentAt = [];
+}
+export function getWarmupPausedUntil() {
+  return pausedUntil;
+}
+function pauseWarmup(now, reason) {
+  pausedUntil = now + WARM_PAUSE_AFTER_FAILURE_MS;
+  console.warn(`[warmup] пауза на ${WARM_PAUSE_AFTER_FAILURE_MS / 60000} мин: ${reason}`);
+}
 export const WARM_TARGETS_LIMIT = 20;
 // Сколько страниц подогреваем ВСЕГО: самые востребованные из спроса + обход каталога.
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -76,7 +96,12 @@ export function ingredientNamesFromRecipesPage(data) {
 
 /** Один проход подогрева. Возвращает, что сделано (для лога и тестов). */
 export async function runWarmupTick(db, { now = Date.now(), maxLoad = WARM_MAX_LOAD } = {}) {
-  if (getUpstreamLoad(now) > maxLoad) return { skipped: "busy", refreshedPages: 0, queuedNames: 0, warmedPrices: 0 };
+  const none = { refreshedPages: 0, queuedNames: 0, warmedPrices: 0 };
+  if (now < pausedUntil) return { skipped: "paused", ...none };
+  spentAt = spentAt.filter((t) => now - t < HOUR_MS);
+  const budgetLeft = WARM_MAX_PER_HOUR - spentAt.length;
+  if (budgetLeft <= 0) return { skipped: "hourly_cap", ...none };
+  if (getUpstreamLoad(now) > maxLoad) return { skipped: "busy", ...none };
 
   const sinceISO = new Date(now - 14 * DAY_MS).toISOString();
   const byKey = new Map();
@@ -87,18 +112,26 @@ export async function runWarmupTick(db, { now = Date.now(), maxLoad = WARM_MAX_L
 
   // 1) Обновляем устаревающие страницы рецептов — понемногу за тик.
   let refreshedPages = 0;
+  let pageFailed = false;
   for (const t of targets) {
-    if (refreshedPages >= RECIPES_PER_TICK) break;
+    if (refreshedPages >= Math.min(RECIPES_PER_TICK, budgetLeft)) break;
     const cached = peekProxyCache("vkusvill_recipes", t.args, now);
     if (cached && cached.ageMs < RECIPES_REFRESH_AFTER_MS) continue;
     try {
       await refreshProxyEntry("vkusvill_recipes", t.args, now);
       refreshedPages++;
+      spentAt.push(now);
     } catch (err) {
-      // ВкусВилл не ответил — не молотим впустую, повторим в следующий тик.
+      // ВкусВилл не ответил — не молотим впустую: подогрев встаёт на паузу (см. WARM_PAUSE_AFTER_FAILURE_MS).
       console.warn(`[warmup] не удалось обновить страницу рецептов: ${err.message}`);
+      spentAt.push(now);
+      pageFailed = true;
       break;
     }
+  }
+  if (pageFailed) {
+    pauseWarmup(now, "страница рецептов не обновилась");
+    return { skipped: "paused", ...none };
   }
 
   // 2) Цены на ингредиенты всего, что лежит в кэше страниц, — в очередь подогрева.
@@ -110,6 +143,9 @@ export async function runWarmupTick(db, { now = Date.now(), maxLoad = WARM_MAX_L
   const needing = namesNeedingRefresh(db, names, now);
   queueNamesForWarming(needing);
 
-  const { warmed } = await runPriceWarmTick(db, { batch: WARM_PRICES_PER_TICK });
-  return { skipped: null, refreshedPages, queuedNames: needing.length, warmedPrices: warmed };
+  const batch = Math.max(0, Math.min(WARM_PRICES_PER_TICK, budgetLeft - refreshedPages));
+  const { warmed, failed } = batch > 0 ? await runPriceWarmTick(db, { batch }) : { warmed: 0, failed: 0 };
+  for (let i = 0; i < warmed; i++) spentAt.push(now);
+  if (failed > 0) pauseWarmup(now, `не удалось получить цены: ${failed} из ${warmed}`);
+  return { skipped: null, refreshedPages, queuedNames: needing.length, warmedPrices: warmed - failed };
 }

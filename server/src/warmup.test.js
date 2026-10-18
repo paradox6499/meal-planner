@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { runWarmupTick, seedRecipeTargets, ingredientNamesFromRecipesPage, RECIPES_REFRESH_AFTER_MS, RECIPES_PER_TICK } from "./warmup.js";
+import { runWarmupTick, resetWarmupState, getWarmupPausedUntil, WARM_PAUSE_AFTER_FAILURE_MS, WARM_MAX_PER_HOUR, WARM_PRICES_PER_TICK, seedRecipeTargets, ingredientNamesFromRecipesPage, RECIPES_REFRESH_AFTER_MS, RECIPES_PER_TICK } from "./warmup.js";
 import { clearProxyState, peekProxyCache, refreshProxyEntry, callVkusvillCached, proxyCacheKey, RECIPES_CACHE_TTL_MS, PROXY_CACHE_TTL_MS } from "./vkusvillProxy.js";
 import { resetUpstreamGate, clearWarmQueue, getWarmQueueSize, getUpstreamLoad, UPSTREAM_MAX_PER_MINUTE, resolveIngredientPricesWithCache, WARM_REFRESH_AFTER_MS, namesNeedingRefresh, clearFailedNames, FAILED_NAME_RETRY_AFTER_MS } from "./vkusvillPrices.js";
 import { openDb, recordPlanGeneration, recordWarmTarget, listWarmTargets, purgeOldWarmTargets, upsertIngredientPrices, getIngredientPricesByName } from "./db.js";
@@ -16,6 +16,7 @@ beforeEach(() => {
   resetUpstreamGate();
   clearWarmQueue();
   clearFailedNames();
+  resetWarmupState();
   vi.stubGlobal("fetch", vi.fn());
   vi.spyOn(Math, "random").mockReturnValue(0);
   vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -165,6 +166,69 @@ describe("runWarmupTick", () => {
     const r = await runWarmupTick(db, { now: Date.now() });
     expect(r.refreshedPages).toBe(0);
     expect(fetch.mock.calls.length).toBeLessThanOrEqual(2); // одна попытка и стоп (не 6)
+  });
+});
+
+describe("подогрев: осторожность с адресом (18.10.2026 ВкусВилл замолчал через 4 минуты подогрева)", () => {
+  const okFetch = () => fetch.mockImplementation(async (url, opts) => {
+    const body = JSON.parse(opts.body);
+    const q = body.params?.arguments?.q;
+    if (body.params?.name === "vkusvill_recipes") return mcpOk(recipesPage(["Лук репчатый", "Морковь", "Свёкла", "Капуста", "Перец"]));
+    return mcpOk({ items: [{ xml_id: "1", name: q, price: { current: 50 }, unit: "кг" }] });
+  });
+
+  it("за тик не больше одной страницы и WARM_PRICES_PER_TICK цен", async () => {
+    okFetch();
+    await runWarmupTick(db, { now: Date.now() });
+    expect(fetch.mock.calls.length).toBeLessThanOrEqual(1 + WARM_PRICES_PER_TICK);
+  });
+
+  it("сбой страницы рецептов ставит подогрев на паузу: следующие тики ничего не шлют, через полчаса — снова работает", async () => {
+    const t0 = Date.now();
+    fetch.mockResolvedValue({ ok: false, status: 403, json: async () => ({}) });
+    const r = await runWarmupTick(db, { now: t0 });
+    expect(r.skipped).toBe("paused");
+    expect(getWarmupPausedUntil()).toBe(t0 + WARM_PAUSE_AFTER_FAILURE_MS);
+
+    fetch.mockClear();
+    resetUpstreamGate();
+    expect((await runWarmupTick(db, { now: t0 + 60_000 })).skipped).toBe("paused");
+    expect((await runWarmupTick(db, { now: t0 + WARM_PAUSE_AFTER_FAILURE_MS - 1000 })).skipped).toBe("paused");
+    expect(fetch).not.toHaveBeenCalled();
+
+    okFetch();
+    resetUpstreamGate();
+    const later = await runWarmupTick(db, { now: t0 + WARM_PAUSE_AFTER_FAILURE_MS + 1000 });
+    expect(later.skipped).toBeNull();
+  });
+
+  it("сбой при получении цен тоже ставит на паузу, и подогрев цен не повторяет запрос (без ретраев)", async () => {
+    const t0 = Date.now();
+    fetch.mockImplementation(async (url, opts) => {
+      const body = JSON.parse(opts.body);
+      if (body.params?.name === "vkusvill_recipes") return mcpOk(recipesPage(["Лук репчатый"]));
+      return { ok: false, status: 503, json: async () => ({}) }; // временный сбой — раньше за ним шли повторы
+    });
+    await runWarmupTick(db, { now: t0 });
+    const priceCalls = fetch.mock.calls.filter(([, o]) => JSON.parse(o.body).params.name !== "vkusvill_recipes");
+    expect(priceCalls).toHaveLength(1);
+    expect(getWarmupPausedUntil()).toBeGreaterThan(t0);
+  });
+
+  it("потолок запросов в час: после WARM_MAX_PER_HOUR подогрев молчит до следующего часа", async () => {
+    okFetch();
+    const t0 = Date.now();
+    let sent = 0;
+    for (let i = 0; i < 200; i++) {
+      resetUpstreamGate();
+      const before = fetch.mock.calls.length;
+      const r = await runWarmupTick(db, { now: t0 + i * 1000 });
+      sent += fetch.mock.calls.length - before;
+      if (r.skipped === "hourly_cap") break;
+    }
+    expect(sent).toBeLessThanOrEqual(WARM_MAX_PER_HOUR + 5);
+    resetUpstreamGate();
+    expect((await runWarmupTick(db, { now: t0 + 3_700_000 })).skipped).not.toBe("hourly_cap");
   });
 });
 
