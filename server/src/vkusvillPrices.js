@@ -237,6 +237,10 @@ function isFresh(cached, nowMs, maxAgeMs = Infinity) {
 // ВкусВиллу в час впустую; они ещё и похожи на поведение бота для защиты каталога).
 export const FAILED_NAME_RETRY_AFTER_MS = 60 * 60 * 1000;
 const failedAt = new Map(); // name -> timestamp неудачи
+let lastLiveError = null; // текст последней ошибки живого запроса — для лога подогрева
+export function getLastLiveError() {
+  return lastLiveError;
+}
 export function clearFailedNames() {
   failedAt.clear();
 }
@@ -376,7 +380,7 @@ export async function resolveIngredientPricesWithCache(db, names, { maxLiveFetch
     }
     // Запрос не удался (после ретраев), не дошёл до выполнения или не уложился в
     // срок. Не кэшируем как "не найдено" — временный сбой не должен залипать.
-    if (out?.error) failedAt.set(name, Date.now());
+    if (out?.error) { failedAt.set(name, Date.now()); lastLiveError = out.error.message || String(out.error); }
     // Если в кэше есть устаревшая запись — отдаём её: она почти наверняка
     // честнее, чем "нет цены вообще".
     const stale = cached.get(name);

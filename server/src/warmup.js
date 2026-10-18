@@ -21,7 +21,7 @@
 // к ВкусВиллу занят меньше чем наполовину, и берёт мало за тик.
 import { listWarmTargets } from "./db.js";
 import { peekProxyCache, refreshProxyEntry, proxyCacheKey } from "./vkusvillProxy.js";
-import { getUpstreamLoad, namesNeedingRefresh, queueNamesForWarming, runPriceWarmTick } from "./vkusvillPrices.js";
+import { getUpstreamLoad, namesNeedingRefresh, queueNamesForWarming, runPriceWarmTick, getLastLiveError } from "./vkusvillPrices.js";
 
 // Подогрев намеренно «тихий»: при блокировке адреса сервера защитой каталога (QRATOR, 05.10.2026)
 // не хочется давать ей повод видеть в нас бота — мало запросов, никакой равномерной «барабанной дроби».
@@ -35,11 +35,16 @@ export const RECIPES_PER_TICK = 1;
 export const WARM_MAX_PER_HOUR = 90;
 export const WARM_PAUSE_AFTER_FAILURE_MS = 30 * 60 * 1000;
 const HOUR_MS = 60 * 60 * 1000;
+// Единичный сбой (одно название из трёх) — не блокировка: ВкусВилл иногда отвечает дольше 8 секунд и без неё.
+// Останавливаемся сразу, если не прошло ничего, и после нескольких тиков подряд с частичными сбоями.
+export const WARM_STRIKES_BEFORE_PAUSE = 3;
 let pausedUntil = 0;
+let strikes = 0;
 let spentAt = []; // отметки времени наших запросов за последний час
 
 export function resetWarmupState() {
   pausedUntil = 0;
+  strikes = 0;
   spentAt = [];
 }
 export function getWarmupPausedUntil() {
@@ -146,6 +151,13 @@ export async function runWarmupTick(db, { now = Date.now(), maxLoad = WARM_MAX_L
   const batch = Math.max(0, Math.min(WARM_PRICES_PER_TICK, budgetLeft - refreshedPages));
   const { warmed, failed } = batch > 0 ? await runPriceWarmTick(db, { batch }) : { warmed: 0, failed: 0 };
   for (let i = 0; i < warmed; i++) spentAt.push(now);
-  if (failed > 0) pauseWarmup(now, `не удалось получить цены: ${failed} из ${warmed}`);
+  if (failed > 0) {
+    strikes++;
+    const reason = `не удалось получить цены: ${failed} из ${warmed} (${getLastLiveError() || "причина неизвестна"})`;
+    if (failed === warmed || strikes >= WARM_STRIKES_BEFORE_PAUSE) pauseWarmup(now, reason);
+    else console.warn(`[warmup] частичный сбой, продолжаем (${strikes}/${WARM_STRIKES_BEFORE_PAUSE}): ${reason}`);
+  } else if (warmed > 0) {
+    strikes = 0;
+  }
   return { skipped: null, refreshedPages, queuedNames: needing.length, warmedPrices: warmed - failed };
 }

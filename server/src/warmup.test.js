@@ -215,6 +215,25 @@ describe("подогрев: осторожность с адресом (18.10.20
     expect(getWarmupPausedUntil()).toBeGreaterThan(t0);
   });
 
+  it("один сбой из нескольких цен — не пауза; три тика подряд с частичными сбоями — пауза", async () => {
+    const t0 = Date.now();
+    let n = 0;
+    fetch.mockImplementation(async (url, opts) => {
+      const body = JSON.parse(opts.body);
+      const q = body.params?.arguments?.q;
+      if (body.params?.name === "vkusvill_recipes") return mcpOk(recipesPage(["А1", "Б2", "В3", "Г4", "Д5", "Е6", "Ж7", "З8", "И9"]));
+      n++;
+      return n % 3 === 0 ? { ok: false, status: 503, json: async () => ({}) } : mcpOk({ items: [{ xml_id: "1", name: q, price: { current: 50 }, unit: "кг" }] });
+    });
+    expect((await runWarmupTick(db, { now: t0 })).skipped).toBeNull();
+    expect(getWarmupPausedUntil()).toBe(0); // 1 сбой из 3 — работаем дальше
+    resetUpstreamGate();
+    await runWarmupTick(db, { now: t0 + 60_000 });
+    resetUpstreamGate();
+    await runWarmupTick(db, { now: t0 + 120_000 });
+    expect(getWarmupPausedUntil()).toBeGreaterThan(t0); // третий тик подряд со сбоем
+  });
+
   it("потолок запросов в час: после WARM_MAX_PER_HOUR подогрев молчит до следующего часа", async () => {
     okFetch();
     const t0 = Date.now();
