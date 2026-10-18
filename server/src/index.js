@@ -226,4 +226,10 @@ async function priceWarmTick() {
     console.error("[warmup] ошибка тика:", err);
   }
 }
-setInterval(guardTick("priceWarm", priceWarmTick), 60 * 1000);
+// WARMUP=off в /etc/sedim/env выключает подогрев: на новом адресе ВкусВилл начал не отвечать уже через
+// несколько минут после запуска подогрева (≈10 запросов в минуту), см. docs/migration-ru-hosting.md.
+if (process.env.WARMUP === "off") {
+  console.log("[warmup] выключен (WARMUP=off)");
+} else {
+  setInterval(guardTick("priceWarm", priceWarmTick), 60 * 1000);
+}
