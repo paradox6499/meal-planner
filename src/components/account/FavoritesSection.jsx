@@ -2,7 +2,7 @@
 import { useState } from "react";
 import { ChevronRight } from "lucide-react";
 import { hapticSelect } from "../../lib/haptics.js";
-import { styles } from "../../styles.js";
+import { styles, T } from "../../styles.js";
 import { useRecipeBook, totalCooked } from "../../lib/recipeBook.js";
 import { RecipeModal } from "../RecipeModal.jsx";
 
@@ -36,7 +36,7 @@ export function FavoritesSection({ family }) {
             style={styles.rowChip(false)}
           >
             <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
-              <span style={{ fontSize: 20 }}>{f.recipe.emoji || "🍽"}</span>
+              <span style={{ fontSize: T.title }}>{f.recipe.emoji || "🍽"}</span>
               <div style={{ minWidth: 0 }}>
                 <div style={{ fontWeight: 600 }}>{f.recipe.name}</div>
                 {f.recipe.time != null && <div style={styles.chipHint}>{f.recipe.time} мин</div>}
@@ -49,7 +49,7 @@ export function FavoritesSection({ family }) {
           <button
             type="button"
             onClick={() => { hapticSelect(); setShowAll((v) => !v); }}
-            style={{ ...styles.inlineLinkBtn, padding: "10px 0", minHeight: 44, alignSelf: "flex-start", fontSize: 13 }}
+            style={{ ...styles.inlineLinkBtn, padding: "10px 0", minHeight: 44, alignSelf: "flex-start", fontSize: T.caption }}
           >
             {showAll ? "Свернуть" : `Показать ещё ${hidden}`}
           </button>

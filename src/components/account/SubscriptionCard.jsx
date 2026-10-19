@@ -2,7 +2,7 @@
 
 import { Sparkles } from "lucide-react";
 import { hapticImpact } from "../../lib/haptics.js";
-import { styles, ACCENT } from "../../styles.js";
+import { styles, ACCENT, T } from "../../styles.js";
 import { formatResetDate } from "../../lib/format.js";
 
 // Раньше в Аккаунте был мини-аккордеон с тем же списком, что и здесь — теперь
@@ -26,7 +26,7 @@ export function AccountSubscriptionCard({ onOpenPro, planStatus }) {
       <div style={styles.subCard}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
           <Sparkles size={16} color={ACCENT} />
-          <span style={{ fontWeight: 700, fontSize: 15 }}>Съедим Pro</span>
+          <span style={{ fontWeight: 700, fontSize: T.body }}>Съедим Pro</span>
           <span style={isPro ? styles.proBadge : styles.freeBadge}>{isPro ? "Pro" : "Free"}</span>
         </div>
         {isPro ? (

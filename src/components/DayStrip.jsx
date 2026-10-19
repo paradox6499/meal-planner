@@ -1,7 +1,7 @@
 // Полоса дней над рецептами недели (Пн–Вс): нажатие прокручивает к нужному дню, подсвечен день, который сейчас
 // на экране; «сегодня» отмечен рамкой. Раньше неделя из 14 приёмов пищи читалась одной длинной прокруткой.
 import { useEffect, useRef, useState } from "react";
-import { styles } from "../styles.js";
+import { styles, T } from "../styles.js";
 import { hapticSelect } from "../lib/haptics.js";
 import { describePlanDay } from "../lib/planDays.js";
 
@@ -68,9 +68,9 @@ export function DayStrip({ days, planStartISO }) {
             onClick={() => jump(day)}
             aria-label={info ? `Перейти к дню: ${info.label}` : `Перейти ко дню ${day}`}
             aria-current={active ? "true" : undefined}
-            style={{ ...styles.dayChip(active, !!info?.isToday), opacity: info?.isPast && !active ? 0.55 : 1 }}
+            style={styles.dayChip(active, !!info?.isToday, !!info?.isPast)}
           >
-            <span style={{ fontSize: 10.5, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.03em", opacity: 0.85 }}>{info ? info.weekday : "день"}</span>
+            <span style={{ fontSize: T.label, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.03em", opacity: 0.85 }}>{info ? info.weekday : "день"}</span>
             <span style={{ fontSize: 16, fontWeight: 700, lineHeight: 1.1 }}>{info ? info.dayOfMonth : day}</span>
           </button>
         );

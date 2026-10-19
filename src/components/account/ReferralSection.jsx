@@ -3,7 +3,7 @@
 import { Users, Share2 } from "lucide-react";
 import { trackEvent } from "../../lib/analytics.js";
 import { hapticImpact } from "../../lib/haptics.js";
-import { styles, ACCENT } from "../../styles.js";
+import { styles, ACCENT, T } from "../../styles.js";
 import { pluralDaysRu } from "../../lib/format.js";
 import { BOT_SHARE_URL, shareViaTelegram } from "../../lib/share.js";
 
@@ -31,7 +31,7 @@ export function ReferralSection({ referralStatus }) {
       <div style={styles.subCard}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
           <Users size={16} color={ACCENT} />
-          <span style={{ fontWeight: 700, fontSize: 15 }}>Пригласить друга</span>
+          <span style={{ fontWeight: 700, fontSize: T.body }}>Пригласить друга</span>
         </div>
         <p style={styles.acctSectionHint}>
           Друг соберёт свой первый план — и вы оба получите {REFERRAL_REWARD_DAYS_LABEL} дней Pro бесплатно.

@@ -53,7 +53,7 @@ export function LastPlanGateView({ latest, nextResetHint, onOpenPro, onOpenExtra
           ))}
         </div>
         <p style={{ ...styles.acctSectionHint, marginTop: 14 }}>
-          {latest.totalCost != null ? `${latest.totalCost.toLocaleString("ru-RU")} ₽` : "без цены"} из {latest.budget.toLocaleString("ru-RU")} ₽ · на {latest.family} {latest.family === 1 ? "человека" : "человек"}
+          {latest.totalCost != null ? `${latest.totalCost.toLocaleString("ru-RU")} ₽` : "без цены"} из {latest.budget.toLocaleString("ru-RU")} ₽ · на {latest.family} {latest.family === 1 ? "человека" : "человек"}
         </p>
         {anyMissingRecipe && (
           <p style={{ ...styles.acctSectionHint, marginTop: 0, color: "var(--warning-text)" }}>
@@ -66,10 +66,10 @@ export function LastPlanGateView({ latest, nextResetHint, onOpenPro, onOpenExtra
             : "Новый бесплатный план будет доступен позже. Или соберите новый прямо сейчас:"}
         </p>
         <button onClick={onOpenExtraPlan} style={{ ...styles.navBtnPrimary, width: "100%", justifyContent: "center" }}>
-          Собрать сейчас — {EXTRA_PLAN_PRICE_RUB} ₽
+          Собрать сейчас — {EXTRA_PLAN_PRICE_RUB} ₽
         </button>
         <button onClick={onOpenPro} style={styles.proLinkBtn}>
-          Или Pro: {PRO_PRICE_RUB} ₽ за 30 дней, без автосписания — безлимит, напоминания, семья
+          Или Pro: {PRO_PRICE_RUB} ₽ за 30 дней, без автосписания — безлимит, напоминания, семья
         </button>
       </StepShell>
       {openRecipe && <RecipeModal dm={openRecipe} family={openRecipe.family} onClose={() => setOpenRecipe(null)} />}

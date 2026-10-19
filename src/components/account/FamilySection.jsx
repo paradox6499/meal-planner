@@ -3,7 +3,7 @@
 import { Users, Share2 } from "lucide-react";
 import { trackEvent } from "../../lib/analytics.js";
 import { hapticImpact } from "../../lib/haptics.js";
-import { styles, ACCENT } from "../../styles.js";
+import { styles, ACCENT, T } from "../../styles.js";
 import { pluralPeople } from "../../lib/format.js";
 import { BOT_SHARE_URL, shareViaTelegram } from "../../lib/share.js";
 
@@ -31,7 +31,7 @@ export function FamilySection({ familyStatus, isPro, actionState, onCreate, onLe
         <div style={styles.subCard}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
             <Users size={16} color={ACCENT} />
-            <span style={{ fontWeight: 700, fontSize: 15 }}>Общий список на семью</span>
+            <span style={{ fontWeight: 700, fontSize: T.body }}>Общий список на семью</span>
           </div>
           <p style={styles.acctSectionHint}>
             Пригласите до {MAX_FAMILY_MEMBERS_LABEL} человек — отметил кто-то из семьи "уже есть дома", увидят все остальные.
@@ -61,7 +61,7 @@ export function FamilySection({ familyStatus, isPro, actionState, onCreate, onLe
       <div style={styles.subCard}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
           <Users size={16} color={ACCENT} />
-          <span style={{ fontWeight: 700, fontSize: 15 }}>Общий список на семью</span>
+          <span style={{ fontWeight: 700, fontSize: T.body }}>Общий список на семью</span>
         </div>
         {familyStatus.active === false ? (
           // Решение автора (30.09.2026): после окончания Pro у владельца семья

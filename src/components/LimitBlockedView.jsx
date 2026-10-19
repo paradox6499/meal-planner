@@ -26,13 +26,13 @@ export function LimitBlockedView({ nextResetHint, done, onOpenExtraPlan, onOpenP
           onClick={() => { hapticImpact("light"); trackEvent("extra_plan_modal_opened", { source: "limit_blocked" }); onOpenExtraPlan(); }}
           style={{ ...styles.navBtnPrimary, width: "100%", justifyContent: "center" }}
         >
-          Собрать сейчас — {EXTRA_PLAN_PRICE_RUB} ₽
+          Собрать сейчас — {EXTRA_PLAN_PRICE_RUB} ₽
         </button>
         <button
           onClick={() => { hapticImpact("light"); trackEvent("pro_modal_opened", { source: "limit_blocked" }); onOpenPro(); }}
           style={styles.proLinkBtn}
         >
-          Или Pro: {PRO_PRICE_RUB} ₽ за 30 дней, без автосписания — безлимит, напоминания, семья
+          Или Pro: {PRO_PRICE_RUB} ₽ за 30 дней, без автосписания — безлимит, напоминания, семья
         </button>
         <button onClick={onBack} style={styles.limitBackBtn}>{done ? "Назад к моему плану" : "Назад"}</button>
       </StepShell>

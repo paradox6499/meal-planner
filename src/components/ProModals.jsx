@@ -7,7 +7,7 @@ import { loadPayerEmail, savePayerEmail } from "../lib/payerContact.js";
 import { loadConsent, saveConsent } from "../lib/consent.js";
 import { trackEvent } from "../lib/analytics.js";
 import { hapticImpact, hapticNotify } from "../lib/haptics.js";
-import { styles, ACCENT } from "../styles.js";
+import { styles, ACCENT, T } from "../styles.js";
 import { ConsentCheckbox } from "./common.jsx";
 
 // Просьба в чате: "показывался план при входе... и лаконично внизу кнопка
@@ -141,11 +141,21 @@ export function ProModal({ onClose }) {
           <X size={16} />
         </button>
 
-        <div style={styles.proHero}>
-          <Sparkles size={32} color={ACCENT} />
+        <h2 style={{ ...styles.stepTitle, textAlign: "center", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
+          <Sparkles size={22} color={ACCENT} /> Съедим Pro
+        </h2>
+        {/* Цена — сразу под заголовком, а не под четырьмя абзацами (аудит 19.10.2026: кнопки и цены не было на первом экране). */}
+        <div style={{ textAlign: "center", marginBottom: 16 }}>
+          <div style={styles.proPriceRow}>
+            <span style={styles.proPriceNew}>{PRO_PRICE_RUB} ₽</span>
+            <span style={styles.proPricePeriod}>за 30 дней</span>
+          </div>
+          {/* Зачёркнутой «399 ₽» нет (UX-аудит 29.09.2026: по ней не продавали), «/ мес» тоже: оплата разовая на 30 дней,
+              без автопродления (см. terms.html). */}
+          <p style={{ ...styles.acctSectionHint, textAlign: "center", margin: "2px 0 0 0" }}>
+            ≈ {PRO_PRICE_PER_DAY_RUB}&nbsp;₽ в день · <b>без автосписаний</b>
+          </p>
         </div>
-        <h2 style={{ ...styles.stepTitle, textAlign: "center" }}>Съедим Pro</h2>
-        <p style={{ ...styles.stepSub, textAlign: "center" }}>Всё то же самое, что уже работает, — но без ограничений</p>
 
         <div style={styles.stack}>
           {SUBSCRIPTION_BENEFITS.map((b) => (
@@ -154,26 +164,14 @@ export function ProModal({ onClose }) {
                 <Check size={13} color={ACCENT} />
               </div>
               <div style={{ minWidth: 0 }}>
-                <div style={{ fontWeight: 600, fontSize: 14, lineHeight: 1.3 }}>{b.title}</div>
-                <div style={{ fontSize: 13, color: "var(--text-secondary)", marginTop: 2, lineHeight: 1.4 }}>{b.short}</div>
+                <div style={{ fontWeight: 600, fontSize: T.body, lineHeight: 1.3 }}>{b.title}</div>
+                <div style={{ fontSize: T.caption, color: "var(--text-secondary)", marginTop: 2, lineHeight: 1.4 }}>{b.short}</div>
               </div>
             </div>
           ))}
         </div>
 
         <div style={styles.proPriceBox}>
-          <div style={styles.proPriceRow}>
-            <span style={styles.proPriceNew}>{PRO_PRICE_RUB} ₽</span>
-            <span style={styles.proPricePeriod}>за 30 дней</span>
-          </div>
-          <p style={{ ...styles.acctSectionHint, textAlign: "center", margin: "2px 0 0 0" }}>≈ {PRO_PRICE_PER_DAY_RUB} ₽ в день</p>
-          {/* Зачёркнутая "399 ₽" убрана (UX-аудит 29.09.2026): по ней никогда
-              не продавали — это вводящая в заблуждение реклама. "/ мес" и
-              "подписка" тоже намекали на автосписание, которого нет (см.
-              terms.html: разовый платёж на 30 дней). */}
-          <p style={{ ...styles.acctSectionHint, textAlign: "center", margin: "4px 0 0 0" }}>
-            <b>Без автосписаний:</b> разовый платёж, продлевать или нет решаете вы.
-          </p>
           {/* Обязателен для чека (54-ФЗ, см. lib/payerContact.js) — ЮKassa
               без email/телефона покупателя отклоняет платёж целиком.
               Запоминается локально, при следующей оплате спрашивать не нужно. */}
@@ -195,7 +193,7 @@ export function ProModal({ onClose }) {
             disabled={paymentState === "loading" || !canPay}
             style={{ ...styles.navBtnPrimary, width: "100%", justifyContent: "center", marginTop: 12, opacity: paymentState === "loading" || !canPay ? 0.6 : 1 }}
           >
-            {paymentState === "loading" ? <><Loader2 size={16} className="spin" /> Готовим оплату…</> : `Оплатить Pro — ${PRO_PRICE_RUB} ₽`}
+            {paymentState === "loading" ? <><Loader2 size={16} className="spin" /> Готовим оплату…</> : `Оплатить Pro — ${PRO_PRICE_RUB} ₽`}
           </button>
           {paymentState !== "loading" && !canPay && (
             <p style={{ ...styles.acctSectionHint, textAlign: "center", margin: "8px 0 0 0" }}>
@@ -205,7 +203,7 @@ export function ProModal({ onClose }) {
           {paymentState === "error" && (
             <p style={{ ...styles.acctSectionHint, textAlign: "center", margin: "12px 0 0 0" }}>
               Не удалось начать оплату. Попробуйте ещё раз через минуту — если не поможет, напишите в поддержку (Аккаунт → «Написать в поддержку»).
-              {errorDetail && <><br /><span style={{ fontSize: 12 }}>Для поддержки: {errorDetail}</span></>}
+              {errorDetail && <><br /><span style={{ fontSize: T.caption }}>Для поддержки: {errorDetail}</span></>}
             </p>
           )}
         </div>
@@ -267,7 +265,7 @@ export function ExtraPlanModal({ onClose, onOpenPro }) {
 
         <div style={styles.proPriceBox}>
           <div style={styles.proPriceRow}>
-            <span style={styles.proPriceNew}>{EXTRA_PLAN_PRICE_RUB} ₽</span>
+            <span style={styles.proPriceNew}>{EXTRA_PLAN_PRICE_RUB} ₽</span>
             <span style={styles.proPricePeriod}>разово</span>
           </div>
           <div style={{ ...styles.acctLabel, marginTop: 12, textAlign: "left" }}>Email для чека</div>
@@ -288,7 +286,7 @@ export function ExtraPlanModal({ onClose, onOpenPro }) {
             disabled={paymentState === "loading" || !canPay}
             style={{ ...styles.navBtnPrimary, width: "100%", justifyContent: "center", marginTop: 12, opacity: paymentState === "loading" || !canPay ? 0.6 : 1 }}
           >
-            {paymentState === "loading" ? <><Loader2 size={16} className="spin" /> Готовим оплату…</> : `Оплатить ${EXTRA_PLAN_PRICE_RUB} ₽`}
+            {paymentState === "loading" ? <><Loader2 size={16} className="spin" /> Готовим оплату…</> : `Оплатить ${EXTRA_PLAN_PRICE_RUB} ₽`}
           </button>
           {paymentState !== "loading" && !canPay && (
             <p style={{ ...styles.acctSectionHint, textAlign: "center", margin: "8px 0 0 0" }}>
@@ -298,7 +296,7 @@ export function ExtraPlanModal({ onClose, onOpenPro }) {
           {paymentState === "error" && (
             <p style={{ ...styles.acctSectionHint, textAlign: "center", margin: "12px 0 0 0" }}>
               Не удалось начать оплату. Попробуйте ещё раз через минуту — если не поможет, напишите в поддержку (Аккаунт → «Написать в поддержку»).
-              {errorDetail && <><br /><span style={{ fontSize: 12 }}>Для поддержки: {errorDetail}</span></>}
+              {errorDetail && <><br /><span style={{ fontSize: T.caption }}>Для поддержки: {errorDetail}</span></>}
             </p>
           )}
         </div>

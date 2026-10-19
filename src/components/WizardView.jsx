@@ -4,7 +4,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Check, ChevronLeft, ChevronRight, Store, Users, Wallet, Salad, Ban, UtensilsCrossed } from "lucide-react";
 import { ALLERGENS } from "../data/recipes.js";
-import { styles, ACCENT } from "../styles.js";
+import { styles, ACCENT, T } from "../styles.js";
 import { DEFAULT_STORE, STORES, MEALS, DIETS } from "../constants.js";
 import { mealsPerDayLabel } from "../lib/format.js";
 import { hapticSelect, hapticImpact } from "../lib/haptics.js";
@@ -124,9 +124,9 @@ export function WizardView({
 
       {currentStepKey === "budget" && (
         <StepShell icon={<Wallet size={20} />} title="Бюджет на неделю" sub={`Сколько готовы потратить на продукты на ${meals.length || 0} ${mealsPerDayLabel(meals.length || 0)}`}>
-          <div style={styles.budgetVal}>{budget.toLocaleString("ru-RU")} ₽</div>
+          <div style={styles.budgetVal}>{budget.toLocaleString("ru-RU")} ₽</div>
           <input type="range" min={range.min} max={range.max} step={range.step} value={budget} onChange={(e) => setBudget(Number(e.target.value))} style={styles.slider} />
-          <div style={styles.sliderLabels}><span>{range.min.toLocaleString("ru-RU")} ₽</span><span>{range.max.toLocaleString("ru-RU")} ₽</span></div>
+          <div style={styles.sliderLabels}><span>{range.min.toLocaleString("ru-RU")} ₽</span><span>{range.max.toLocaleString("ru-RU")} ₽</span></div>
           <BudgetCheck budget={budget} setBudget={setBudget} meals={meals} family={family} familyByMeal={familyByMeal} store={store} min={range.min} max={range.max} step={range.step} />
           {/* Вопрос в чате: "выдаёт 17 000 при бюджете 15 000, почему?"
               — честный ответ: алгоритм целится в сумму, но не может
@@ -137,7 +137,7 @@ export function WizardView({
               заранее, а не оставляет пользователя гадать при виде
               красной цифры в конце визарда (см. ResultView — там она
               уже подсвечивается, но без объяснения "почему"). */}
-          <p style={{ fontSize: 12, color: "var(--text-tertiary)", textAlign: "center", margin: "14px 0 0 0", lineHeight: 1.45 }}>
+          <p style={{ fontSize: T.caption, color: "var(--text-tertiary)", textAlign: "center", margin: "14px 0 0 0", lineHeight: 1.45 }}>
             Мы стараемся уложиться в эту сумму, но не всегда получается тютелька-в-тютельку — при строгих ограничениях по рациону, аллергиям или кухне подходящих дешёвых рецептов может просто не найтись, и итог выйдет чуть выше.
           </p>
         </StepShell>

@@ -1,7 +1,7 @@
 // Окно рецепта (портал в document.body).
 
 import { createPortal } from "react-dom";
-import { X, Clock, Clapperboard, Heart, Check } from "lucide-react";
+import { X, Clock, Clapperboard, Heart, Check, Flame } from "lucide-react";
 import { trackEvent } from "../lib/analytics.js";
 import { styles, ACCENT } from "../styles.js";
 import { hapticSelect } from "../lib/haptics.js";
@@ -42,7 +42,7 @@ export function RecipeModal({ dm, family, onClose }) {
           <span>
             {cost == null
               ? `Цена неизвестна — не нашли товар в каталоге`
-              : <>{(cost * family).toLocaleString("ru-RU")} ₽ на {family} {family === 1 ? "человека" : "человек"}{!isRealPrice && " (оценочно)"}</>}
+              : <>{(cost * family).toLocaleString("ru-RU")} ₽ на {family} {family === 1 ? "человека" : "человек"}{!isRealPrice && " (оценочно)"}</>}
           </span>
         </div>
 
@@ -54,7 +54,7 @@ export function RecipeModal({ dm, family, onClose }) {
             справочная характеристика самого блюда, не факта "сколько купить". */}
         {recipe.nutritionPer100g && (
           <div style={{ ...styles.modalMeta, marginTop: -10 }}>
-            <span>🔥 {Math.round(recipe.nutritionPer100g.calories)} ккал</span>
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 3 }}><Flame size={14} /> {Math.round(recipe.nutritionPer100g.calories)} ккал</span>
             <span>Б {Math.round(recipe.nutritionPer100g.protein)} г</span>
             <span>Ж {Math.round(recipe.nutritionPer100g.fat)} г</span>
             <span>У {Math.round(recipe.nutritionPer100g.carbs)} г</span>

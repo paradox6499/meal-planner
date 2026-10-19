@@ -116,6 +116,8 @@ export const GLOBAL_CSS = `
            кнопки было своё backdrop-filter — 63 штуки на одном экране; WebKit пересчитывает каждое
            при прокрутке, отсюда «тормозит». Внутри карточки оставляем только полупрозрачную заливку. */
         .mp-card *:not(.day-strip) { backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }
+        /* Цифры одной ширины: суммы и количества в колонках выравниваются по правому краю (аудит 19.10.2026). */
+        .mp-card { font-variant-numeric: tabular-nums; }
         .basket-body { position: absolute; left: 50%; bottom: 0; transform: translateX(-50%); font-size: 52px; line-height: 1; animation: basket-bob 1.6s ease-in-out infinite; }
         .basket-drop { position: absolute; top: -8px; font-size: 24px; line-height: 1; opacity: 0; animation: basket-drop 2.25s cubic-bezier(.4,0,.6,1) infinite; }
         @keyframes basket-drop {

@@ -9,6 +9,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Trash2 } from "lucide-react";
 import { hapticSelect } from "../../lib/haptics.js";
+import { T } from "../../styles.js";
 
 export const SWIPE_DELETE_THRESHOLD_PX = 64;
 const SWIPE_MAX_PX = 110;
@@ -96,7 +97,7 @@ export function SwipeToDelete({ onDelete, label = "Удалить", children }) 
         style={{
           position: "absolute", inset: 0, display: "flex", alignItems: "center", gap: 8,
           justifyContent: goingRight ? "flex-start" : "flex-end", padding: "0 18px",
-          background: "var(--danger)", color: "#fff", fontSize: 14, fontWeight: 600,
+          background: "var(--danger)", color: "#fff", fontSize: T.body, fontWeight: 600,
           opacity: dx !== 0 ? 1 : 0,
         }}
       >

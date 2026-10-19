@@ -33,7 +33,7 @@ export function ProgressSection({ planHistory }) {
         {savings > 0 && (
           <div style={styles.progressCard}>
             <Wallet size={18} color={ACCENT} />
-            <div style={styles.progressCardValue}>{savings.toLocaleString("ru-RU")} ₽</div>
+            <div style={styles.progressCardValue}>{savings.toLocaleString("ru-RU")} ₽</div>
             <div style={styles.progressCardLabel}>сэкономлено за последние планы</div>
           </div>
         )}

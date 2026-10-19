@@ -6,7 +6,7 @@ import { confirmAction } from "../../lib/confirmAction.js";
 import { SwipeToDelete } from "./SwipeToDelete.jsx";
 import { describePlanDay } from "../../lib/planDays.js";
 import { hapticSelect } from "../../lib/haptics.js";
-import { styles } from "../../styles.js";
+import { styles, T } from "../../styles.js";
 import { HISTORY_DAY_EMOJI_FALLBACK } from "../../constants.js";
 import { RecipeModal } from "../RecipeModal.jsx";
 
@@ -60,7 +60,7 @@ export function PlanHistorySection({ planHistory, onDeletePlan }) {
                   <div>
                     <div style={{ fontWeight: 600 }}>{dateLabel} · {p.storeName}</div>
                     <div style={styles.chipHint}>
-                      {p.totalCost != null ? `${p.totalCost.toLocaleString("ru-RU")} ₽` : "без цены"} из {p.budget.toLocaleString("ru-RU")} ₽ · на {p.family} {p.family === 1 ? "человека" : "человек"}
+                      {p.totalCost != null ? `${p.totalCost.toLocaleString("ru-RU")} ₽` : "без цены"} из {p.budget.toLocaleString("ru-RU")} ₽ · на {p.family} {p.family === 1 ? "человека" : "человек"}
                     </div>
                   </div>
                   <ChevronRight size={16} style={{ transform: open ? "rotate(90deg)" : "none", transition: "transform .15s" }} />
@@ -121,7 +121,7 @@ export function PlanHistorySection({ planHistory, onDeletePlan }) {
             <button
               type="button"
               onClick={() => { hapticSelect(); setShowAll((v) => !v); if (showAll) setOpenId(null); }}
-              style={{ ...styles.inlineLinkBtn, padding: "10px 0", minHeight: 44, alignSelf: "flex-start", fontSize: 13 }}
+              style={{ ...styles.inlineLinkBtn, padding: "10px 0", minHeight: 44, alignSelf: "flex-start", fontSize: T.caption }}
             >
               {showAll ? "Свернуть" : `Показать ещё ${hiddenCount}`}
             </button>

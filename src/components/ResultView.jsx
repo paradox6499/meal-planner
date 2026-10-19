@@ -1,7 +1,7 @@
 // Экран готового плана и переключатель слотов планов.
 
 import { useState, useEffect, useMemo } from "react";
-import { X, Plus, TriangleAlert, Loader2, ChevronRight, Repeat, Home, PackageSearch, Share2, Info } from "lucide-react";
+import { X, Plus, TriangleAlert, Loader2, ChevronRight, Repeat, Home, PackageSearch, Share2, Info, Snowflake } from "lucide-react";
 import { toVkusvillQuantity, buildCartFromShoppingList } from "../lib/vkusvillMcp.js";
 import { getSubstituteOptions } from "../lib/vkusvillRecipes.js";
 import { findTodayDayIndex, describePlanDay } from "../lib/planDays.js";
@@ -11,7 +11,7 @@ import { interleaveGroups } from "../lib/planLogic.js";
 import { loadPantryStaples, savePantryStaples } from "../lib/pantry.js";
 import { trackEvent } from "../lib/analytics.js";
 import { hapticSelect, hapticImpact, hapticNotify } from "../lib/haptics.js";
-import { styles, DANGER, ACCENT } from "../styles.js";
+import { styles, DANGER, ACCENT, T } from "../styles.js";
 import { STORES } from "../constants.js";
 import { mealsPerDayLabel } from "../lib/format.js";
 import { shareViaTelegram, buildShareText, BOT_SHARE_URL } from "../lib/share.js";
@@ -31,7 +31,7 @@ export function PlanSlotsBar({ slots, activeId, onSwitch, onRemove, onAdd, canAd
         <button key={s.id} className="chip" onClick={() => onSwitch(s.id)} style={styles.planSlotChip(s.id === activeId)}>
           <span>
             {STORES.find((st) => st.id === s.store)?.name || "План"}
-            {s.budget > 0 ? ` · ${Number(s.budget).toLocaleString("ru-RU")} ₽` : ""}
+            {s.budget > 0 ? ` · ${Number(s.budget).toLocaleString("ru-RU")} ₽` : ""}
           </span>
           {slots.length > 1 && (
             <span
@@ -287,7 +287,7 @@ export function ResultView({ plan, planStartISO, onRebuild, generationPending, c
                 : "ВкусВилл сейчас не отвечает — показали базовые рецепты с примерной ценой. Заказ во ВкусВилл откроется, когда каталог заработает."}
             </span>
             {generationPending && (
-              <p style={{ fontSize: 13, margin: "6px 0 0 0", opacity: 0.9 }}>Бесплатный план при этом не тратится.</p>
+              <p style={{ fontSize: T.caption, margin: "6px 0 0 0", opacity: 0.9 }}>Бесплатный план при этом не тратится.</p>
             )}
             {onRebuild && (
               <button onClick={onRebuild} style={styles.retryPricesBtn}>
@@ -295,7 +295,7 @@ export function ResultView({ plan, planStartISO, onRebuild, generationPending, c
               </button>
             )}
             {priceRetryFailed && !retryingPrices && (
-              <p style={{ fontSize: 13, marginTop: 6, opacity: 0.85 }}>
+              <p style={{ fontSize: T.caption, marginTop: 6, opacity: 0.85 }}>
                 Не получилось — каталог всё ещё недоступен. Попробуйте ещё раз через минуту-другую.
               </p>
             )}
@@ -313,7 +313,7 @@ export function ResultView({ plan, planStartISO, onRebuild, generationPending, c
                 : "Не удалось получить цены на товары — ВкусВилл сейчас не отвечает. Сумма ниже — оценка по рецептам, заказ откроется, когда цены появятся."}
             </span>
             {generationPending && (
-              <p style={{ fontSize: 13, margin: "6px 0 0 0", opacity: 0.9 }}>Бесплатный план при этом не тратится.</p>
+              <p style={{ fontSize: T.caption, margin: "6px 0 0 0", opacity: 0.9 }}>Бесплатный план при этом не тратится.</p>
             )}
             {/* Раньше единственный совет был "соберите план заново" — то есть
                 заново пройти весь визард ради того, чтобы попробовать
@@ -334,7 +334,7 @@ export function ResultView({ plan, planStartISO, onRebuild, generationPending, c
                 ВкусВилл всё ещё не отвечал, и выглядело это так, будто
                 нажатие вообще ни на что не повлияло. */}
             {priceRetryFailed && !retryingPrices && (
-              <p style={{ fontSize: 13, marginTop: 6, opacity: 0.85 }}>
+              <p style={{ fontSize: T.caption, marginTop: 6, opacity: 0.85 }}>
                 Не получилось — ВкусВилл всё ещё ограничивает запросы. Попробуйте ещё раз через минуту-другую.
               </p>
             )}
@@ -360,23 +360,23 @@ export function ResultView({ plan, planStartISO, onRebuild, generationPending, c
       )}
 
       <div style={{ ...styles.totalBox, borderColor: over ? "rgba(255,59,48,0.35)" : "rgba(10,132,255,0.3)" }}>
-        <span style={{ fontSize: 13, color: "var(--text-tertiary)" }}>Итого за продукты{noRealPrices ? " (оценка)" : ""}</span>
-        <span style={{ fontSize: 28, fontWeight: 700, letterSpacing: "-0.01em", color: over ? DANGER : ACCENT }}>
-          {noRealPrices ? "≈ " : ""}{adjustedTotal.toLocaleString("ru-RU")} ₽
+        <span style={{ fontSize: T.caption, color: "var(--text-tertiary)" }}>Итого за продукты{noRealPrices ? " (оценка)" : ""}</span>
+        <span style={{ fontSize: T.display, fontWeight: 700, letterSpacing: "-0.01em", color: over ? DANGER : ACCENT }}>
+          {noRealPrices ? "≈ " : ""}{adjustedTotal.toLocaleString("ru-RU")} ₽
         </span>
-        <span style={{ fontSize: 13, color: "var(--text-tertiary)" }}>из {budget.toLocaleString("ru-RU")} ₽ бюджета</span>
+        <span style={{ fontSize: T.caption, color: "var(--text-tertiary)" }}>из {budget.toLocaleString("ru-RU")} ₽ бюджета</span>
         {plan.itemized && Object.keys(subs).length > 0 && (
-          <span style={{ fontSize: 11, color: "var(--text-tertiary)", marginTop: 4 }}>
+          <span style={{ fontSize: T.caption, color: "var(--text-tertiary)", marginTop: 4 }}>
             С учётом {Object.keys(subs).length} {Object.keys(subs).length === 1 ? "замены" : "замен"}
           </span>
         )}
         {plan.itemized && plan.anyUnpriced && !plan.mostlyUnpriced && (
-          <span style={{ fontSize: 11, color: "var(--text-tertiary)", marginTop: 4 }}>
+          <span style={{ fontSize: T.caption, color: "var(--text-tertiary)", marginTop: 4 }}>
             Цена не найдена для части товаров — не учтена в сумме
           </span>
         )}
         {!plan.itemized && plan.anyEstimated && (
-          <span style={{ fontSize: 11, color: "var(--text-tertiary)", marginTop: 4 }}>
+          <span style={{ fontSize: T.caption, color: "var(--text-tertiary)", marginTop: 4 }}>
             Часть цен — оценочные, без данных из магазина
           </span>
         )}
@@ -385,7 +385,7 @@ export function ResultView({ plan, planStartISO, onRebuild, generationPending, c
             видит этот экран, вообще пропустив шаг бюджета (вернувшийся
             пользователь с сохранённым профилем — короткий визард). */}
         {over && (
-          <span style={{ fontSize: 11, color: "var(--text-tertiary)", marginTop: 4, textAlign: "center" }}>
+          <span style={{ fontSize: T.caption, color: "var(--text-tertiary)", marginTop: 4, textAlign: "center" }}>
             Уложиться точно в бюджет не вышло — среди рецептов под ваши фильтры не нашлось достаточно дешёвых вариантов
           </span>
         )}
@@ -411,7 +411,7 @@ export function ResultView({ plan, planStartISO, onRebuild, generationPending, c
       })()}
 
       <h3 style={styles.sectionTitle}>Рецепты на неделю</h3>
-      <p style={{ fontSize: 12, color: "var(--text-tertiary)", margin: "-4px 0 10px 0" }}>
+      <p style={{ fontSize: T.caption, color: "var(--text-tertiary)", margin: "-4px 0 10px 0" }}>
         Нажмите на блюдо, чтобы посмотреть рецепт
       </p>
       {/* Секция целиком (полоса + дни): липкая полоса держится только пока видны рецепты, не наезжает на список покупок. */}
@@ -425,7 +425,7 @@ export function ResultView({ plan, planStartISO, onRebuild, generationPending, c
             key={day}
             id={dayBlockId(day)}
             data-day={day}
-            style={{ ...styles.dayBlock, scrollMarginTop: 86, opacity: info?.isPast ? 0.6 : 1 }}
+            style={{ ...styles.dayBlock, scrollMarginTop: 86 }}
           >
             <div style={{ ...styles.dayTag, ...(info?.isToday ? styles.dayTagToday : null) }}>{info ? info.label : `День ${day}`}</div>
             {dayMeals.map((dm, i) => (
@@ -447,7 +447,7 @@ export function ResultView({ plan, planStartISO, onRebuild, generationPending, c
                         attachRealCosts в vkusvillRecipes.js) — честное "—",
                         а не 0 ₽, которое выглядело бы как "блюдо бесплатное". */}
                     <span style={styles.recipeMeta}>
-                      {dm.mealLabel} · {dm.recipe.time} мин · {dm.cost == null ? "—" : `${(dm.cost * (dm.family ?? family)).toLocaleString("ru-RU")} ₽`}
+                      {dm.mealLabel} · {dm.recipe.time} мин · {dm.cost == null ? "—" : `${(dm.cost * (dm.family ?? family)).toLocaleString("ru-RU")} ₽`}
                     </span>
                   </span>
                   <ChevronRight size={14} style={{ color: "var(--text-tertiary)", flexShrink: 0 }} />
@@ -477,16 +477,16 @@ export function ResultView({ plan, planStartISO, onRebuild, generationPending, c
           принцип, что и с подсказкой про замену ниже: подсказка не про
           КОНКРЕТНЫЙ товар, а про то, что делает иконка в принципе — поэтому
           над списком, а не у каждой строки. */}
-      <p style={{ fontSize: 12, color: "var(--text-tertiary)", margin: "-4px 0 6px 0" }}>
+      <p style={{ fontSize: T.caption, color: "var(--text-tertiary)", margin: "-4px 0 6px 0" }}>
         Что-то уже есть дома с прошлой недели — нажмите <Home size={11} style={{ verticalAlign: -1 }} /> рядом с товаром, вычтем из списка и запомним на следующий раз
       </p>
       {familyPaused && (
-        <p style={{ fontSize: 12, color: "var(--text-tertiary)", margin: "0 0 6px 0" }}>
+        <p style={{ fontSize: T.caption, color: "var(--text-tertiary)", margin: "0 0 6px 0" }}>
           Общий список на паузе — отметки «уже есть дома» видны только вам.
         </p>
       )}
       {canOrderForReal && (
-        <p style={{ fontSize: 12, color: "var(--text-tertiary)", margin: "0 0 10px 0" }}>
+        <p style={{ fontSize: T.caption, color: "var(--text-tertiary)", margin: "0 0 10px 0" }}>
           Если товара не окажется в наличии на сайте ВкусВилл — нажмите <PackageSearch size={11} style={{ verticalAlign: -1 }} /> рядом с ним, подберём замену
         </p>
       )}
@@ -525,7 +525,7 @@ export function ResultView({ plan, planStartISO, onRebuild, generationPending, c
                               planLogic.js (buildPlanView). */}
                           {it.buyLater && (
                             <span style={styles.buyLaterBadge} title="Понадобится ближе к концу недели: если заказываете сразу, уберите в морозилку — так мясо и рыба не испортятся">
-                              {" "}❄️ можно заморозить
+                              {" "}<Snowflake size={12} style={{ verticalAlign: "-1px" }} /> можно заморозить
                             </span>
                           )}
                         </>
@@ -534,7 +534,7 @@ export function ResultView({ plan, planStartISO, onRebuild, generationPending, c
                     <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
                       {sub ? (
                         <>
-                          <span style={{ color: "var(--text-tertiary)" }}>{substituteLineCost(it, sub).toLocaleString("ru-RU")} ₽</span>
+                          <span style={{ color: "var(--text-tertiary)" }}>{substituteLineCost(it, sub).toLocaleString("ru-RU")} ₽</span>
                           <button onClick={() => revertSubstitute(it.name)} title="Отменить замену" aria-label="Отменить замену" style={styles.subRevertBtn}>
                             <X size={13} />
                           </button>
@@ -548,10 +548,12 @@ export function ResultView({ plan, planStartISO, onRebuild, generationPending, c
                         </>
                       ) : (
                         <>
-                          <span style={{ color: "var(--text-tertiary)" }}>
-                            {it.amount} {it.unit}
-                            {plan.itemized && it.cost != null && ` · ${it.cost.toLocaleString("ru-RU")} ₽`}
-                          </span>
+                          <span style={styles.listQty}>{it.amount} {it.unit}</span>
+                          {plan.itemized && (
+                            <span style={it.cost != null ? styles.listPrice : { ...styles.listPrice, color: "var(--text-tertiary)", fontWeight: 400 }}>
+                              {it.cost != null ? `${it.cost.toLocaleString("ru-RU")} ₽` : "—"}
+                            </span>
+                          )}
                           <button onClick={() => toggleHaveAlready(it.name)} title="Уже есть дома — не покупать в этот раз" aria-label="Уже есть дома — не покупать в этот раз" style={styles.pantryBtn}>
                             <Home size={13} />
                           </button>
@@ -575,7 +577,7 @@ export function ResultView({ plan, planStartISO, onRebuild, generationPending, c
                         <button key={opt.xmlId} onClick={() => chooseSubstitute(it.name, opt)} style={styles.subOptionBtn}>
                           {opt.image ? <img src={opt.image} alt="" style={styles.subOptionThumb} /> : <span style={styles.subOptionThumbPlaceholder} />}
                           <span style={{ flex: 1, minWidth: 0, textAlign: "left" }}>{opt.name}</span>
-                          <span style={{ flexShrink: 0, fontWeight: 600 }}>{opt.price} ₽</span>
+                          <span style={{ flexShrink: 0, fontWeight: 600 }}>{opt.price} ₽</span>
                         </button>
                       ))}
                       <button onClick={() => setActiveItem(null)} style={styles.subCancelBtn}>Отмена</button>
