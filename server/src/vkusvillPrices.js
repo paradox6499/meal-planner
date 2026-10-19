@@ -133,8 +133,19 @@ export async function probeVkusvill(timeoutMs = 8000) {
   const startedAt = Date.now();
   try {
     const data = await callToolOnce("vkusvill_products_search", { q: "молоко", page: 1, sort: "popularity", vvonly: 1, mode: "short" }, timeoutMs, { skipGate: true });
-    const items = Array.isArray(data?.items) ? data.items.length : 0;
-    return { ok: items > 0, ms: Date.now() - startedAt, detail: items > 0 ? `найдено товаров: ${items}` : "ответ пустой" };
+    const list = Array.isArray(data?.items) ? data.items : [];
+    const items = list.length;
+    if (items === 0) return { ok: false, ms: Date.now() - startedAt, detail: "ответ пустой" };
+    // Форма ответа: 13.10.2026 каталог без предупреждения переименовал xml_id → id, и корзина молча сломалась, хотя
+    // «товары находились». Проверяем поля, без которых мы не работаем, и сообщаем, какого не хватает.
+    const first = list[0];
+    const missing = [];
+    if (!Number.isInteger(Number(first?.id ?? first?.xml_id))) missing.push("id");
+    if (typeof first?.price?.current !== "number") missing.push("price.current");
+    if (typeof first?.unit !== "string") missing.push("unit");
+    if (typeof first?.name !== "string") missing.push("name");
+    if (missing.length > 0) return { ok: false, ms: Date.now() - startedAt, detail: `формат ответа каталога изменился: нет поля ${missing.join(", ")}`, shapeChanged: true };
+    return { ok: true, ms: Date.now() - startedAt, detail: `найдено товаров: ${items}` };
   } catch (err) {
     return { ok: false, ms: Date.now() - startedAt, detail: err.message, httpStatus: err.httpStatus ?? null };
   }

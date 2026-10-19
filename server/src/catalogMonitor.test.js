@@ -3,7 +3,7 @@ import { runCatalogMonitorTick, getCatalogState, resetCatalogState } from "./cat
 import { resetUpstreamGate } from "./vkusvillPrices.js";
 import { buildDigestText } from "./digest.js";
 
-const mcpOk = () => ({ ok: true, json: async () => ({ result: { content: [{ text: JSON.stringify({ ok: true, data: { items: [{ id: 1 }] } }) }] } }) });
+const mcpOk = () => ({ ok: true, json: async () => ({ result: { content: [{ text: JSON.stringify({ ok: true, data: { items: [{ id: 1, name: "Молоко", price: { current: 90 }, unit: "шт" }] } }) }] } }) });
 const mcp403 = () => ({ ok: false, status: 403, json: async () => ({}) });
 
 let telegramCalls;

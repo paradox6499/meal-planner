@@ -230,3 +230,30 @@ describe("упаковка из N штук в названии товара", ()
     Math.random.mockRestore();
   });
 });
+
+import { probeVkusvill } from "./vkusvillPrices.js";
+
+describe("probeVkusvill: проверка формы ответа каталога", () => {
+  afterEach(() => vi.unstubAllGlobals());
+  const stub = (items) => vi.stubGlobal("fetch", vi.fn().mockResolvedValue(mockMcpResponse({ items })));
+
+  it("нормальный товар (id, цена, единица, название) — ок", async () => {
+    stub([{ id: 606, name: "Морковь", price: { current: 50 }, unit: "кг" }]);
+    expect(await probeVkusvill()).toMatchObject({ ok: true });
+  });
+
+  it("поле id пропало (как при переименовании xml_id → id) — не ок, с названием поля", async () => {
+    stub([{ code: 606, name: "Морковь", price: { current: 50 }, unit: "кг" }]);
+    const r = await probeVkusvill();
+    expect(r.ok).toBe(false);
+    expect(r.shapeChanged).toBe(true);
+    expect(r.detail).toMatch(/нет поля id/);
+  });
+
+  it("старое имя xml_id тоже принимается; пропавшая цена — не ок", async () => {
+    stub([{ xml_id: 5, name: "Лук", price: { current: 40 }, unit: "кг" }]);
+    expect((await probeVkusvill()).ok).toBe(true);
+    stub([{ id: 5, name: "Лук", price: null, unit: "кг" }]);
+    expect((await probeVkusvill()).detail).toMatch(/price\.current/);
+  });
+});

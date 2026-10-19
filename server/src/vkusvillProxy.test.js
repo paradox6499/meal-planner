@@ -118,7 +118,7 @@ describe("общий ограничитель запросов к ВкусВил
 
 describe("probeVkusvill", () => {
   it("ответ с товарами -> ok", async () => {
-    fetch.mockResolvedValue(mcpOk({ items: [{ id: 1 }, { id: 2 }] }));
+    fetch.mockResolvedValue(mcpOk({ items: [{ id: 1, name: "Молоко", price: { current: 90 }, unit: "шт" }, { id: 2, name: "Хлеб", price: { current: 50 }, unit: "шт" }] }));
     const r = await probeVkusvill();
     expect(r.ok).toBe(true);
     expect(r.detail).toContain("2");
@@ -140,7 +140,7 @@ describe("probeVkusvill", () => {
   });
   it("проба не тратит общий лимит (диагностика должна быть честной даже при исчерпанном лимите)", async () => {
     vi.useFakeTimers();
-    fetch.mockResolvedValue(mcpOk({ items: [1] }));
+    fetch.mockResolvedValue(mcpOk({ items: [{ id: 1, name: "Молоко", price: { current: 90 }, unit: "шт" }] }));
     for (let i = 0; i < UPSTREAM_MAX_PER_MINUTE; i++) await callVkusvillTool("vkusvill_products_search", { q: `n${i}` });
     expect((await probeVkusvill()).ok).toBe(true);
   });
