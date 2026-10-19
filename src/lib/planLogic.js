@@ -4,7 +4,8 @@
 // функции без React/DOM тестируются напрямую в Vitest, без jsdom и рендера
 // компонентов — см. planLogic.test.js рядом.
 import { RECIPES, RECIPES_BY_ID, DEPARTMENTS, departmentOf, forbiddenIngredientsFor, recipeHasAllergen, effectiveRecipeCost } from "../data/recipes.js";
-import { resolveIngredientCost } from "./vkusvillRecipes.js";
+import { resolveIngredientCost, estimatePieceGrams } from "./vkusvillRecipes.js";
+import { isNotPurchased, mergeIngredientUnits, displayAmount } from "./shoppingList.js";
 import { applyDislikes } from "./dislikes.js";
 import { isNutritionDiet } from "./nutrition.js";
 
@@ -163,6 +164,50 @@ export function buildInitialPlan(pools, selectedMeals, budget, family, familyByM
   return { days, warnings: Array.from(emptyMealLabels) };
 }
 
+/** Если итог плана выше бюджета — заменяет самые дорогие блюда на более дешёвые из того же пула, пока не уложится
+ * (или пока заменять нечем). Подбор целится в сумму по цене блюда, а итог считается по списку покупок и может
+ * выйти выше: аудит 19.10.2026 — «Хватит» на шаге бюджета и план на 4 266 ₽ из 4 000. Заменяем по одному блюду
+ * за шаг и берём самую маленькую уступку по цене с наименее частым повтором, чтобы неделя не превратилась в одно
+ * и то же дешёвое блюдо. Возвращает новый planState (или тот же, если уже укладывается). */
+export function fitPlanToBudget(planState, pools, budget, family, priceByName, familyByMeal = {}, maxSwaps = 40) {
+  if (!planState || !priceByName || !pools) return planState;
+  const familyFor = (mealId) => familyByMeal[mealId] || family;
+  let state = planState;
+  for (let i = 0; i < maxSwaps; i++) {
+    const view = buildPlanView(state, pools, family, priceByName, familyByMeal);
+    if (view.mostlyUnpriced || view.total <= budget) return state;
+
+    const usage = {};
+    state.days.forEach((d) => d.dayMeals.forEach((s) => { usage[s.recipeId] = (usage[s.recipeId] || 0) + 1; }));
+
+    let best = null;
+    state.days.forEach((d, di) => {
+      const usedToday = new Set(d.dayMeals.map((s) => s.recipeId));
+      d.dayMeals.forEach((slot, si) => {
+        const pool = pools[slot.category] || [];
+        const current = pool.find((r) => r.id === slot.recipeId);
+        if (!current || current.cost == null) return;
+        const cheaper = pool.filter((r) => r.cost != null && r.cost < current.cost && !usedToday.has(r.id));
+        if (cheaper.length === 0) return;
+        const minUse = Math.min(...cheaper.map((r) => usage[r.id] || 0));
+        const replacement = cheaper.filter((r) => (usage[r.id] || 0) === minUse).reduce((a, b) => (b.cost > a.cost ? b : a));
+        const weight = current.cost * familyFor(slot.mealId);
+        if (!best || weight > best.weight) best = { di, si, replacement, weight };
+      });
+    });
+    if (!best) return state;
+
+    state = {
+      ...state,
+      days: state.days.map((d, di) => (di !== best.di ? d : {
+        ...d,
+        dayMeals: d.dayMeals.map((slot, si) => (si !== best.si ? slot : { ...slot, recipeId: best.replacement.id })),
+      })),
+    };
+  }
+  return state;
+}
+
 // разворачивает planState (id-шники) в полные объекты для отображения + считает
 // итоговую сумму и сгруппированный список покупок
 // priceByName — карта ингредиент->цена товара из fetchVkusvillPools
@@ -247,9 +292,16 @@ export function buildPlanView(planState, pools, family, priceByName, familyByMea
   });
 
   let unpricedCount = 0;
-  const shoppingList = Object.entries(ingredMap).map(([key, amount]) => {
-    const [name, unit] = key.split("|");
-    const roundedAmount = Math.round(amount);
+  // Позиции одного названия в разных единицах склеиваем, воду и соль не показываем, количество не меньше единицы
+  // (см. lib/shoppingList.js).
+  const entries = Object.entries(ingredMap)
+    .map(([key, amount]) => {
+      const [name, unit] = key.split("|");
+      return { name, unit, amount, lastDay: lastDayByKey[key] || 0 };
+    })
+    .filter((e) => !isNotPurchased(e.name));
+  const shoppingList = mergeIngredientUnits(entries, estimatePieceGrams).map(({ name, unit, amount, lastDay }) => {
+    const roundedAmount = displayAmount(amount, unit);
     let cost = null;
     if (priceByName) {
       // Единая логика с attachRealCosts (та же функция) — включая оценку
@@ -269,7 +321,7 @@ export function buildPlanView(planState, pools, family, priceByName, familyByMea
     // это по названию мы не можем, поэтому предупреждение мягкое, не запрет).
     // Овощи/молочное в среднем спокойно лежат неделю, не флагуем их, чтобы
     // не обесценить предупреждение частым ложным срабатыванием.
-    const buyLater = dept === "Мясо и рыба" && (lastDayByKey[key] || 0) >= LATE_WEEK_DAY_THRESHOLD;
+    const buyLater = dept === "Мясо и рыба" && lastDay >= LATE_WEEK_DAY_THRESHOLD;
     return { name, amount: roundedAmount, unit, dept, cost, buyLater };
   });
   const grouped = DEPARTMENTS.map((d) => ({

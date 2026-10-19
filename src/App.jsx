@@ -117,7 +117,7 @@ export default function MealPlanner() {
   // Слоты, сборка плана, повтор цен, засчитывание и синхронизация — usePlanSession.
   // Вызывается ПОСЛЕ useReferral (см. комментарий у usePlanStatus выше).
   const {
-    planSlots, planSlotId, store, setStore, planCreatedAt, budget, setBudget, done, assembling, retryingPrices, generationPending, catalogReason, priceRetryFailed, handleRetryPrices, planView, autoPriceRetryPending, canAddPlanSlot, handleFinish, swapMeal, handleNewPlan, switchToSlot, removeSlot, startNewPlanSlot, planToReturnTo, handleBackToPlan,
+    planSlots, planSlotId, store, setStore, planCreatedAt, budget, setBudget, done, assembling, retryingPrices, generationPending, catalogReason, priceRetryFailed, handleRetryPrices, recomposeNote, setRecomposeNote, planView, autoPriceRetryPending, canAddPlanSlot, handleFinish, swapMeal, handleNewPlan, switchToSlot, removeSlot, startNewPlanSlot, planToReturnTo, handleBackToPlan,
   } = usePlanSession({
     initialPlanSlots,
     family, familyByMeal, planStatus, mealTimes, setLimitBlocked, meals, setShowAccount, diet, cuisines, devices, allergies, dislikes, maxCookTime, hasProfile, profileSnapshot, setHasProfile, setProfileNote, setStep, setOpenRecipe, resetAnswersToDefaults,
@@ -390,6 +390,12 @@ export default function MealPlanner() {
         )}
 
         {/* Служебные заметки — под планом, а не над ним: на первом экране человек должен видеть блюда (аудит 19.10.2026). */}
+        {recomposeNote && !showAccount && !limitBlocked && !assembling && done && planView && (
+          <DismissibleNote tone="info" onClose={() => setRecomposeNote(false)}>
+            Настоящие цены загрузились, и мы заново подобрали блюда, чтобы план уложился в ваш бюджет.
+          </DismissibleNote>
+        )}
+
         {profileNote && !showAccount && !limitBlocked && !assembling && done && planView && (
           <DismissibleNote tone="info" onClose={() => setProfileNote(null)}>
             Запомнили: {profileNote}. В следующий раз спросим только магазин и бюджет. Изменить — в{" "}

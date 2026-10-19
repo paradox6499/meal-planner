@@ -24,6 +24,7 @@
 
 import { searchRecipes, resolvePrices, searchProducts, getProductAnalogs, productIdOf } from "./vkusvillMcp.js";
 import { findProductFor } from "./productMatch.js";
+import { isNotPurchased, isSpice } from "./shoppingList.js";
 import { recipeHasDislike, DISLIKE_MIN_POOL } from "./dislikes.js";
 import { isNutritionDiet, matchesNutritionDiet } from "./nutrition.js";
 import { resolvePricesViaBackend } from "./backend.js";
@@ -286,7 +287,7 @@ const AVG_PIECE_GRAMS = [
   { re: /апельсин/i, grams: 180 },
 ];
 
-function estimatePieceGrams(name) {
+export function estimatePieceGrams(name) {
   const hit = AVG_PIECE_GRAMS.find(({ re }) => re.test(name));
   return hit ? hit.grams : null;
 }
@@ -297,7 +298,15 @@ function estimatePieceGrams(name) {
  * planLogic.js), чтобы правило "когда доверяем совпадению" не разъезжалось
  * между ними на два независимых места. */
 export function resolveIngredientCost(name, amount, unit, info) {
+  if (isNotPurchased(name)) return 0; // вода и соль — не покупка
   if (!info) return null;
+  if (unit === "шт" && info.productUnit === "шт") {
+    // Штуки в рецепте и «штука» в каталоге — не всегда одно и то же. Упаковка с известным числом штук
+    // («Яйцо куриное, 10 шт» за 119 ₽): цена одной штуки — доля упаковки. Специя («лавровый лист 3 шт»):
+    // в корзину идёт одна упаковка. Иначе — 1:1, как у лимона или авокадо, которые продаются поштучно.
+    if (info.packageUnit === "шт" && info.packageAmount > 0) return (info.price / info.packageAmount) * amount;
+    if (isSpice(name)) return info.price;
+  }
   if (isWeightOrVolumeUnit(unit) === isWeightOrVolumeUnit(info.productUnit)) {
     return pricePerBaseUnit(info.price, info.productUnit) * amount;
   }
@@ -360,7 +369,8 @@ export async function attachRealCosts(pools) {
       if (recipe.ingr.length === 0) return;
       let total = 0;
       let matchedCount = 0;
-      for (const [name, amount, unit] of recipe.ingr) {
+      const purchasable = recipe.ingr.filter(([name]) => !isNotPurchased(name));
+      for (const [name, amount, unit] of purchasable) {
         const info = priceByName.get(name);
         const itemCost = resolveIngredientCost(name, amount, unit, info);
         if (itemCost == null) continue;
@@ -389,10 +399,10 @@ export async function attachRealCosts(pools) {
       // совпадением молча выглядело БЕСПЛАТНЫМ вместо "цена неизвестна",
       // и всё это тихо суммировалось в итог. null — честный сигнал "нет
       // данных", buildPlanView/ResultView показывают его как "—", а не как 0.
-      const matchedEnough = matchedCount > recipe.ingr.length / 2;
+      const matchedEnough = matchedCount > purchasable.length / 2;
       if (total > 0 && matchedEnough) {
         recipe.cost = Math.round(total);
-        recipe.isRealPrice = matchedCount === recipe.ingr.length;
+        recipe.isRealPrice = matchedCount === purchasable.length;
       }
     });
   });

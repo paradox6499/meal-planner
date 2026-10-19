@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildPools, buildInitialPlan, buildPlanView, interleaveGroups, computeBudgetStreak, computeRecentSavings } from "./planLogic.js";
+import { buildPools, buildInitialPlan, buildPlanView, fitPlanToBudget, interleaveGroups, computeBudgetStreak, computeRecentSavings } from "./planLogic.js";
 import { ALLERGENS } from "../data/recipes.js";
 
 const DIETS = ["any", "pp", "veg", "vegan", "gf"];
@@ -635,5 +635,40 @@ describe("buildPools — диеты по КБЖУ у встроенных рец
       const pools = buildPools(diet, [], devices, [], null);
       for (const cat of ["breakfast", "main", "snack"]) expect(pools[cat].length).toBe(any[cat].length);
     }
+  });
+});
+
+
+describe("fitPlanToBudget", () => {
+  // Синтетический пул: пять блюд по возрастанию цены, у каждого один ингредиент по цене блюда.
+  const mk = (id, cost) => ({ id, name: `Блюдо ${id}`, category: "main", cost, isRealPrice: true, ingr: [[`продукт${id}`, 1, "шт"]] });
+  const pools = { main: [mk("a", 100), mk("b", 150), mk("c", 200), mk("d", 300), mk("e", 400)] };
+  const priceByName = new Map(pools.main.map((r) => [r.ingr[0][0], { price: r.cost, productUnit: "шт" }]));
+  const meals = [{ id: "dinner", label: "Ужин", category: "main" }];
+  const stateOf = (ids) => ({ days: ids.map((recipeId, i) => ({ day: i + 1, dayMeals: [{ mealId: "dinner", mealLabel: "Ужин", category: "main", recipeId }] })), warnings: [] });
+  const total = (state) => buildPlanView(state, pools, 1, priceByName, {}).total;
+
+  it("укладывается в бюджет, заменяя самые дорогие блюда на более дешёвые", () => {
+    const state = stateOf(["e", "e", "d", "c", "c", "b", "b"]); // 400+400+300+200+200+150+150 = 1800
+    expect(total(state)).toBe(1800);
+    const fitted = fitPlanToBudget(state, pools, 1400, 1, priceByName);
+    expect(total(fitted)).toBeLessThanOrEqual(1400);
+    expect(fitted.days).toHaveLength(7);
+  });
+
+  it("уже в бюджете — тот же план без изменений", () => {
+    const state = stateOf(["a", "b", "a", "b", "a", "b", "a"]);
+    expect(fitPlanToBudget(state, pools, 5000, 1, priceByName)).toBe(state);
+  });
+
+  it("нечем заменять — возвращает лучшее, что можно, и не зацикливается", () => {
+    const state = stateOf(["a", "a", "a", "a", "a", "a", "a"]); // 700, дешевле некуда
+    const fitted = fitPlanToBudget(state, pools, 300, 1, priceByName);
+    expect(total(fitted)).toBe(700);
+  });
+
+  it("без цен (priceByName нет) — ничего не трогает", () => {
+    const state = stateOf(["e", "e", "e", "e", "e", "e", "e"]);
+    expect(fitPlanToBudget(state, pools, 100, 1, null)).toBe(state);
   });
 });

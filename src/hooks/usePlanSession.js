@@ -8,7 +8,7 @@ import { clearMcpCache } from "../lib/vkusvillMcp.js";
 import { attachRealCosts, fetchVkusvillPools } from "../lib/vkusvillRecipes.js";
 import { saveProfile } from "../lib/profile.js";
 import { MAX_PRO_SLOTS, saveActivePlanSlot, setActiveSlotId, genSlotId, removeActivePlanSlot } from "../lib/activePlan.js";
-import { buildPlanView, buildPools, buildInitialPlan } from "../lib/planLogic.js";
+import { buildPlanView, buildPools, buildInitialPlan, fitPlanToBudget } from "../lib/planLogic.js";
 import { checkPlanStatus, savePlanToHistory, reportPlanGenerated, submitPlanToBackend } from "../lib/backend.js";
 import { trackEvent } from "../lib/analytics.js";
 import { hapticImpact, hapticSelect, hapticNotify } from "../lib/haptics.js";
@@ -133,6 +133,7 @@ export function usePlanSession({
   // повтор молча получал бы тот же пустой результат из кэша, ни разу не
   // спросив сеть заново. clearMcpCache() перед повтором — чтобы "повторить"
   // означало по-настоящему повторить, а не отдать то же самое из кэша.
+  const [recomposeNote, setRecomposeNote] = useState(false);
   const handleRetryPrices = async () => {
     if (!pools) return;
     send({ type: "priceRetryStarted" });
@@ -154,7 +155,21 @@ export function usePlanSession({
       // та же грубая эвристика, что и mostlyUnpriced в planLogic.js: честно
       // показываем, что попытка не удалась, а не молча оставляем ту же надпись.
       send({ type: "priceRetrySucceeded", epoch, prices: fresh });
-      if (view && canCompletePendingBuild({ pools, view })) completeGeneration(view);
+      if (view && canCompletePendingBuild({ pools, view })) {
+        // План собирался по неполным ценам и мог выйти из бюджета, когда пришли настоящие. Подбираем блюда заново
+        // по полным ценам (рецепты в пуле уже пересчитаны attachRealCosts) и сообщаем об этом.
+        Object.values(pools).forEach((list) => list.sort((a, b) => (a.cost ?? Infinity) - (b.cost ?? Infinity)));
+        const selected = MEALS.filter((m) => meals.includes(m.id));
+        const recomposed = fitPlanToBudget(buildInitialPlan(pools, selected, budget, family, familyByMeal), pools, budget, family, fresh, familyByMeal);
+        const recomposedView = buildPlanView(recomposed, pools, family, fresh, familyByMeal);
+        if (recomposedView.total < view.total) {
+          send({ type: "planRecomposed", planState: recomposed });
+          setRecomposeNote(true);
+          completeGeneration(recomposedView);
+        } else {
+          completeGeneration(view);
+        }
+      }
     } catch (err) {
       console.warn("Повторная попытка получить цены не удалась:", err.message);
       send({ type: "priceRetryFailed", epoch });
@@ -312,7 +327,11 @@ export function usePlanSession({
       resolvedPools = buildPools(diet, cuisines, devices, allergies, maxCookTime, dislikes);
     }
 
-    const newPlanState = buildInitialPlan(resolvedPools, selectedMeals, budget, family, familyByMeal);
+    let newPlanState = buildInitialPlan(resolvedPools, selectedMeals, budget, family, familyByMeal);
+    // Итог по списку покупок может выйти выше бюджета, на который целился подбор по цене блюд: дешевеем блюда.
+    if (store === "vv" && resolvedPriceByName) {
+      newPlanState = fitPlanToBudget(newPlanState, resolvedPools, budget, family, resolvedPriceByName, familyByMeal);
+    }
     const freshPlanView = buildPlanView(newPlanState, resolvedPools, family, resolvedPriceByName, familyByMeal);
     // Вырожденную сборку не засчитываем и не кладём в историю — см. assessPlanBuild.
     const { degraded, reason } = assessPlanBuild({ store, catalogError, view: freshPlanView });
@@ -476,6 +495,8 @@ export function usePlanSession({
     catalogReason,
     priceRetryFailed,
     handleRetryPrices,
+    recomposeNote,
+    setRecomposeNote,
     planView,
     autoPriceRetryPending,
     canAddPlanSlot,

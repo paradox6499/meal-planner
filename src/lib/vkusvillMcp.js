@@ -284,7 +284,11 @@ export function parsePackageAmount(productName) {
   // ожидается, \b тут ловил бы false negative на КАЖДОМ названии, кончающемся
   // на единицу измерения — то есть буквально на всех, поймано тестом.
   const match = /(\d+(?:[.,]\d+)?)\s*(кг|г|мл|л)(?![а-яёА-ЯЁ])/i.exec(normalized);
-  if (!match) return null;
+  if (!match) {
+    // Упаковка из N штук («Яйцо куриное С1, 10 шт»): цена одной штуки — доля упаковки.
+    const pieces = /(\d+)\s*шт(?![а-яёА-ЯЁ])/i.exec(normalized);
+    return pieces && Number(pieces[1]) > 1 ? { amount: Number(pieces[1]), unit: "шт" } : null;
+  }
   let amount = parseFloat(match[1].replace(",", "."));
   let unit = match[2].toLowerCase();
   if (unit === "кг") { amount *= 1000; unit = "г"; }

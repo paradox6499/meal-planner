@@ -217,3 +217,16 @@ describe("resolveIngredientPricesWithCache: потолок живых запро
     expect(fetch).toHaveBeenCalledTimes(5);
   });
 });
+
+describe("упаковка из N штук в названии товара", () => {
+  it("«Яйцо куриное С1, 10 шт» -> packageAmount 10 шт (цена штуки — доля упаковки)", async () => {
+    const db = openDb(":memory:");
+    vi.stubGlobal("fetch", vi.fn());
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    fetch.mockResolvedValue(mockMcpResponse({ items: [{ id: 5, name: "Яйцо куриное С1, 10 шт", price: { current: 119 }, unit: "шт" }] }));
+    const result = await resolveIngredientPricesWithCache(db, ["Яйцо куриное"]);
+    expect(result.get("Яйцо куриное")).toMatchObject({ price: 119, productUnit: "шт", packageAmount: 10, packageUnit: "шт" });
+    vi.unstubAllGlobals();
+    Math.random.mockRestore();
+  });
+});

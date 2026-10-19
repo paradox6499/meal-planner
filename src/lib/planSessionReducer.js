@@ -115,6 +115,10 @@ export function planSessionReducer(state, action) {
       return { ...state, planState: { ...prev, days } };
     }
 
+    // После загрузки настоящих цен блюда подобраны заново (план был собран по неполным ценам и вышел из бюджета).
+    case "planRecomposed":
+      return { ...state, planState: action.planState };
+
     case "priceRetryStarted":
       return { ...state, retryingPrices: true, priceRetryFailed: false };
     // Цены пришли. Если на экране уже другой план (epoch сменился) — его цены не
