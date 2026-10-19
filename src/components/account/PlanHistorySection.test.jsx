@@ -45,12 +45,56 @@ describe("PlanHistorySection: удаление плана", () => {
   });
 });
 
+describe("SwipeToDelete: касания (touch)", () => {
+  afterEach(cleanup);
+  const swipeTouch = (el, fromX, toX, dy = 0) => {
+    const mk = (type, x, y) => {
+      const ev = new Event(type, { bubbles: true, cancelable: true });
+      ev.touches = type === "touchend" ? [] : [{ clientX: x, clientY: y }];
+      el.dispatchEvent(ev);
+      return ev;
+    };
+    mk("touchstart", fromX, 10);
+    const moves = [];
+    const steps = 6;
+    for (let i = 1; i <= steps; i++) moves.push(mk("touchmove", fromX + ((toX - fromX) * i) / steps, 10 + (dy * i) / steps));
+    mk("touchend");
+    return moves;
+  };
+
+  it("палец вправо и влево дальше порога просит удалить; прокрутка при этом запрещена (preventDefault)", () => {
+    const onDelete = vi.fn();
+    render(<SwipeToDelete onDelete={onDelete}><div>строка</div></SwipeToDelete>);
+    const row = screen.getByText("строка");
+    const moves = swipeTouch(row, 40, 40 + SWIPE_DELETE_THRESHOLD_PX + 20);
+    expect(moves.some((m) => m.defaultPrevented)).toBe(true);
+    expect(onDelete).toHaveBeenCalledTimes(1);
+    swipeTouch(row, 300, 300 - SWIPE_DELETE_THRESHOLD_PX - 20);
+    expect(onDelete).toHaveBeenCalledTimes(2);
+  });
+
+  it("вертикальный жест — это прокрутка: не удаляет и не блокируется", () => {
+    const onDelete = vi.fn();
+    render(<SwipeToDelete onDelete={onDelete}><div>строка</div></SwipeToDelete>);
+    const moves = swipeTouch(screen.getByText("строка"), 40, 70, 200);
+    expect(moves.every((m) => !m.defaultPrevented)).toBe(true);
+    expect(onDelete).not.toHaveBeenCalled();
+  });
+
+  it("короткий свайп не удаляет", () => {
+    const onDelete = vi.fn();
+    render(<SwipeToDelete onDelete={onDelete}><div>строка</div></SwipeToDelete>);
+    swipeTouch(screen.getByText("строка"), 40, 80);
+    expect(onDelete).not.toHaveBeenCalled();
+  });
+});
+
 describe("SwipeToDelete", () => {
   afterEach(cleanup);
   const swipe = (el, dx, dy = 0) => {
-    fireEvent.pointerDown(el, { clientX: 10, clientY: 10, pointerId: 1 });
-    fireEvent.pointerMove(el, { clientX: 10 + dx, clientY: 10 + dy, pointerId: 1 });
-    fireEvent.pointerUp(el, { clientX: 10 + dx, clientY: 10 + dy, pointerId: 1 });
+    fireEvent.pointerDown(el, { clientX: 10, clientY: 10, pointerId: 1, pointerType: "mouse" });
+    fireEvent.pointerMove(el, { clientX: 10 + dx, clientY: 10 + dy, pointerId: 1, pointerType: "mouse" });
+    fireEvent.pointerUp(el, { clientX: 10 + dx, clientY: 10 + dy, pointerId: 1, pointerType: "mouse" });
   };
 
   it("протяжка вправо дальше порога просит удалить", () => {

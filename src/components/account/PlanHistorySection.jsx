@@ -49,6 +49,7 @@ export function PlanHistorySection({ planHistory, onDeletePlan }) {
         <p style={styles.acctSectionHint}>Пока пусто — здесь появятся планы, которые вы соберёте.</p>
       ) : (
         <div style={styles.stack}>
+          <p style={{ ...styles.acctSectionHint, margin: 0 }}>Нажмите на план, чтобы посмотреть. Чтобы удалить, потяните его в сторону.</p>
           {visible.map((p) => {
             const open = openId === p.id;
             const dateLabel = new Date(p.createdAt).toLocaleDateString("ru-RU", { day: "numeric", month: "long" });
