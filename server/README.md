@@ -156,9 +156,9 @@ Fly.io), у него самый простой UI без командной ст
 
 - Приложение и юридические страницы: `https://s-edim.ru/` (GitHub Pages, пользовательский домен; `www` и старый
   адрес `paradox6499.github.io/meal-planner` перенаправляют сюда).
-- Сервер: `https://api.s-edim.ru` — CNAME на `meal-planner-a96v.onrender.com` (Render, Custom Domains). Вебхуки Telegram и ЮKassa,
-  `VITE_BACKEND_URL` и `WEBAPP_URL` смотрят на эти адреса. При переезде сервера на другой хостинг
-  меняется только DNS-запись `api` (CNAME -> A), остальное не трогается.
+- Сервер: `https://api.s-edim.ru` — с 18.10.2026 A-запись на VPS Timeweb (`104.171.138.56`); раньше — Render. Вебхуки
+  Telegram и ЮKassa, `VITE_BACKEND_URL` и `WEBAPP_URL` смотрят на эти адреса. **Эксплуатация VPS — `docs/runbook-vps.md`**
+  (деплой, откат, бэкапы, секреты, что делать при сбоях); разделы ниже про «Render → Shell / Suspend» устарели.
 
 ## Выдать Pro вручную (для тестирования, не оплачивая)
 
