@@ -227,7 +227,7 @@ export default function MealPlanner() {
         </div>
 
         {referralNote && !showAccount && (
-          <DismissibleNote onClose={() => setReferralNote(false)}>
+          <DismissibleNote tone="info" onClose={() => setReferralNote(false)}>
             Бонус за приглашение действует только для тех, кто открывает «Съедим» впервые, — вы уже пользовались приложением.
           </DismissibleNote>
         )}
@@ -239,7 +239,7 @@ export default function MealPlanner() {
         )}
 
         {familyJoinedNote && !showAccount && (
-          <DismissibleNote onClose={() => setFamilyJoinedNote(false)}>
+          <DismissibleNote tone="info" onClose={() => setFamilyJoinedNote(false)}>
             Вы вступили в семью: отметки «уже есть дома» в списке покупок теперь общие. Состав семьи — в{" "}
             <button onClick={() => { setFamilyJoinedNote(false); setShowAccount(true); }} style={styles.inlineLinkBtn}>Аккаунте</button>.
           </DismissibleNote>
@@ -363,17 +363,6 @@ export default function MealPlanner() {
           />
         )}
 
-        {profileNote && !showAccount && !limitBlocked && !assembling && done && planView && (
-          <DismissibleNote onClose={() => setProfileNote(null)}>
-            Запомнили: {profileNote}. В следующий раз спросим только магазин и бюджет. Изменить — в{" "}
-            <button onClick={() => setShowAccount(true)} style={styles.inlineLinkBtn}>Аккаунте</button>.
-          </DismissibleNote>
-        )}
-
-        {isFirstSession && !acquisitionAsked && !showAccount && !limitBlocked && !assembling && done && planView && (
-          <AcquisitionCard onAnswer={finishAcquisition} onClose={() => finishAcquisition(null)} />
-        )}
-
         {!showAccount && !limitBlocked && !assembling && done && planView && (
           <ResultView
             plan={planView}
@@ -399,6 +388,19 @@ export default function MealPlanner() {
             onToggleFamilyPantry={familyStatus?.inFamily && familyStatus.active !== false ? handleToggleFamilyPantry : null}
           />
         )}
+
+        {/* Служебные заметки — под планом, а не над ним: на первом экране человек должен видеть блюда (аудит 19.10.2026). */}
+        {profileNote && !showAccount && !limitBlocked && !assembling && done && planView && (
+          <DismissibleNote tone="info" onClose={() => setProfileNote(null)}>
+            Запомнили: {profileNote}. В следующий раз спросим только магазин и бюджет. Изменить — в{" "}
+            <button onClick={() => setShowAccount(true)} style={styles.inlineLinkBtn}>Аккаунте</button>.
+          </DismissibleNote>
+        )}
+
+        {isFirstSession && !acquisitionAsked && !showAccount && !limitBlocked && !assembling && done && planView && (
+          <AcquisitionCard onAnswer={finishAcquisition} onClose={() => finishAcquisition(null)} />
+        )}
+
       </div>
 
       {openRecipe && (

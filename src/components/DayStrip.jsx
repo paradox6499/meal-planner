@@ -5,6 +5,9 @@ import { styles } from "../styles.js";
 import { hapticSelect } from "../lib/haptics.js";
 import { describePlanDay } from "../lib/planDays.js";
 
+// «Уменьшить движение» в настройках телефона: плавную прокрутку заменяем мгновенной.
+const reducedMotion = () => typeof window !== "undefined" && !!window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
+
 export const dayBlockId = (day) => `plan-day-${day}`;
 // Линия под липкой полосой: день считается «текущим», когда его блок дошёл до неё.
 const ACTIVE_LINE_PX = 110;
@@ -48,7 +51,7 @@ export function DayStrip({ days, planStartISO }) {
     hapticSelect();
     setActiveDay(day);
     lockUntil.current = Date.now() + 900;
-    document.getElementById(dayBlockId(day))?.scrollIntoView({ behavior: "smooth", block: "start" });
+    document.getElementById(dayBlockId(day))?.scrollIntoView({ behavior: reducedMotion() ? "auto" : "smooth", block: "start" });
   };
 
   if (days.length < 2) return null;

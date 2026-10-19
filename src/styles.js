@@ -5,7 +5,8 @@
 // градиентного фона, тонкие hairline-обводки вместо жёстких рамок, системный
 // шрифт Apple вместо декоративных веб-шрифтов, всё скруглено и "парит".
 
-export const FONT = "-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'SF Pro Display', 'Helvetica Neue', Arial, sans-serif";
+// system-ui: на iPhone это SF Pro, на Android Roboto, на Windows Segoe UI (раньше Arial: Telegram Desktop на Windows выглядел грубее).
+export const FONT = "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif";
 
 // Цвета читаются из CSS-переменных (см. <style> в JSX), а не хардкожены —
 // так работает автоматическая тёмная тема через prefers-color-scheme, без
@@ -46,7 +47,7 @@ export const styles = {
   // height: 32 — та же высота, что у круглой accountBtn (шестерёнки) рядом
   // в шапке: раньше разной высоты пилюля и кружок в одном ряду выглядели
   // рассинхронизированно, хотя обе уже были "стеклянными".
-  resetBtn: { display: "flex", alignItems: "center", gap: 5, height: 32, ...glass(0.5, 8), border: "1px solid var(--hairline)", borderRadius: 999, padding: "0 13px", fontSize: 12, fontWeight: 500, color: "var(--text-secondary)", cursor: "pointer" },
+  resetBtn: { display: "flex", alignItems: "center", gap: 5, height: 32, ...glass(0.5, 8), border: "1px solid var(--hairline)", borderRadius: 999, padding: "0 13px", fontSize: 13, fontWeight: 500, color: "var(--text-secondary)", cursor: "pointer", whiteSpace: "nowrap", flexShrink: 0 },
   // Переключатель слотов плана (см. PlanSlotsBar) — компактный ряд чипов над
   // списком покупок, тот же язык, что у storeChip/rowChip выше, но горизонтально
   // и мельче (это навигация между уже собранными планами, не выбор в визарде).
@@ -64,8 +65,8 @@ export const styles = {
   // над ним (у них свой отступ всего 22px сверху, но снизу ничего не было).
   // Увеличил и добавил чуть паддинга — рифмуется с остальными вертикальными
   // интервалами в карточке (18-22px), а не выбивается мелким зазором.
-  quickHint: { fontSize: 12, color: "var(--text-tertiary)", textAlign: "center", marginTop: 24, paddingTop: 4, lineHeight: 1.4 },
-  inlineLinkBtn: { background: "none", border: "none", padding: 0, color: ACCENT, fontWeight: 600, fontSize: 12, cursor: "pointer", textDecoration: "underline" },
+  quickHint: { fontSize: 13, color: "var(--text-tertiary)", textAlign: "center", marginTop: 24, paddingTop: 4, lineHeight: 1.45 },
+  inlineLinkBtn: { background: "none", border: "none", padding: 0, color: "var(--accent-text)", fontWeight: 600, fontSize: 13, cursor: "pointer", textDecoration: "underline" },
   legalLinkBtn: { background: "none", border: "none", padding: "12px 0", minHeight: 44, color: ACCENT, fontWeight: 600, fontSize: 13, cursor: "pointer", textDecoration: "underline", textAlign: "left" },
   // Живая жалоба в чате: "надпись Аккаунт близко к кнопке" — marginBottom
   // был всего 2px, заголовок практически прилипал к пилюле "Назад" сразу
@@ -75,19 +76,19 @@ export const styles = {
   accountHeaderRow: { display: "flex", alignItems: "center", marginBottom: 14 },
   acctSection: { marginTop: 18 },
   acctSectionTitle: { fontSize: 15, fontWeight: 700, marginBottom: 4 },
-  acctSectionHint: { fontSize: 12.5, color: "var(--text-tertiary)", lineHeight: 1.45, margin: "0 0 12px 0" },
+  acctSectionHint: { fontSize: 13, color: "var(--text-tertiary)", lineHeight: 1.45, margin: "0 0 12px 0" },
   acctLabel: { fontSize: 12, fontWeight: 600, color: "var(--text-tertiary)", textTransform: "uppercase", letterSpacing: "0.02em", marginBottom: 8 },
   acctDivider: { height: 1, background: "var(--hairline)", margin: "22px 0" },
-  acctClearBtn: { width: "100%", background: "none", border: "none", color: "var(--danger)", fontSize: 12.5, fontWeight: 500, cursor: "pointer", padding: "10px 0 0 0" },
+  acctClearBtn: { width: "100%", background: "none", border: "none", color: "var(--danger-text)", fontSize: 13, fontWeight: 500, cursor: "pointer", padding: "10px 0 0 0" },
   // Отдельный стиль от acctClearBtn: та кнопка красная (--danger) — уместно
   // для "Сбросить профиль" (реально необратимое действие), но не для
   // простого "Назад" здесь — переход назад ничего не удаляет и не должен
   // выглядеть тревожно. Жалоба в чате: кнопка была прижата почти вплотную к
   // "Открыть Pro" над ней (padding-top 10px у acctClearBtn) — увеличил
   // отступ и убрал ложный красный акцент.
-  consentRow: { display: "flex", alignItems: "flex-start", gap: 8, marginTop: 12, fontSize: 12, lineHeight: 1.5, color: "var(--text-secondary)", textAlign: "left", cursor: "pointer" },
+  consentRow: { display: "flex", alignItems: "flex-start", gap: 8, marginTop: 12, fontSize: 13, lineHeight: 1.45, color: "var(--text-secondary)", textAlign: "left", cursor: "pointer" },
   consentBox: { width: 18, height: 18, marginTop: 1, flexShrink: 0, accentColor: ACCENT },
-  proLinkBtn: { width: "100%", background: "none", border: "none", color: ACCENT, fontSize: 13, fontWeight: 600, cursor: "pointer", padding: "14px 4px 0 4px", lineHeight: 1.4, textAlign: "center" },
+  proLinkBtn: { width: "100%", background: "none", border: "none", color: "var(--accent-text)", fontSize: 13, fontWeight: 600, cursor: "pointer", padding: "14px 4px 0 4px", lineHeight: 1.4, textAlign: "center" },
   limitBackBtn: { width: "100%", background: "none", border: "none", color: "var(--text-tertiary)", fontSize: 13, fontWeight: 500, cursor: "pointer", padding: "20px 0 0 0" },
   // "Купить ещё один план" — сознательно НЕ такой же заливкой, как
   // navBtnPrimary ("Открыть Pro") — более лёгкое, менее обязывающее решение
@@ -138,7 +139,7 @@ export const styles = {
   freeBadge: { fontSize: 10.5, fontWeight: 700, color: "var(--text-tertiary)", background: "var(--track-bg)", padding: "2px 8px", borderRadius: 999, marginLeft: "auto" },
   proBadge: { fontSize: 10.5, fontWeight: 700, color: "#fff", background: ACCENT, padding: "2px 8px", borderRadius: 999, marginLeft: "auto" },
   historyDetail: { padding: "10px 14px", display: "flex", flexDirection: "column", gap: 6 },
-  historyDay: { display: "flex", flexDirection: "column", gap: 2, fontSize: 12.5, color: "var(--text-secondary)" },
+  historyDay: { display: "flex", flexDirection: "column", gap: 2, fontSize: 13, color: "var(--text-secondary)" },
   historyDayLabel: { fontSize: 11, fontWeight: 700, color: "var(--text-tertiary)", textTransform: "uppercase" },
   historyDishBtn: { background: "none", border: "none", padding: 0, margin: 0, font: "inherit", color: "inherit", cursor: "pointer", textDecoration: "underline", textDecorationColor: "rgba(10,132,255,0.35)" },
   proHero: {
@@ -165,7 +166,7 @@ export const styles = {
   stepBody: { minHeight: 260, display: "flex", flexDirection: "column" },
   stepIcon: { width: 40, height: 40, borderRadius: 14, background: "rgba(10,132,255,0.12)", color: ACCENT, display: "flex", alignItems: "center", justifyContent: "center", marginBottom: 14 },
   stepTitle: { fontSize: 21, fontWeight: 700, letterSpacing: "-0.01em", margin: "0 0 4px 0" },
-  stepSub: { fontSize: 13.5, color: "var(--text-secondary)", margin: "0 0 18px 0", lineHeight: 1.4 },
+  stepSub: { fontSize: 14, color: "var(--text-secondary)", margin: "0 0 18px 0", lineHeight: 1.45 },
   grid2: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 },
   storeChip: (active) => ({
     textAlign: "left", padding: "13px 15px", borderRadius: 18, cursor: "pointer",
@@ -187,7 +188,7 @@ export const styles = {
     boxShadow: active ? "0 4px 14px rgba(10,132,255,0.18)" : "none",
     color: "var(--text-primary)",
   }),
-  chipHint: { fontSize: 12, color: "var(--text-tertiary)", marginTop: 4, lineHeight: 1.4, fontWeight: 400 },
+  chipHint: { fontSize: 13, color: "var(--text-tertiary)", marginTop: 4, lineHeight: 1.45, fontWeight: 400 },
   stack: { display: "flex", flexDirection: "column", gap: 8 },
   counterRow: { display: "flex", alignItems: "center", justifyContent: "center", gap: 24, marginTop: 8 },
   counterBtn: { width: 44, height: 44, borderRadius: "50%", border: "1px solid var(--hairline)", ...glass(0.6, 10), color: ACCENT, fontSize: 20, cursor: "pointer", lineHeight: 1, boxShadow: "0 2px 8px rgba(0,0,0,0.06)" },
@@ -232,7 +233,7 @@ export const styles = {
     display: "flex", alignItems: "center", gap: 4, lineHeight: 1, ...glass(0.4, 8), border: "1px solid var(--hairline)",
     color: "var(--text-secondary)", fontSize: 13.5, fontWeight: 500, cursor: "pointer", padding: "11px 18px", borderRadius: 999,
   },
-  navBtnPrimary: { display: "flex", alignItems: "center", gap: 4, lineHeight: 1, background: `linear-gradient(180deg, ${ACCENT}, #0066DB)`, border: "none", color: "#fff", fontSize: 13.5, fontWeight: 600, cursor: "pointer", padding: "11px 18px", borderRadius: 999, marginLeft: "auto", boxShadow: "0 6px 16px rgba(10,132,255,0.35)" },
+  navBtnPrimary: { display: "flex", alignItems: "center", gap: 4, lineHeight: 1, background: `linear-gradient(180deg, #0071E3, #0058C2)`, border: "none", color: "#fff", fontSize: 13.5, fontWeight: 600, cursor: "pointer", padding: "11px 18px", borderRadius: 999, marginLeft: "auto", boxShadow: "0 6px 16px rgba(10,132,255,0.35)" },
   // Только для "Назад" в шапке Аккаунта (см. AccountView) — та же геометрия,
   // что у navBtn (display/alignItems/gap/lineHeight), но плотнее по padding:
   // navBtn рассчитан на пару с navBtnPrimary в одном ряду, эта кнопка стоит
@@ -245,7 +246,8 @@ export const styles = {
     color: "var(--text-secondary)", fontSize: 13.5, fontWeight: 500, cursor: "pointer", padding: "8px 13px", borderRadius: 999,
   },
   resultHeader: { marginBottom: 14 },
-  warningBox: { display: "flex", gap: 8, alignItems: "flex-start", background: "var(--warning-soft)", border: "1px solid var(--warning-border)", borderRadius: 16, padding: "12px 14px", fontSize: 12.5, color: "var(--warning-text)", marginBottom: 14, lineHeight: 1.4 },
+  infoBox: { display: "flex", gap: 8, alignItems: "flex-start", background: "rgba(10,132,255,0.10)", border: "1px solid var(--hairline)", borderRadius: 16, padding: "12px 14px", fontSize: 13, color: "var(--text-secondary)", marginBottom: 14, lineHeight: 1.45 },
+  warningBox: { display: "flex", gap: 8, alignItems: "flex-start", background: "var(--warning-soft)", border: "1px solid var(--warning-border)", borderRadius: 16, padding: "12px 14px", fontSize: 13, color: "var(--warning-text)", marginBottom: 14, lineHeight: 1.4 },
   // --warning-text (#8a5a1e, тёмно-коричневый) не переопределяется в тёмной
   // теме (см. :root) — то есть остаётся одним и тем же в обеих темах, поэтому
   // белый текст поверх него безопасен и там, и там, отдельного dark-варианта
@@ -255,7 +257,8 @@ export const styles = {
     border: "none", borderRadius: 999, padding: "7px 14px", fontSize: 12, fontWeight: 600, cursor: "pointer",
   },
   totalBox: { display: "flex", flexDirection: "column", alignItems: "center", gap: 2, padding: "18px 0", border: "1px solid var(--hairline)", borderRadius: 20, marginBottom: 20, ...glass(0.55, 12) },
-  sectionTitle: { fontSize: 13, fontWeight: 600, color: "var(--text-tertiary)", margin: "0 0 8px 0" },
+  // Заголовок раздела плана («Рецепты на неделю», «Список покупок»): раньше был слабее содержимого под ним (13/600 серым).
+  sectionTitle: { fontSize: 16, fontWeight: 700, color: "var(--text-primary)", margin: "0 0 8px 0", lineHeight: 1.25 },
   // Полоса дней над рецептами: липкая в пределах секции «Рецепты на неделю», нажатие прокручивает к дню.
   // Липкая полоса дней. На своём месте — прозрачный ряд кнопок; прилипнув (dayStripStuck), становится матовой
   // плашкой с тенью, как панель навигации в iOS. Раньше подложка была всегда: тёмный прямоугольник резал глаз.
@@ -275,15 +278,15 @@ export const styles = {
     background: active ? ACCENT : "transparent", color: active ? "#fff" : "var(--text-primary)",
   }),
   dayBlock: { paddingBottom: 8, marginBottom: 4, borderBottom: "1px solid var(--hairline)" },
-  dayTag: { fontSize: 11, fontWeight: 700, color: ACCENT, marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.02em" },
+  dayTag: { fontSize: 12, fontWeight: 700, color: "var(--accent-text)", marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.02em" },
   dayTagToday: { display: "inline-block", background: ACCENT, color: "#fff", padding: "2px 9px", borderRadius: 8 },
-  recipeMeta: { display: "block", fontSize: 12, color: "var(--text-tertiary)", marginTop: 2 },
+  recipeMeta: { display: "block", fontSize: 13, color: "var(--text-secondary)", marginTop: 2, lineHeight: 1.4 },
   // Главное действие экрана плана закреплено внизу, пока не долистали до
   // его естественного места в конце списка (UX-аудит 29.09.2026: кнопка была
   // за ~5 экранами прокрутки).
   orderBtnSticky: { position: "sticky", bottom: "max(12px, env(safe-area-inset-bottom))", zIndex: 5 },
   recipeRow: { display: "flex", alignItems: "center", gap: 8, padding: "5px 0", fontSize: 14 },
-  timeBadge: { display: "flex", alignItems: "center", gap: 3, color: "var(--text-tertiary)", fontSize: 11, flexShrink: 0 },
+  timeBadge: { display: "flex", alignItems: "center", gap: 3, color: "var(--text-tertiary)", fontSize: 12, flexShrink: 0 },
   // padding было 2 — вместе с иконкой 14px тап-зона выходила ~18×18,
   // заметно ниже минимума WCAG 2.5.8 AA (24×24) для часто используемого
   // действия ("Заменить блюдо" на каждой строке рецепта). 9 даёт ~32×32.
@@ -292,14 +295,14 @@ export const styles = {
   deptLabel: { fontSize: 12, fontWeight: 600, color: "var(--text-tertiary)", textTransform: "uppercase", letterSpacing: "0.02em" },
   listBox: { display: "flex", flexDirection: "column" },
   listRow: { display: "flex", justifyContent: "space-between", gap: 8, padding: "7px 0", borderBottom: "1px solid var(--hairline-2)", fontSize: 13.5 },
-  subFindBtn: { display: "flex", alignItems: "center", justifyContent: "center", background: "none", border: "none", padding: 2, color: "var(--text-tertiary)", cursor: "pointer" },
-  subRevertBtn: { display: "flex", alignItems: "center", justifyContent: "center", background: "none", border: "none", padding: 2, color: "var(--danger)", cursor: "pointer" },
+  subFindBtn: { display: "flex", alignItems: "center", justifyContent: "center", background: "none", border: "none", padding: 10, margin: -8, color: "var(--text-tertiary)", cursor: "pointer" },
+  subRevertBtn: { display: "flex", alignItems: "center", justifyContent: "center", background: "none", border: "none", padding: 10, margin: -8, color: "var(--danger-text)", cursor: "pointer" },
   // "Уже есть дома" (см. lib/pantry.js) — padding 6 (не 2, как у соседних
   // subFindBtn/subRevertBtn) — те уже отмечены как слишком мелкая тач-зона
   // при аудите доступности, не повторяем ту же ошибку в новом элементе:
   // 13 (иконка) + 6*2 = 25px, укладывается в минимум WCAG 2.5.8 (24×24).
-  buyLaterBadge: { fontSize: 11, color: "var(--text-secondary)", fontWeight: 600, whiteSpace: "nowrap" },
-  pantryBtn: { display: "flex", alignItems: "center", justifyContent: "center", background: "none", border: "none", padding: 6, margin: -6, color: "var(--text-tertiary)", cursor: "pointer" },
+  buyLaterBadge: { fontSize: 12, color: "var(--text-secondary)", fontWeight: 600, whiteSpace: "nowrap" },
+  pantryBtn: { display: "flex", alignItems: "center", justifyContent: "center", background: "none", border: "none", padding: 10, margin: -10, color: "var(--text-tertiary)", cursor: "pointer" },
   pantryBtnActive: { display: "flex", alignItems: "center", justifyContent: "center", background: "none", border: "none", padding: 6, margin: -6, color: "var(--accent)", cursor: "pointer" },
   subPanel: { display: "flex", flexDirection: "column", gap: 6, padding: "8px 10px 10px", marginBottom: 4, borderRadius: 14, ...glass(0.5, 10), border: "1px solid var(--hairline)" },
   subPanelHint: { display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, color: "var(--text-tertiary)" },
@@ -307,8 +310,8 @@ export const styles = {
   subOptionThumb: { width: 28, height: 28, borderRadius: 7, objectFit: "cover", flexShrink: 0 },
   subOptionThumbPlaceholder: { width: 28, height: 28, borderRadius: 7, flexShrink: 0, background: "var(--track-bg)" },
   subCancelBtn: { alignSelf: "flex-end", background: "none", border: "none", color: "var(--text-tertiary)", fontSize: 12, cursor: "pointer", padding: "2px 4px" },
-  orderBtn: { width: "100%", padding: "14px 0", background: `linear-gradient(180deg, ${ACCENT}, #0066DB)`, border: "none", borderRadius: 18, color: "#fff", fontSize: 14.5, fontWeight: 600, cursor: "pointer", marginTop: 8, boxShadow: "0 8px 20px rgba(10,132,255,0.35)" },
-  orderError: { fontSize: 12, color: "var(--danger)", textAlign: "center", marginTop: 8 },
+  orderBtn: { width: "100%", padding: "14px 0", background: `linear-gradient(180deg, #0071E3, #0058C2)`, border: "none", borderRadius: 18, color: "#fff", fontSize: 14.5, fontWeight: 600, cursor: "pointer", marginTop: 8, boxShadow: "0 8px 20px rgba(10,132,255,0.35)" },
+  orderError: { fontSize: 13, color: "var(--danger-text)", textAlign: "center", marginTop: 8 },
   orderNote: { fontSize: 12, color: "var(--text-tertiary)", textAlign: "center", marginTop: 8, lineHeight: 1.4 },
   orderPartsWrap: { display: "flex", flexDirection: "column", gap: 8, marginTop: 4 },
   orderPartBtn: {

@@ -5,6 +5,7 @@ import { X, Clock, Clapperboard, Heart, Check } from "lucide-react";
 import { trackEvent } from "../lib/analytics.js";
 import { styles, ACCENT } from "../styles.js";
 import { hapticSelect } from "../lib/haptics.js";
+import { formatIngredientAmount } from "../lib/format.js";
 import { useRecipeBook, isFavorite, toggleFavorite, cookedToday, cookedDates, toggleCookedToday } from "../lib/recipeBook.js";
 
 export function RecipeModal({ dm, family, onClose }) {
@@ -91,7 +92,7 @@ export function RecipeModal({ dm, family, onClose }) {
           {recipe.ingr.map(([name, amount, unit]) => (
             <div key={name} style={styles.listRow}>
               <span>{name}</span>
-              <span style={{ color: "var(--text-tertiary)" }}>{Math.round(amount * family)} {unit}</span>
+              <span style={{ color: "var(--text-tertiary)" }}>{formatIngredientAmount(amount, family, unit)}</span>
             </div>
           ))}
         </div>

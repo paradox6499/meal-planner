@@ -43,7 +43,7 @@ export const SUBSCRIPTION_BENEFITS = [
   {
     title: "Безлимитная пересборка плана",
     short: "Меняйте магазин, бюджет или просто пересобирайте заново — без ограничений",
-    detail: "На бесплатном тарифе — 1 план в неделю. С подпиской ограничения нет вообще.",
+    detail: "На бесплатном тарифе — 1 план в неделю. С Pro ограничения нет вообще.",
   },
   {
     title: "Несколько планов одновременно",
@@ -51,7 +51,7 @@ export const SUBSCRIPTION_BENEFITS = [
     // Живой вывод из ревью в чате: текст говорил "можно будет" (обещание на
     // будущее), хотя это уже реально работает — можно держать до 3 планов
     // и переключаться между ними чипами над списком покупок (см. PlanSlotsBar).
-    detail: "На бесплатном тарифе активен только один план — «заново» стирает предыдущий. С Pro можно держать до 3 планов одновременно и переключаться между ними одним тапом, не теряя ни один.",
+    detail: "На бесплатном тарифе активен только один план — новый план заменяет прежний. С Pro можно держать до 3 планов одновременно и переключаться между ними одним тапом, не теряя ни один.",
   },
   {
     title: "Напоминания от бота",
@@ -154,8 +154,8 @@ export function ProModal({ onClose }) {
                 <Check size={13} color={ACCENT} />
               </div>
               <div style={{ minWidth: 0 }}>
-                <div style={{ fontWeight: 600, fontSize: 13.5 }}>{b.title}</div>
-                <div style={{ fontSize: 12, color: "var(--text-tertiary)", marginTop: 2, lineHeight: 1.4 }}>{b.detail}</div>
+                <div style={{ fontWeight: 600, fontSize: 14, lineHeight: 1.3 }}>{b.title}</div>
+                <div style={{ fontSize: 13, color: "var(--text-secondary)", marginTop: 2, lineHeight: 1.4 }}>{b.short}</div>
               </div>
             </div>
           ))}
@@ -197,10 +197,15 @@ export function ProModal({ onClose }) {
           >
             {paymentState === "loading" ? <><Loader2 size={16} className="spin" /> Готовим оплату…</> : `Оплатить Pro — ${PRO_PRICE_RUB} ₽`}
           </button>
+          {paymentState !== "loading" && !canPay && (
+            <p style={{ ...styles.acctSectionHint, textAlign: "center", margin: "8px 0 0 0" }}>
+              {!emailValid ? "Укажите email для чека" : "Отметьте согласие с условиями"}
+            </p>
+          )}
           {paymentState === "error" && (
             <p style={{ ...styles.acctSectionHint, textAlign: "center", margin: "12px 0 0 0" }}>
               Не удалось начать оплату. Попробуйте ещё раз через минуту — если не поможет, напишите в поддержку (Аккаунт → «Написать в поддержку»).
-              {errorDetail && <><br /><span style={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: 11 }}>{errorDetail}</span></>}
+              {errorDetail && <><br /><span style={{ fontSize: 12 }}>Для поддержки: {errorDetail}</span></>}
             </p>
           )}
         </div>
@@ -257,7 +262,7 @@ export function ExtraPlanModal({ onClose, onOpenPro }) {
         </div>
         <h2 style={{ ...styles.stepTitle, textAlign: "center" }}>Ещё один план</h2>
         <p style={{ ...styles.stepSub, textAlign: "center" }}>
-          Разовая покупка, без подписки — добавляет ровно один план сверх бесплатного лимита. Не сгорает: можно использовать, когда понадобится.
+          Разовая покупка, без автосписаний — добавляет ровно один план сверх бесплатного лимита. Не сгорает: можно использовать, когда понадобится.
         </p>
 
         <div style={styles.proPriceBox}>
@@ -283,12 +288,17 @@ export function ExtraPlanModal({ onClose, onOpenPro }) {
             disabled={paymentState === "loading" || !canPay}
             style={{ ...styles.navBtnPrimary, width: "100%", justifyContent: "center", marginTop: 12, opacity: paymentState === "loading" || !canPay ? 0.6 : 1 }}
           >
-            {paymentState === "loading" ? <><Loader2 size={16} className="spin" /> Готовим оплату…</> : "Купить план"}
+            {paymentState === "loading" ? <><Loader2 size={16} className="spin" /> Готовим оплату…</> : `Оплатить ${EXTRA_PLAN_PRICE_RUB} ₽`}
           </button>
+          {paymentState !== "loading" && !canPay && (
+            <p style={{ ...styles.acctSectionHint, textAlign: "center", margin: "8px 0 0 0" }}>
+              {!emailValid ? "Укажите email для чека" : "Отметьте согласие с условиями"}
+            </p>
+          )}
           {paymentState === "error" && (
             <p style={{ ...styles.acctSectionHint, textAlign: "center", margin: "12px 0 0 0" }}>
               Не удалось начать оплату. Попробуйте ещё раз через минуту — если не поможет, напишите в поддержку (Аккаунт → «Написать в поддержку»).
-              {errorDetail && <><br /><span style={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: 11 }}>{errorDetail}</span></>}
+              {errorDetail && <><br /><span style={{ fontSize: 12 }}>Для поддержки: {errorDetail}</span></>}
             </p>
           )}
         </div>

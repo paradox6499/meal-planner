@@ -36,3 +36,12 @@ export function pluralWeeks(n) {
   if ([2, 3, 4].includes(mod10) && ![12, 13, 14].includes(mod100)) return "недели";
   return "недель";
 }
+
+/** Количество ингредиента в рецепте на всю семью — всегда целое и не меньше единицы: раньше «0.3 шт × 2» округлялось до
+ * «0 шт» («Лук репчатый 0 шт»). Штуки округляем вверх (полпомидора всё равно не купишь), граммы и миллилитры — до целого. */
+export function formatIngredientAmount(amount, family, unit) {
+  const raw = Number(amount) * Number(family || 1);
+  if (!Number.isFinite(raw) || raw <= 0) return "по вкусу";
+  const value = unit === "шт" ? Math.ceil(raw - 1e-9) : Math.round(raw);
+  return `${Math.max(1, value)} ${unit}`;
+}

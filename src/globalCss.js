@@ -12,10 +12,14 @@ export const GLOBAL_CSS = `
              (4.5:1 для обычного текста). Этим цветом подписаны хинты/подписи/
              футер по всему приложению, не мелочь. #6c6c70 даёт 4.61:1 с
              запасом на самом светлом реальном фоне (голая --page-bg). */
-          --text-tertiary: #6c6c70;
+          --text-tertiary: #5f5f64;
           --accent: #0A84FF;
           --accent-2: #64D2FF;
           --danger: #FF3B30;
+          /* Красный ТЕКСТ: #FF3B30 на светлом/розовом даёт 2,8:1 (ниже WCAG AA). Для заливок и иконок остаётся --danger. */
+          --danger-text: #C4161C;
+          /* Синий ТЕКСТ (ссылки, даты): #0A84FF на светлой карточке даёт 3,5:1. Для заливок и иконок остаётся ACCENT. */
+          --accent-text: #0066CC;
           --danger-soft: rgba(255,59,48,0.14);
           --warning-soft: rgba(255,159,10,0.14);
           --warning-border: rgba(255,159,10,0.35);
@@ -43,6 +47,10 @@ export const GLOBAL_CSS = `
             --text-primary: #f2f2f7;
             --text-secondary: #b6b6bb;
             --text-tertiary: #8e8e93;
+          --danger-text: #FF6961;
+          --accent-text: #4DA3FF;
+            --danger-text: #FF6961;
+            --accent-text: #4DA3FF;
             /* Раньше --warning-text вообще не переопределялся для тёмной
                темы — оставался #8a5a1e (тёмно-коричневый, задуман для
                светлого --warning-soft фона). На тёмном фоне это 2.69-3.34:1 —

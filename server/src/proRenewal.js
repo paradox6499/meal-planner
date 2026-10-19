@@ -16,7 +16,7 @@ export const RENEWAL_REMINDER_WINDOW_MS = 3 * 24 * 60 * 60 * 1000;
 export function buildRenewalReminderText(proUntilISO) {
   const date = new Date(proUntilISO).toLocaleDateString("ru-RU", { day: "numeric", month: "long" });
   return (
-    `⏳ Подписка Pro заканчивается ${date}.\n\n` +
+    `⏳ Pro заканчивается ${date}.\n\n` +
     `После этого действуют ограничения бесплатного тарифа (1 план в неделю, без общего списка на семью). ` +
     `Продлить — в приложении, в Аккаунте → «Продлить Pro».`
   );

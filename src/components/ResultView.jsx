@@ -287,12 +287,7 @@ export function ResultView({ plan, planStartISO, onRebuild, generationPending, c
                 : "ВкусВилл сейчас не отвечает — показали базовые рецепты с примерной ценой. Заказ во ВкусВилл откроется, когда каталог заработает."}
             </span>
             {generationPending && (
-              <p style={{ fontSize: 11.5, margin: "6px 0 0 0", opacity: 0.9 }}>Бесплатный план при этом не тратится.</p>
-            )}
-            {catalogReason && (
-              <p style={{ fontSize: 10.5, margin: "6px 0 0 0", opacity: 0.7, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", wordBreak: "break-word" }}>
-                Причина: {catalogReason}
-              </p>
+              <p style={{ fontSize: 13, margin: "6px 0 0 0", opacity: 0.9 }}>Бесплатный план при этом не тратится.</p>
             )}
             {onRebuild && (
               <button onClick={onRebuild} style={styles.retryPricesBtn}>
@@ -300,7 +295,7 @@ export function ResultView({ plan, planStartISO, onRebuild, generationPending, c
               </button>
             )}
             {priceRetryFailed && !retryingPrices && (
-              <p style={{ fontSize: 11.5, marginTop: 6, opacity: 0.85 }}>
+              <p style={{ fontSize: 13, marginTop: 6, opacity: 0.85 }}>
                 Не получилось — каталог всё ещё недоступен. Попробуйте ещё раз через минуту-другую.
               </p>
             )}
@@ -314,16 +309,11 @@ export function ResultView({ plan, planStartISO, onRebuild, generationPending, c
           <div style={{ minWidth: 0 }}>
             <span>
               {autoPriceRetryPending
-                ? "Цены на товары ещё загружаются — подтянем их сами, это может занять до пары минут. Сумма ниже пока — оценка по рецептам."
+                ? "Цены на товары ещё загружаются — это может занять до пары минут, повторим сами; можно и не ждать. Сумма ниже пока — оценка по рецептам."
                 : "Не удалось получить цены на товары — ВкусВилл сейчас не отвечает. Сумма ниже — оценка по рецептам, заказ откроется, когда цены появятся."}
             </span>
             {generationPending && (
-              <p style={{ fontSize: 11.5, margin: "6px 0 0 0", opacity: 0.9 }}>Бесплатный план при этом не тратится.</p>
-            )}
-            {catalogReason && !autoPriceRetryPending && (
-              <p style={{ fontSize: 10.5, margin: "6px 0 0 0", opacity: 0.7, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", wordBreak: "break-word" }}>
-                Причина: {catalogReason}
-              </p>
+              <p style={{ fontSize: 13, margin: "6px 0 0 0", opacity: 0.9 }}>Бесплатный план при этом не тратится.</p>
             )}
             {/* Раньше единственный совет был "соберите план заново" — то есть
                 заново пройти весь визард ради того, чтобы попробовать
@@ -344,7 +334,7 @@ export function ResultView({ plan, planStartISO, onRebuild, generationPending, c
                 ВкусВилл всё ещё не отвечал, и выглядело это так, будто
                 нажатие вообще ни на что не повлияло. */}
             {priceRetryFailed && !retryingPrices && (
-              <p style={{ fontSize: 11.5, marginTop: 6, opacity: 0.85 }}>
+              <p style={{ fontSize: 13, marginTop: 6, opacity: 0.85 }}>
                 Не получилось — ВкусВилл всё ещё ограничивает запросы. Попробуйте ещё раз через минуту-другую.
               </p>
             )}

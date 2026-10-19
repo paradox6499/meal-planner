@@ -7,7 +7,7 @@ import { trackEvent } from "../lib/analytics.js";
 import { estimateWeek, assessBudget, budgetMessage } from "../lib/budgetCheck.js";
 
 const TONE = {
-  low: { bg: "var(--danger-soft)", fg: "var(--danger)", Icon: TriangleAlert },
+  low: { bg: "var(--danger-soft)", fg: "var(--danger-text)", Icon: TriangleAlert },
   tight: { bg: "var(--warning-soft)", fg: "var(--warning-text)", Icon: Info },
   ok: { bg: "rgba(10,132,255,0.12)", fg: "var(--text-primary)", Icon: Check },
   rich: { bg: "rgba(10,132,255,0.12)", fg: "var(--text-primary)", Icon: Check },

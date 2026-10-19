@@ -26,7 +26,7 @@ export function AccountSubscriptionCard({ onOpenPro, planStatus }) {
       <div style={styles.subCard}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
           <Sparkles size={16} color={ACCENT} />
-          <span style={{ fontWeight: 700, fontSize: 15 }}>Подписка</span>
+          <span style={{ fontWeight: 700, fontSize: 15 }}>Съедим Pro</span>
           <span style={isPro ? styles.proBadge : styles.freeBadge}>{isPro ? "Pro" : "Free"}</span>
         </div>
         {isPro ? (
