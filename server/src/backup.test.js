@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, afterEach } from "vitest";
+import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import { openDb, saveUserPlan, getLastBackupAt } from "./db.js";
 import { shouldRunBackup, runBackup, sendBackupNow } from "./backup.js";
 
@@ -120,4 +120,51 @@ describe("sendBackupNow: слишком большая база", () => {
     expect(JSON.parse(fetchMock.mock.calls[0][1].body).text).toContain("МБ");
     expect(getLastBackupAt(db)).toBeNull(); // не считаем, что бэкап состоялся
   }, 20000);
+});
+
+import { mkdtempSync, rmSync, readdirSync, writeFileSync, existsSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { runLocalBackup, pruneLocalBackups, localBackupName, LOCAL_BACKUP_DAILY_KEEP } from "./backup.js";
+
+describe("локальные копии с ротацией", () => {
+  let dir;
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "sedim-bk-")); });
+  afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+  const touch = (name) => writeFileSync(join(dir, name), "x");
+
+  it("делает копию в папку, читаемую как база, и не затирает уже сделанную сегодня", () => {
+    const db = openDb(":memory:");
+    const now = new Date("2026-10-20T10:00:00Z");
+    const first = runLocalBackup(db, { dir, now });
+    expect(first.ok).toBe(true);
+    expect(first.path.endsWith("sedim-2026-10-20.db")).toBe(true);
+    expect(first.sizeBytes).toBeGreaterThan(0);
+    const again = runLocalBackup(db, { dir, now });
+    expect(again.ok).toBe(true);
+    expect(readdirSync(dir)).toEqual(["sedim-2026-10-20.db"]); // без временных файлов и дублей
+  });
+
+  it("ротация: 7 последних суточных + воскресные за 4 недели, остальное удаляется", () => {
+    const now = new Date("2026-10-28T10:00:00Z"); // среда
+    // 40 суточных копий подряд назад от now
+    for (let i = 0; i < 40; i++) touch(localBackupName(new Date(now.getTime() - i * 86_400_000)));
+    touch("notes.txt"); // чужие файлы не трогаем
+    pruneLocalBackups(dir, now);
+    const left = readdirSync(dir).filter((f) => f.startsWith("sedim-"));
+    const daily = left.filter((f) => f >= localBackupName(new Date(now.getTime() - 6 * 86_400_000)));
+    expect(daily).toHaveLength(LOCAL_BACKUP_DAILY_KEEP);
+    const older = left.filter((f) => !daily.includes(f));
+    // в «старых» остались только воскресные не старше 4 недель
+    expect(older.length).toBeGreaterThan(0);
+    expect(older.length).toBeLessThanOrEqual(4);
+    older.forEach((f) => expect(new Date(f.slice(6, 16) + "T00:00:00Z").getUTCDay()).toBe(0));
+    expect(existsSync(join(dir, "notes.txt"))).toBe(true);
+  });
+
+  it("ошибка (папка недоступна) не бросает исключение", () => {
+    const db = openDb(":memory:");
+    const r = runLocalBackup(db, { dir: "/proc/nonexistent/x" });
+    expect(r.ok).toBe(false);
+  });
 });

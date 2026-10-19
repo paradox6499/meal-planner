@@ -406,7 +406,7 @@ export function parseFamilyPantryRequest(body) {
   return { ok: true, value: { name: name.trim(), present } };
 }
 
-export function createApp(db, { botToken, adminTelegramId = null, webhookSecret = null, yookassa = null, webAppUrl = DEFAULT_WEBAPP_URL, hashSecret = null }) {
+export function createApp(db, { botToken, adminTelegramId = null, webhookSecret = null, yookassa = null, webAppUrl = DEFAULT_WEBAPP_URL, hashSecret = null, backupDir = null, backupTelegramFile = true }) {
   // Секрет для хэшей "надгробий" удалённых аккаунтов (db.js: hashAccountId).
   // По умолчанию — токен бота; при его смене старые надгробия перестанут
   // совпадать, поэтому на проде лучше отдельный HASH_SECRET (см. server/README.md).
@@ -1203,7 +1203,7 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
           // прочитанным" (см. комментарий у sendDigestNow в digest.js).
           await sendDigestNow(db, { botToken, adminTelegramId }, new Date(), { updateWatermark: false });
         } else if (reply?.kind === "backup") {
-          await sendBackupNow(db, { botToken, adminTelegramId });
+          await sendBackupNow(db, { botToken, adminTelegramId, backupDir, sendFile: backupTelegramFile });
         } else if (reply?.kind === "diag") {
           // Отвечает ли ВкусВилл с НАШЕГО сервера — единственный надёжный способ
           // понять, поможет ли прокси (см. vkusvillProxy.js) или сервер тоже

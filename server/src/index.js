@@ -2,6 +2,7 @@
 // реально запускает процесс. Всё остальное (app.js, db.js, scheduler.js)
 // принимает конфигурацию параметрами, чтобы быть тестируемым без реального
 // порта/файла/окружения.
+import { join, dirname } from "node:path";
 import { openDb } from "./db.js";
 import { createApp } from "./app.js";
 import { runReminderTick, runFreeNudgeTick } from "./scheduler.js";
@@ -32,6 +33,9 @@ const DIGEST_CHECK_INTERVAL_MS = 15 * 60 * 1000; // достаточно час�
 // Бэкап БД тем же ботом (см. backup.js) — тоже привязан к ADMIN_TELEGRAM_ID,
 // отдельного получателя не заводим. Раз в сутки по умолчанию — размер файла
 // на таком масштабе копеечный, слать чаще незачем.
+// Локальные копии рядом с базой (в РФ), ротация 7 суточных + 4 недельных; файл в Telegram — BACKUP_TELEGRAM_FILE=off выключает.
+const BACKUP_DIR = process.env.BACKUP_DIR || (DB_PATH === ":memory:" ? null : join(dirname(DB_PATH), "backups"));
+const BACKUP_TELEGRAM_FILE = process.env.BACKUP_TELEGRAM_FILE !== "off";
 const BACKUP_INTERVAL_HOURS = Number(process.env.BACKUP_INTERVAL_HOURS) || 24;
 const BACKUP_CHECK_INTERVAL_MS = 60 * 60 * 1000;
 // Секрет для /telegram/webhook (см. app.js) — придумываете сами (любая
@@ -68,7 +72,7 @@ const db = openDb(DB_PATH);
 // переменной — адрес по умолчанию (GitHub Pages). Понадобится при переезде
 // фронтенда на другой хостинг/домен.
 const WEBAPP_URL = process.env.WEBAPP_URL || undefined;
-const server = createApp(db, { botToken: BOT_TOKEN, adminTelegramId: ADMIN_TELEGRAM_ID, webhookSecret: WEBHOOK_SECRET, yookassa: YOOKASSA, webAppUrl: WEBAPP_URL, hashSecret: process.env.HASH_SECRET || undefined });
+const server = createApp(db, { botToken: BOT_TOKEN, adminTelegramId: ADMIN_TELEGRAM_ID, webhookSecret: WEBHOOK_SECRET, yookassa: YOOKASSA, webAppUrl: WEBAPP_URL, hashSecret: process.env.HASH_SECRET || undefined, backupDir: BACKUP_DIR, backupTelegramFile: BACKUP_TELEGRAM_FILE });
 
 // Остановка (systemctl restart, deploy.sh): перестаём принимать новые соединения, даём дописать начатые запросы
 // (до 10 с), закрываем базу и выходим. Раньше процесс обрывался на полуслове (аудит 19.10.2026).
@@ -130,7 +134,7 @@ if (ADMIN_TELEGRAM_ID) {
 
 async function backupTick() {
   try {
-    const result = await runBackup(db, { botToken: BOT_TOKEN, adminTelegramId: ADMIN_TELEGRAM_ID, intervalHours: BACKUP_INTERVAL_HOURS });
+    const result = await runBackup(db, { botToken: BOT_TOKEN, adminTelegramId: ADMIN_TELEGRAM_ID, intervalHours: BACKUP_INTERVAL_HOURS, backupDir: BACKUP_DIR, sendFile: BACKUP_TELEGRAM_FILE });
     if (result.sent) console.log(`[backup] отправлен (${result.sizeBytes} байт)`);
   } catch (err) {
     console.error("[backup] ошибка тика:", err);
