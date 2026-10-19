@@ -410,6 +410,8 @@ export function runMigrations(db, migrations = MIGRATIONS, { log = () => {} } = 
 
 export function openDb(path) {
   const db = new DatabaseSync(path);
+  // Скрипт обслуживания, держащий запись, не должен давать серверу мгновенное «database is locked» (500): ждём до 5 с.
+  db.exec("PRAGMA busy_timeout = 5000");
   runMigrations(db, MIGRATIONS, { log: path === ":memory:" ? () => {} : console.log });
   return db;
 }
@@ -1065,11 +1067,25 @@ export function purgeOldIngredientPrices(db, beforeISO) {
 
 /** Фиксирует, что страницу каталога рецептов с такими аргументами запросили
  * (спрос, не привязанный к пользователю): счётчик растёт, дата обновляется. */
+// Потолок строк: таблица не должна расти от чужих запросов (аудит 19.10.2026: 50 уникальных запросов давали 250 КБ).
+export const WARM_TARGETS_MAX_ROWS = 200;
+
 export function recordWarmTarget(db, key, argsJson, nowISO) {
   db.prepare(
     `INSERT INTO warm_targets (key, args_json, hits, last_seen_at) VALUES (?, ?, 1, ?)
      ON CONFLICT(key) DO UPDATE SET hits = hits + 1, last_seen_at = excluded.last_seen_at`
   ).run(key, argsJson, nowISO);
+  // Лишнее вытесняем: меньше обращений и давнее — первыми.
+  db.prepare(
+    `DELETE FROM warm_targets WHERE key IN (
+       SELECT key FROM warm_targets ORDER BY hits DESC, last_seen_at DESC LIMIT -1 OFFSET ?
+     )`
+  ).run(WARM_TARGETS_MAX_ROWS);
+}
+
+/** Убрать цель, которую каталог не отдаёт (мусорные или устаревшие аргументы) — чтобы подогрев не бился в неё снова. */
+export function deleteWarmTarget(db, key) {
+  db.prepare("DELETE FROM warm_targets WHERE key = ?").run(key);
 }
 
 /** Самые востребованные страницы, виденные не раньше sinceISO. */

@@ -70,6 +70,25 @@ const db = openDb(DB_PATH);
 const WEBAPP_URL = process.env.WEBAPP_URL || undefined;
 const server = createApp(db, { botToken: BOT_TOKEN, adminTelegramId: ADMIN_TELEGRAM_ID, webhookSecret: WEBHOOK_SECRET, yookassa: YOOKASSA, webAppUrl: WEBAPP_URL, hashSecret: process.env.HASH_SECRET || undefined });
 
+// Остановка (systemctl restart, deploy.sh): перестаём принимать новые соединения, даём дописать начатые запросы
+// (до 10 с), закрываем базу и выходим. Раньше процесс обрывался на полуслове (аудит 19.10.2026).
+let shuttingDown = false;
+function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`[shutdown] ${signal}: перестаю принимать запросы`);
+  const force = setTimeout(() => { console.error("[shutdown] не уложились в 10 с — выходим"); process.exit(1); }, 10_000);
+  force.unref();
+  server.close(() => {
+    try { db.close(); } catch (err) { console.error("[shutdown] не закрыли базу:", err.message); }
+    console.log("[shutdown] готово");
+    process.exit(0);
+  });
+  server.closeIdleConnections?.();
+}
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));
+
 server.listen(PORT, HOST, () => {
   console.log(`meal-planner-server слушает порт ${PORT}, БД: ${DB_PATH}`);
   // Команды и описание бота — не блокируя запуск; сбой только в лог (см. botProfile.js).

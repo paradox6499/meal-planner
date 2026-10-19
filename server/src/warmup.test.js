@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { runWarmupTick, resetWarmupState, getWarmupPausedUntil, WARM_PAUSE_AFTER_FAILURE_MS, WARM_MAX_PER_HOUR, WARM_PRICES_PER_TICK, seedRecipeTargets, ingredientNamesFromRecipesPage, RECIPES_REFRESH_AFTER_MS, RECIPES_PER_TICK } from "./warmup.js";
 import { clearProxyState, peekProxyCache, refreshProxyEntry, callVkusvillCached, proxyCacheKey, RECIPES_CACHE_TTL_MS, PROXY_CACHE_TTL_MS } from "./vkusvillProxy.js";
 import { resetUpstreamGate, clearWarmQueue, getWarmQueueSize, getUpstreamLoad, UPSTREAM_MAX_PER_MINUTE, resolveIngredientPricesWithCache, WARM_REFRESH_AFTER_MS, namesNeedingRefresh, clearFailedNames, FAILED_NAME_RETRY_AFTER_MS } from "./vkusvillPrices.js";
-import { openDb, recordPlanGeneration, recordWarmTarget, listWarmTargets, purgeOldWarmTargets, upsertIngredientPrices, getIngredientPricesByName } from "./db.js";
+import { openDb, recordPlanGeneration, recordWarmTarget, WARM_TARGETS_MAX_ROWS, listWarmTargets, purgeOldWarmTargets, upsertIngredientPrices, getIngredientPricesByName } from "./db.js";
 import { runMaintenance } from "./maintenance.js";
 
 const mcpOk = (data) => ({ ok: true, json: async () => ({ jsonrpc: "2.0", id: 1, result: { content: [{ text: JSON.stringify({ ok: true, data }) }] } }) });
@@ -213,6 +213,25 @@ describe("подогрев: осторожность с адресом (18.10.20
     const priceCalls = fetch.mock.calls.filter(([, o]) => JSON.parse(o.body).params.name !== "vkusvill_recipes");
     expect(priceCalls).toHaveLength(1);
     expect(getWarmupPausedUntil()).toBeGreaterThan(t0);
+  });
+
+  it("страница из «спроса», которую каталог не отдаёт, выбрасывается и не останавливает подогрев", async () => {
+    const args = { q: "мусор", page: 1, sort: "popularity", id_category_filter: 332 };
+    recordWarmTarget(db, proxyCacheKey("vkusvill_recipes", args), JSON.stringify(args), new Date().toISOString());
+    fetch.mockImplementation(async (url, opts) => {
+      const body = JSON.parse(opts.body);
+      if (body.params?.name === "vkusvill_recipes" && body.params.arguments.q === "мусор") return { ok: false, status: 403, json: async () => ({}) };
+      return body.params?.name === "vkusvill_recipes" ? mcpOk(recipesPage(["Лук репчатый"])) : mcpOk({ items: [{ xml_id: "1", name: "x", price: { current: 5 }, unit: "кг" }] });
+    });
+    const r = await runWarmupTick(db, { now: Date.now() });
+    expect(r.skipped).toBeNull(); // не пауза
+    expect(getWarmupPausedUntil()).toBe(0);
+    expect(listWarmTargets(db, { sinceISO: "2000-01-01", limit: 10 })).toHaveLength(0); // мусорная цель удалена
+  });
+
+  it("таблица «спроса» не растёт выше потолка", () => {
+    for (let i = 0; i < WARM_TARGETS_MAX_ROWS + 30; i++) recordWarmTarget(db, `k${i}`, "{}", new Date(Date.now() + i).toISOString());
+    expect(db.prepare("SELECT COUNT(*) AS n FROM warm_targets").get().n).toBe(WARM_TARGETS_MAX_ROWS);
   });
 
   it("один сбой из нескольких цен — не пауза; три тика подряд с частичными сбоями — пауза", async () => {

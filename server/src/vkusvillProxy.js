@@ -56,6 +56,28 @@ export function clearProxyState() {
   inflight.clear();
 }
 
+// Аргументы страницы каталога рецептов ровно такого вида, как их шлёт фронтенд (searchRecipes). Всё остальное в
+// «спрос» для подогрева не записываем: иначе чужие мусорные аргументы занимали бы очередь подогрева и стучались
+// во ВкусВилл с нашего адреса (аудит 19.10.2026).
+const RECIPES_ARG_KEYS = new Set([
+  "q", "page", "sort", "id_feature_filter", "id_cooking_time_filter", "id_cooking_method_filter",
+  "id_complexity_filter", "id_category_filter", "id_exclude_allergens_filter",
+]);
+const isId = (v) => Number.isInteger(v) && v >= 0 && v <= 999999999;
+export function isValidRecipesPageArgs(args) {
+  if (!args || typeof args !== "object" || Array.isArray(args)) return false;
+  if (!Object.keys(args).every((k) => RECIPES_ARG_KEYS.has(k))) return false;
+  if (args.q !== undefined && (typeof args.q !== "string" || args.q.length > 64)) return false;
+  if (args.page !== undefined && !(Number.isInteger(args.page) && args.page >= 1 && args.page <= 50)) return false;
+  if (args.sort !== undefined && args.sort !== "popularity" && args.sort !== "new") return false;
+  for (const k of ["id_feature_filter", "id_cooking_time_filter", "id_cooking_method_filter", "id_complexity_filter", "id_category_filter"]) {
+    if (args[k] !== undefined && !isId(args[k])) return false;
+  }
+  const ex = args.id_exclude_allergens_filter;
+  if (ex !== undefined && !(Array.isArray(ex) && ex.length <= 10 && ex.every(isId))) return false;
+  return true;
+}
+
 /** @returns {{ok: true, tool: string, args: object} | {ok: false, error: string}} */
 export function parseVkusvillCallRequest(body) {
   const { tool, args } = body ?? {};

@@ -715,6 +715,33 @@ describe("POST /api/family/*", () => {
     expect((await statusRes.json()).status).toEqual({ inFamily: false });
   });
 
+  it("повторный переход по той же ссылке — не ошибка и без второго сообщения владельцу; чужая семья — отказ", async () => {
+    setUserPro(db, 1, true);
+    setUserPro(db, 3, true);
+    const a = (await (await post("/api/family/create", { initData: validInitData(1) })).json()).status.inviteCode;
+    const b = (await (await post("/api/family/create", { initData: validInitData(3) })).json()).status.inviteCode;
+    expect((await post("/api/family/join", { initData: validInitData(2), inviteCode: a })).status).toBe(200);
+    const again = await post("/api/family/join", { initData: validInitData(2), inviteCode: a });
+    expect(again.status).toBe(200);
+    expect((await again.json()).status.inFamily).toBe(true);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(telegramCalls).toHaveLength(1); // только при первом вступлении
+    const other = await post("/api/family/join", { initData: validInitData(2), inviteCode: b });
+    expect(other.status).toBe(400);
+    expect((await other.json()).error).toMatch(/другой семье/);
+  });
+
+  it("цикл «вступить — выйти — вступить» не заваливает владельца: одно сообщение в сутки на пару", async () => {
+    setUserPro(db, 1, true);
+    const code = (await (await post("/api/family/create", { initData: validInitData(1) })).json()).status.inviteCode;
+    for (let i = 0; i < 4; i++) {
+      await post("/api/family/join", { initData: validInitData(2), inviteCode: code });
+      await post("/api/family/leave", { initData: validInitData(2) });
+    }
+    await new Promise((r) => setTimeout(r, 30));
+    expect(telegramCalls).toHaveLength(1);
+  });
+
   it("create с Pro -> 200, владелец сразу в семье как единственный участник", async () => {
     setUserPro(db, 1, true);
     const res = await post("/api/family/create", { initData: validInitData(1) });
@@ -1917,6 +1944,22 @@ import { MAX_REWARDED_REFERRALS } from "./referrals.js";
 const MAX_REWARDED_REFERRALS_FOR_TEST = MAX_REWARDED_REFERRALS;
 import { resetUpstreamGate } from "./vkusvillPrices.js";
 
+describe("GET /health", () => {
+  it("живость включает чтение базы и версию схемы", async () => {
+    const db = openDb(":memory:");
+    const server = createApp(db, { botToken: BOT_TOKEN });
+    await new Promise((resolve) => server.listen(0, resolve));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    const ok = await (await fetch(`${base}/health`)).json();
+    expect(ok.ok).toBe(true);
+    expect(ok.schema).toBeGreaterThanOrEqual(3);
+    db.close(); // база стала недоступной — «всё хорошо» отвечать нельзя
+    const bad = await fetch(`${base}/health`);
+    expect(bad.status).toBe(503);
+    await new Promise((resolve) => server.close(resolve));
+  });
+});
+
 describe("POST /api/vkusvill/call — прокси каталога", () => {
   let db, server, baseUrl, mcpCalls, mcpImpl;
   const realFetch = globalThis.fetch;
@@ -1972,6 +2015,21 @@ describe("POST /api/vkusvill/call — прокси каталога", () => {
     expect(res.status).toBe(502);
     const body = await res.json();
     expect(body).toMatchObject({ ok: false, upstreamStatus: 403 });
+  });
+
+  it("спрос на страницу записывается только после успешного ответа и только для аргументов нормального вида", async () => {
+    const good = { q: "", page: 2, sort: "popularity", id_category_filter: 332, id_exclude_allergens_filter: [] };
+    mcpImpl = async () => ({ ok: false, status: 403, json: async () => ({}) });
+    await call({ tool: "vkusvill_recipes", args: good });
+    expect(db.prepare("SELECT COUNT(*) AS n FROM warm_targets").get().n).toBe(0); // ответ не получен — спроса нет
+
+    mcpImpl = async () => mcpOk({ items: [] });
+    await call({ tool: "vkusvill_recipes", args: { q: "мусор", pad: "x".repeat(500) } }); // чужие ключи
+    await call({ tool: "vkusvill_recipes", args: { page: 9999 } }); // страница вне диапазона
+    expect(db.prepare("SELECT COUNT(*) AS n FROM warm_targets").get().n).toBe(0);
+
+    await call({ tool: "vkusvill_recipes", args: { ...good, page: 3 } });
+    expect(db.prepare("SELECT COUNT(*) AS n FROM warm_targets").get().n).toBe(1);
   });
 
   it("корзина: от 1 до 20 позиций, ссылка создаётся сервером", async () => {

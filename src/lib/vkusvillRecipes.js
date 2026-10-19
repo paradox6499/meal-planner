@@ -505,6 +505,7 @@ export async function fetchVkusvillPools({ diet, cuisines, devices, allergies, c
 
   const pools = {};
   const categoryErrors = [];
+  const failedCategories = []; // категории, по которым каталог не ответил (а не «ничего не подошло»)
   await Promise.all(
     categories.map(async (category) => {
       const categoryId = CATEGORY_BY_MEAL[category] || 0;
@@ -543,6 +544,7 @@ export async function fetchVkusvillPools({ diet, cuisines, devices, allergies, c
         pools[category] = normalized;
       } catch (err) {
         categoryErrors.push(err);
+        failedCategories.push(category);
         pools[category] = [];
       }
     })
@@ -565,7 +567,7 @@ export async function fetchVkusvillPools({ diet, cuisines, devices, allergies, c
   // стоимость КАЖДОЙ позиции списка покупок (не только суммарную стоимость
   // рецепта), это и даёт "Итого за продукты", которое честно меняется при
   // замене товара через "Нет в наличии".
-  return { pools, priceByName };
+  return { pools, priceByName, failedCategories };
 }
 
 // Найдено при разборе жалобы "на замену моркови предлагает всё, кроме

@@ -38,8 +38,12 @@ export function createFamily(db, { ownerTelegramId, ownerDisplayName, nowISO }) 
 export function joinFamily(db, { inviteCode, joiningTelegramId, displayName, nowISO }) {
   const family = getFamilyByInviteCode(db, inviteCode);
   if (!family) return { ok: false, reason: "приглашение недействительно — семья не найдена" };
-  if (getFamilyForUser(db, joiningTelegramId)) {
-    return { ok: false, reason: "вы уже состоите в семье — сначала покиньте текущую" };
+  const current = getFamilyForUser(db, joiningTelegramId);
+  if (current) {
+    // Повторный переход по той же ссылке из чата — не ошибка: человек уже в этой семье (раньше ему писали
+    // «не удалось вступить: вы уже состоите в семье»).
+    if (current.id === family.id) return { ok: true, familyId: family.id, alreadyMember: true };
+    return { ok: false, reason: "вы уже состоите в другой семье — сначала покиньте её" };
   }
   if (countFamilyMembers(db, family.id) >= MAX_FAMILY_MEMBERS) {
     return { ok: false, reason: `в семье уже максимум участников (${MAX_FAMILY_MEMBERS})` };

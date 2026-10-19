@@ -112,6 +112,29 @@ describe("MealPlanner: когда сборка засчитывается", () =
     expect(backend.savePlanToHistory).not.toHaveBeenCalled();
   });
 
+  it("сеть с пометкой «скоро» — оценочный план без заказа НЕ списывает бесплатный план", async () => {
+    render(<MealPlanner />);
+    clickButton(/Другие сети — скоро/);
+    clickButton(/Пятёрочка/);
+    await passNewUserWizard();
+    expect(backend.reportPlanGenerated).not.toHaveBeenCalled();
+    expect(backend.savePlanToHistory).not.toHaveBeenCalled();
+    expect(vkusvillRecipes.fetchVkusvillPools).not.toHaveBeenCalled();
+  });
+
+  it("каталог не ответил только по части категорий — сборка НЕ засчитывается (раньше списывала план с ложным «под ваши аллергии»)", async () => {
+    const pools = catalogPools();
+    vi.mocked(vkusvillRecipes.fetchVkusvillPools).mockResolvedValue({
+      pools: { ...pools, main: [] }, priceByName: fullPrices(pools), failedCategories: ["main"],
+    });
+    render(<MealPlanner />);
+    await passNewUserWizard();
+
+    expect(screen.getByText(/Бесплатный план при этом не тратится/)).toBeTruthy();
+    expect(backend.reportPlanGenerated).not.toHaveBeenCalled();
+    expect(backend.savePlanToHistory).not.toHaveBeenCalled();
+  });
+
   it("рецепты из каталога без цен — не засчитано; после удачного повтора цен — засчитано ровно один раз", async () => {
     const pools = catalogPools();
     vi.mocked(vkusvillRecipes.fetchVkusvillPools).mockResolvedValue({ pools, priceByName: new Map() });

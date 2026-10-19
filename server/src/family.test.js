@@ -58,9 +58,10 @@ describe("joinFamily", () => {
     expect(inviteCode.length).toBeGreaterThan(6);
   });
 
-  it("уже состоит в какой-то семье (в том числе в этой же) -> отказ", () => {
+  it("уже в этой же семье -> успех без повторного добавления; в другой семье -> отказ", () => {
     joinFamily(db, { inviteCode, joiningTelegramId: 2, displayName: null, nowISO: NOW_ISO });
-    expect(joinFamily(db, { inviteCode, joiningTelegramId: 2, displayName: null, nowISO: NOW_ISO }).ok).toBe(false);
+    const again = joinFamily(db, { inviteCode, joiningTelegramId: 2, displayName: null, nowISO: NOW_ISO });
+    expect(again).toMatchObject({ ok: true, alreadyMember: true });
 
     createFamily(db, { ownerTelegramId: 3, ownerDisplayName: null, nowISO: NOW_ISO });
     const otherInviteCode = inviteCodeOf(db, 3);

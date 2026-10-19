@@ -17,6 +17,9 @@ import { confirmAction } from "../lib/confirmAction.js";
 import { isCatalogPlan, assessPlanBuild, canCompletePendingBuild, toHistoryPlan } from "../lib/planBuild.js";
 import { initPlanSession, planSessionReducer } from "../lib/planSessionReducer.js";
 
+// Подписи категорий каталога для сообщения «каталог не ответил для: …».
+const FAILED_CATEGORY_LABEL = { breakfast: "завтраков", main: "обедов и ужинов", snack: "перекусов" };
+
 /**
  * @param {object} deps
  *   initialPlanSlots — слоты из localStorage, прочитанные один раз при запуске (loadActivePlanSlots);
@@ -290,6 +293,16 @@ export function usePlanSession({
         resolvedPriceByName = result.priceByName;
         const gotAnything = neededCategories.some((c) => (resolvedPools[c] || []).length > 0);
         if (!gotAnything) throw new Error("VkusVill не вернул рецептов под эти фильтры");
+        // Каталог не ответил только по части категорий (общий лимит, частичная блокировка): раньше пул
+        // упавшей категории оставался пустым, план собирался без завтраков, а бесплатный план списывался
+        // с ложным объяснением «под ваши аллергии не нашлось рецептов». Теперь такие категории
+        // добираем базовыми рецептами, а сборку считаем вырожденной (не списываем; «Собрать заново» есть).
+        const failed = (result.failedCategories || []).filter((c) => neededCategories.includes(c));
+        if (failed.length > 0) {
+          const fallback = buildPools(diet, cuisines, devices, allergies, maxCookTime, dislikes);
+          failed.forEach((c) => { resolvedPools[c] = fallback[c] || []; });
+          catalogError = `каталог не ответил для: ${failed.map((c) => FAILED_CATEGORY_LABEL[c] || c).join(", ")}`;
+        }
       } catch (err) {
         console.warn("VkusVill MCP недоступен, откат на статические рецепты:", err.message);
         catalogError = String(err?.message || err).slice(0, 160);
@@ -327,9 +340,11 @@ export function usePlanSession({
       // Причина — в аналитику (сводка админу), чтобы такие случаи не оставались
       // невидимыми: раньше сбой каталога замечали только по жалобам.
       trackEvent("catalog_fallback", { reason: reason.slice(0, 160), store });
-    } else {
+    } else if (store === "vv") {
       completeGeneration(freshPlanView);
     }
+    // Остальные сети пока «скоро»: план для них — оценка из базовых рецептов, без заказа. Бесплатный план за такую
+    // сборку не списываем (аудит 19.10.2026: новичок, нажавший «Пятёрочка · скоро», терял недельный план).
 
     // UX-аудит 29.09.2026: профиль сохранялся ТОЛЬКО кнопкой "Сохранить как
     // профиль" в самом низу Аккаунта — почти никто её не находил, и каждый

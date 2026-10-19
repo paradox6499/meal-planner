@@ -11,7 +11,7 @@ import {
   createPendingPayment, getPaymentByYookassaId,
   countRewardedReferrals,
   getExtraPlanCredits, consumeExtraPlanCredit, getProUntil, getProEndedAt,
-  recordWarmTarget, recordPlanGeneration, countEventsSince, deleteUserData, getFamilyForUser, getFamilyByInviteCode, freeGenerationTimesSince,
+  recordWarmTarget, getSchemaVersion, recordPlanGeneration, countEventsSince, deleteUserData, getFamilyForUser, getFamilyByInviteCode, freeGenerationTimesSince,
 } from "./db.js";
 import { planReplyForUpdate, buildDiagText, buildWelcomeText, buildOpenAppKeyboard, buildHelpText, buildFamilyJoinedText, buildFeedbackAckText, buildFeedbackListText, buildFeedbackAdminNotifyText, buildSupportPromptText } from "./webhook.js";
 import { sendTelegramMessage, copyTelegramMessage } from "./telegram.js";
@@ -22,7 +22,7 @@ import {
 import { sendDigestNow } from "./digest.js";
 import { sendBackupNow } from "./backup.js";
 import { resolveIngredientPricesWithCache, probeVkusvill, getWarmQueueSize } from "./vkusvillPrices.js";
-import { parseVkusvillCallRequest, callVkusvillCached, proxyCacheKey } from "./vkusvillProxy.js";
+import { parseVkusvillCallRequest, isValidRecipesPageArgs, callVkusvillCached, proxyCacheKey } from "./vkusvillProxy.js";
 import { createPayment, fetchPaymentStatus } from "./yookassa.js";
 import { claimReferral, maybeRewardReferral, REFERRAL_REWARD_DAYS } from "./referrals.js";
 import { createFamily, joinFamily, leaveFamily, getFamilyStatus, toggleFamilyPantryItem } from "./family.js";
@@ -70,6 +70,14 @@ export const PRICES_RESPONSE_DEADLINE_MS = 18_000;
 // (попадания в общий кэш дешёвые) и живых — не попавших в кэш — в час.
 export const VKUSVILL_PROXY_RATE_LIMIT_MAX_REQUESTS = 120;
 export const VKUSVILL_PROXY_LIVE_PER_HOUR = 400;
+// Живых запросов к каталогу в минуту с одного пользователя. Общий шлюз — 50 в минуту на весь сервер; без этого
+// потолка один аккаунт или скрипт забирал все слоты, и сборки остальных уходили в «план без цен» (аудит 19.10.2026).
+// 30, а не меньше: сборка на холодном кэше честно просит около сотни названий.
+export const LIVE_PER_MINUTE_PER_USER = 30;
+function takeLiveWithMinuteCap(key, wanted, perHour) {
+  const perMinute = takeBudget(`${key}:min`, wanted, { capacity: LIVE_PER_MINUTE_PER_USER, windowMs: 60_000 });
+  return perMinute > 0 ? takeBudget(key, perMinute, { capacity: perHour, windowMs: 3_600_000 }) : 0;
+}
 // Сколько /api/plan-status ждёт сверку платежей у ЮKassa, прежде чем ответить.
 export const PLAN_STATUS_RECONCILE_WAIT_MS = 3500;
 const MAX_INGREDIENT_NAME_LENGTH = 80;
@@ -418,7 +426,13 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
       return;
     }
     if (req.method === "GET" && req.url === "/health") {
-      sendJson(res, 200, { ok: true });
+      // Живость = процесс отвечает И база читается (внешний монитор опрашивает именно это).
+      try {
+        sendJson(res, 200, { ok: true, schema: getSchemaVersion(db) });
+      } catch (err) {
+        console.error("[health] база не читается:", err.message);
+        sendJson(res, 503, { ok: false, error: "database" });
+      }
       return;
     }
     // POST /api/plan — ТОЛЬКО синхронизация meal_slots для напоминаний.
@@ -853,7 +867,11 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
         console.log(`[api/family/join] ${auth.telegramUserId} вступил в семью ${result.familyId}`);
         // Владельцу — сообщение в чат: сам он об этом иначе не узнает, пока не откроет Аккаунт. Best-effort:
         // если бот ему писать не может (не нажимал Start), вступление от этого не страдает.
-        if (target?.owner_telegram_id && target.owner_telegram_id !== auth.telegramUserId) {
+        if (
+          !result.alreadyMember && target?.owner_telegram_id && target.owner_telegram_id !== auth.telegramUserId &&
+          // не чаще одного сообщения в сутки на пару «владелец — участник»: цикл «вступить → выйти» не спамит чат владельца
+          !isRateLimited(`fam-notify:${target.owner_telegram_id}:${auth.telegramUserId}`, { maxRequests: 1, windowMs: 24 * 3_600_000 })
+        ) {
           sendTelegramMessage(botToken, target.owner_telegram_id, buildFamilyJoinedText(auth.firstName), {
             replyMarkup: buildOpenAppKeyboard(webAppUrl, "Открыть Аккаунт"),
           }).catch((err) => console.error("[api/family/join] не удалось сообщить владельцу:", err.message));
@@ -935,19 +953,19 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
       const parsed = parseVkusvillCallRequest(auth.body);
       if (!parsed.ok) return sendJson(res, 400, { ok: false, error: parsed.error });
 
-      if (parsed.tool === "vkusvill_recipes") {
-        // Спрос на страницу каталога (без привязки к человеку) — по нему
-        // фоновый подогрев (warmup.js) решает, что держать свежим.
-        try {
-          recordWarmTarget(db, proxyCacheKey(parsed.tool, parsed.args), JSON.stringify(parsed.args), new Date().toISOString());
-        } catch (err) {
-          console.warn("[vkusvill/call] не записали спрос:", err.message);
-        }
-      }
       try {
         const data = await callVkusvillCached(parsed.tool, parsed.args, {
-          takeLiveBudget: (n) => takeBudget(`vv-live:${auth.telegramUserId}`, n, { capacity: VKUSVILL_PROXY_LIVE_PER_HOUR, windowMs: 3_600_000 }),
+          takeLiveBudget: (n) => takeLiveWithMinuteCap(`vv-live:${auth.telegramUserId}`, n, VKUSVILL_PROXY_LIVE_PER_HOUR),
         });
+        if (parsed.tool === "vkusvill_recipes" && isValidRecipesPageArgs(parsed.args)) {
+          // Спрос на страницу каталога (без привязки к человеку) — по нему фоновый подогрев (warmup.js) решает,
+          // что держать свежим. Только после УСПЕШНОГО ответа и только для аргументов нормального вида.
+          try {
+            recordWarmTarget(db, proxyCacheKey(parsed.tool, parsed.args), JSON.stringify(parsed.args), new Date().toISOString());
+          } catch (err) {
+            console.warn("[vkusvill/call] не записали спрос:", err.message);
+          }
+        }
         sendJson(res, 200, { ok: true, data });
       } catch (err) {
         const status = err.httpStatus === 429 ? 429 : 502;
@@ -981,7 +999,7 @@ export function createApp(db, { botToken, adminTelegramId = null, webhookSecret 
         const resolved = await resolveIngredientPricesWithCache(db, parsed.value.names, {
           maxLiveFetches: PRICES_LIVE_FETCHES_PER_REQUEST,
           deadlineMs: PRICES_RESPONSE_DEADLINE_MS,
-          takeLiveBudget: (n) => takeBudget(`prices-live:${auth.telegramUserId}`, n, { capacity: PRICES_LIVE_FETCHES_PER_HOUR, windowMs: 3_600_000 }),
+          takeLiveBudget: (n) => takeLiveWithMinuteCap(`prices-live:${auth.telegramUserId}`, n, PRICES_LIVE_FETCHES_PER_HOUR),
         });
         sendJson(res, 200, { ok: true, prices: [...resolved.entries()].map(([name, v]) => ({ name, ...v })) });
       } catch (err) {

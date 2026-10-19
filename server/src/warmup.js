@@ -19,7 +19,7 @@
 //
 // НЕ МЕШАЕМ ПОЛЬЗОВАТЕЛЯМ. Подогрев работает, только когда общий лимит запросов
 // к ВкусВиллу занят меньше чем наполовину, и берёт мало за тик.
-import { listWarmTargets } from "./db.js";
+import { listWarmTargets, deleteWarmTarget } from "./db.js";
 import { peekProxyCache, refreshProxyEntry, proxyCacheKey } from "./vkusvillProxy.js";
 import { getUpstreamLoad, namesNeedingRefresh, queueNamesForWarming, runPriceWarmTick, getLastLiveError } from "./vkusvillPrices.js";
 
@@ -127,9 +127,15 @@ export async function runWarmupTick(db, { now = Date.now(), maxLoad = WARM_MAX_L
       refreshedPages++;
       spentAt.push(now);
     } catch (err) {
-      // ВкусВилл не ответил — не молотим впустую: подогрев встаёт на паузу (см. WARM_PAUSE_AFTER_FAILURE_MS).
       console.warn(`[warmup] не удалось обновить страницу рецептов: ${err.message}`);
       spentAt.push(now);
+      if (t.hits > 0) {
+        // Страница из «спроса» пользователей: каталог её не отдаёт (устаревшие или мусорные аргументы). Выбрасываем
+        // цель, а не останавливаем из-за неё весь подогрев (аудит 19.10.2026).
+        deleteWarmTarget(db, t.key);
+        continue;
+      }
+      // Базовая страница не обновилась — ВкусВилл не отвечает: не молотим впустую, подогрев встаёт на паузу.
       pageFailed = true;
       break;
     }

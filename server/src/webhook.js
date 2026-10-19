@@ -65,7 +65,15 @@ export function buildHelpText() {
 
 /** Владельцу семьи: к нему кто-то вступил (раньше узнать об этом можно было, только открыв Аккаунт). */
 export function buildFamilyJoinedText(displayName) {
-  const who = displayName && String(displayName).trim() ? String(displayName).trim() : "Новый участник";
+  // Имя задаёт сам вступающий, а Telegram делает ссылки и @упоминания кликабельными даже в простом тексте:
+  // вычищаем всё, из чего можно сделать ссылку (аудит 19.10.2026), и ограничиваем длину.
+  const clean = String(displayName ?? "")
+    .replace(/https?:\/\/\S+|t\.me\S*|www\.\S+|[@#]\S*|\S+\.(ru|com|org|net|me|io|рф)\b\S*/gi, " ")
+    .replace(/[\u0000-\u001f<>"«»]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 32);
+  const who = clean ? `«${clean}»` : "Новый участник";
   return `👨‍👩‍👧 ${who} вступил(а) в вашу семью в «Съедим». Теперь отметки «уже есть дома» в списке покупок у вас общие.`;
 }
 

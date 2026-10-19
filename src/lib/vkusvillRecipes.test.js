@@ -613,14 +613,24 @@ describe("fetchVkusvillPools — отказ каталога не маскиру
       if (id_category_filter === 0) throw new Error("boom");
       return { items: [], meta: { has_more: false } };
     });
-    const { pools } = await fetchVkusvillPools({ ...args, categories: ["main", "snack"] });
+    const { pools, failedCategories } = await fetchVkusvillPools({ ...args, categories: ["main", "snack"] });
     expect(Object.keys(pools).sort()).toEqual(["main", "snack"]);
+  });
+
+  it("упавшие категории возвращаются отдельным списком — по ним сборка не должна списывать бесплатный план", async () => {
+    searchRecipes.mockImplementation(async ({ id_category_filter }) => {
+      if (id_category_filter === 335) throw new Error("boom"); // перекус
+      return { items: [], meta: { has_more: false } };
+    });
+    const { failedCategories } = await fetchVkusvillPools({ ...args, categories: ["main", "snack"] });
+    expect(failedCategories).toEqual(["snack"]);
   });
 
   it("каталог ответил, но пусто под фильтры — это НЕ ошибка (пулы пустые, исключения нет)", async () => {
     searchRecipes.mockResolvedValue({ items: [], meta: { has_more: false } });
-    const { pools } = await fetchVkusvillPools({ ...args, categories: ["main"] });
+    const { pools, failedCategories } = await fetchVkusvillPools({ ...args, categories: ["main"] });
     expect(pools.main).toEqual([]);
+    expect(failedCategories).toEqual([]); // пусто под фильтры — не отказ каталога
   });
 });
 
