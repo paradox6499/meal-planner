@@ -23,7 +23,8 @@ import { AccountView } from "./components/account/AccountView.jsx";
 import { usePlanStatus } from "./hooks/usePlanStatus.js";
 import { useFamily } from "./hooks/useFamily.js";
 import { useHomeScreen } from "./hooks/useHomeScreen.js";
-import { useReferral } from "./hooks/useReferral.js";
+import { useReferral, useReferralGift } from "./hooks/useReferral.js";
+import { formatResetDate } from "./lib/format.js";
 import { useTheme } from "./hooks/useTheme.js";
 import { useWizardProfile } from "./hooks/useWizardProfile.js";
 import { usePlanSession } from "./hooks/usePlanSession.js";
@@ -81,7 +82,7 @@ export default function MealPlanner() {
   // их эффектов при запуске: заявка реферала (useReferral ниже) должна уйти
   // раньше синхронизации плана (эффект submitPlanToBackend) — та создаёт строку
   // пользователя на сервере. Проверяется тестом в App.flows.test.jsx.
-  const { planStatus, planHistory, setPlanHistory, limitBlocked, setLimitBlocked, lastPlanGate } =
+  const { planStatus, setPlanStatus, planHistory, setPlanHistory, limitBlocked, setLimitBlocked, lastPlanGate } =
     usePlanStatus({ showAccount, hasLocalPlanAtMount: initialPlanSlots.slots.some((s) => s.id === initialPlanSlots.activeSlotId) });
   const { familyStatus, familyJoinedNote, setFamilyJoinedNote, familyJoinError, setFamilyJoinError, familyActionState, handleCreateFamily, handleLeaveFamily, handleToggleFamilyPantry } =
     useFamily({ showAccount });
@@ -110,7 +111,7 @@ export default function MealPlanner() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const { referralStatus, referralNote, setReferralNote } = useReferral({ showAccount });
+  const { referralStatus, referralNote, setReferralNote, invitedByFriend } = useReferral({ showAccount });
   // Строка «Запомнили: …» под первым планом — один раз, пока человек её не закроет.
   const [profileNote, setProfileNote] = useState(null);
 
@@ -122,6 +123,11 @@ export default function MealPlanner() {
     initialPlanSlots,
     family, familyByMeal, planStatus, mealTimes, setLimitBlocked, meals, setShowAccount, diet, cuisines, devices, allergies, dislikes, maxCookTime, hasProfile, profileSnapshot, setHasProfile, setProfileNote, setStep, setOpenRecipe, resetAnswersToDefaults,
   });
+
+  // Подарок приглашённому: узнаём, что за первый план ему начислен Pro, и говорим об этом.
+  const giftUntil = useReferralGift({ invitedByFriend, planReady: done && !!planView, onStatus: setPlanStatus });
+  const [giftNoteClosed, setGiftNoteClosed] = useState(false);
+  const [inviteBannerClosed, setInviteBannerClosed] = useState(false);
 
   // Известный баг части Android-WebView (в т.ч. внутри Telegram Mini App) —
   // после программного обновления DOM (без тач-события от пользователя)
@@ -317,6 +323,12 @@ export default function MealPlanner() {
 
         {!showAccount && !limitBlocked && !lastPlanGate && assembling && <SkeletonView />}
 
+        {invitedByFriend && !inviteBannerClosed && step === 0 && !showAccount && !limitBlocked && !lastPlanGate && !done && !assembling && (
+          <DismissibleNote tone="info" onClose={() => setInviteBannerClosed(true)}>
+            🎁 Вас пригласил друг: соберите свой первый план — и вы оба получите по 7 дней Pro бесплатно.
+          </DismissibleNote>
+        )}
+
         {!showAccount && !limitBlocked && !lastPlanGate && !done && !assembling && (
           <WizardView
             currentStepKey={currentStepKey}
@@ -390,6 +402,12 @@ export default function MealPlanner() {
         )}
 
         {/* Служебные заметки — под планом, а не над ним: на первом экране человек должен видеть блюда (аудит 19.10.2026). */}
+        {giftUntil && !giftNoteClosed && !showAccount && !limitBlocked && !assembling && done && planView && (
+          <DismissibleNote tone="info" onClose={() => setGiftNoteClosed(true)}>
+            🎁 Вам начислено 7 дней Pro — до {formatResetDate(giftUntil)}. Напоминания, несколько планов и общий список на семью уже доступны.
+          </DismissibleNote>
+        )}
+
         {recomposeNote && !showAccount && !limitBlocked && !assembling && done && planView && (
           <DismissibleNote tone="info" onClose={() => setRecomposeNote(false)}>
             Настоящие цены загрузились, и мы заново подобрали блюда, чтобы план уложился в ваш бюджет.

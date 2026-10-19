@@ -65,6 +65,8 @@ describe("maybeRewardReferral", () => {
     expect(getUserPro(db, 2, inFuture)).toBe(true); // приглашённый
 
     expect(sendTelegramMessage).toHaveBeenCalledWith("T", 1, buildReferralRewardText(REFERRAL_REWARD_DAYS));
+    // и приглашённому — «вам начислено…» (раньше он не узнавал об этом нигде)
+    expect(sendTelegramMessage).toHaveBeenCalledWith("T", 2, expect.stringContaining("Вам начислено 7 дней Pro"));
   });
 
   it("не начисляет дважды за одного и того же приглашённого", async () => {
@@ -74,7 +76,7 @@ describe("maybeRewardReferral", () => {
     await maybeRewardReferral(db, 2, { botToken: "T" }, NOW_ISO);
     const second = await maybeRewardReferral(db, 2, { botToken: "T" }, NOW_ISO);
     expect(second).toEqual({ rewarded: false });
-    expect(sendTelegramMessage).toHaveBeenCalledTimes(1);
+    expect(sendTelegramMessage).toHaveBeenCalledTimes(2); // пригласившему и приглашённому — по одному, второго раза нет
   });
 
   it("достигнут потолок наград пригласившего — приглашённый всё равно получает Pro, пригласивший и уведомление — нет", async () => {
@@ -92,7 +94,9 @@ describe("maybeRewardReferral", () => {
 
     const inFuture = new Date(new Date(NOW_ISO).getTime() + REFERRAL_REWARD_DAYS * 24 * 3_600_000 - 1000).toISOString();
     expect(getUserPro(db, 999, inFuture)).toBe(true); // приглашённый — награда есть
-    expect(sendTelegramMessage).not.toHaveBeenCalled(); // пригласивший — потолок, ни награды, ни уведомления
+    // пригласивший — потолок, ни награды, ни уведомления; приглашённому сообщение уходит
+    expect(sendTelegramMessage).toHaveBeenCalledTimes(1);
+    expect(sendTelegramMessage.mock.calls[0][1]).toBe(999);
   });
 
   it("ошибка отправки уведомления не отменяет уже начисленную награду", async () => {

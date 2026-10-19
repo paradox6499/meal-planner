@@ -19,6 +19,11 @@ export function buildReferralRewardText(days) {
   return `🎉 Ваш друг собрал первый план — вам начислено ${days} ${pluralDays(days)} Pro. Спасибо, что рассказали о «Съедим»!`;
 }
 
+/** Приглашённому: раньше о начисленной неделе Pro он не узнавал нигде — ни в приложении, ни в чате. */
+export function buildInvitedRewardText(days) {
+  return `🎁 Вам начислено ${days} ${pluralDays(days)} Pro — подарок за первый план по приглашению друга. Напоминания о приёмах пищи, несколько планов и общий список на семью уже доступны.`;
+}
+
 function pluralDays(n) {
   const mod10 = n % 10, mod100 = n % 100;
   if (mod10 === 1 && mod100 !== 11) return "день";
@@ -72,6 +77,12 @@ export async function maybeRewardReferral(db, referredTelegramId, { botToken }, 
     extendUserPro(db, pending.referrer_telegram_id, { fromISO: nowISO, addDays: REFERRAL_REWARD_DAYS });
   }
   markReferralRewarded(db, referredTelegramId, nowISO);
+
+  try {
+    await sendTelegramMessage(botToken, referredTelegramId, buildInvitedRewardText(REFERRAL_REWARD_DAYS));
+  } catch (err) {
+    console.error(`[referrals] не удалось уведомить приглашённого user=${referredTelegramId}:`, err.message);
+  }
 
   if (!referrerCapped) {
     try {
